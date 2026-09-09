@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -x \"${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_hook.sh\" ]; then /bin/sh \"${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_hook.sh\"; else mkdir -p \"${CODEX_HOME:-$HOME/.codex}/agent_relay_tracker/logs\" 2>/dev/null || :; command -p cat >/dev/null 2>>\"${CODEX_HOME:-$HOME/.codex}/agent_relay_tracker/logs/error.log\" || :; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

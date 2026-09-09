@@ -1,0 +1,36 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# AgentRelay runtime state and private data
+agent_relay_login_state.json
+RecentHistoricalDialogue*.json
+raw_hook_payloads.jsonl
+agent_relay_tracker/
+**/agent_relay_tracker/
+logs/
+**/logs/
+sessions/
+**/sessions/
+session/
+**/session/
+cookies/
+**/cookies/
+cookie*
+*.session.json
+
+# Backups and local diagnostics
+backup/
+backups/
+agent_relay_backup/
+*.bak
+*.bak.*
+*.before-*
+*.log
+
+# Local environments and editor files
+.venv/
+venv/
+.DS_Store
+.idea/
+.vscode/

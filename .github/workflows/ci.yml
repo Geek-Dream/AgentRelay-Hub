@@ -1,0 +1,115 @@
+name: Static checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Compile Python
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import py_compile
+
+          for path in sorted(Path(".").rglob("*.py")):
+              py_compile.compile(str(path), doraise=True)
+          PY
+
+      - name: Validate shell syntax
+        run: sh -n hooks/agent_relay_hook.sh
+
+      - name: Validate example JSON
+        run: python -m json.tool examples/hooks.json.example >/dev/null
+
+      - name: Reject private runtime artifacts
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          blocked_names = {
+              "agent_relay_login_state.json",
+              "raw_hook_payloads.jsonl",
+          }
+          blocked_parts = {
+              "__pycache__",
+              "backup",
+              "backups",
+              "cookies",
+              "agent_relay_backup",
+              "logs",
+              "session",
+              "sessions",
+          }
+          tracked = subprocess.check_output(
+              ["git", "ls-files", "-z"]
+          ).decode().split("\0")
+          failures = []
+          for raw in tracked:
+              if not raw:
+                  continue
+              path = Path(raw)
+              lower_parts = {part.lower() for part in path.parts}
+              name = path.name.lower()
+              if (
+                  name in blocked_names
+                  or name.startswith("recenthistoricaldialogue")
+                  or "cookie" in name
+                  or "login_state" in name
+                  or "session" in name
+                  or ".before-" in name
+                  or name.endswith((".bak", ".pyc"))
+                  or any(".bak." in part.lower() for part in path.parts)
+                  or lower_parts & blocked_parts
+              ):
+                  failures.append(raw)
+          if failures:
+              raise SystemExit(
+                  "Private artifacts are tracked:\n" + "\n".join(failures)
+              )
+          PY
+
+      - name: Reject personal paths and embedded credentials
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+
+          credential = re.compile(
+              r"(?i)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|password)"
+              r"\s*[:=]\s*['\"][^'\"]+['\"]"
+          )
+          tracked = subprocess.check_output(
+              ["git", "ls-files", "-z"]
+          ).decode().split("\0")
+          failures = []
+          for raw in tracked:
+              if not raw:
+                  continue
+              path = Path(raw)
+              try:
+                  text = path.read_text(encoding="utf-8")
+              except (OSError, UnicodeDecodeError):
+                  continue
+              personal_home = "/" + "Users" + "/"
+              if personal_home in text or credential.search(text):
+                  failures.append(raw)
+          if failures:
+              raise SystemExit(
+                  "Personal paths or credentials found:\n"
+                  + "\n".join(failures)
+              )
+          PY
