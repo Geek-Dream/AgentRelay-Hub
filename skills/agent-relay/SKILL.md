@@ -10,6 +10,8 @@ AgentRelay 是 AI Agent 与外部专家模型之间的中继层，调用当前�
 
 用户明确说“调用 AgentRelay”“使用 AgentRelay”或“让 AgentRelay 分析”时，
 等价于明确请求当前配置的在线模型 Provider。“调用在线模型”等表达同样兼容。
+此类明确请求应直接调用 AgentRelay；除非用户要求补充上下文，否则不应先搜索工作区、
+猜测未知术语或改写用户的问题。
 
 ## 1. Skill 目录
 
@@ -20,11 +22,13 @@ Skill 根目录：当前文件所在目录。以下命令均应从 Skill 根目�
 ```text
 scripts/agent_relay.py
 scripts/agent_relay_login.py
+scripts/agent_relay_runtime.py
 
 RecentHistoricalDialogue-Flash.json
 RecentHistoricalDialogue-Expert.json
 
 agent_relay_login_state.json
+agent_relay_session_bindings.json（首次成功绑定会话后生成）
 ```
 
 调用前确认：
@@ -36,6 +40,10 @@ scripts/agent_relay.py
 存在。
 
 如果必要脚本缺失，停止调用，不要猜测其他路径。
+
+Provider 脚本必须使用安装器创建的 AgentRelay 独立 Python，不能使用系统 `pip` 安装依赖。
+macOS/Linux 使用 `${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python`；Windows 使用
+`%CODEX_HOME%\agentrelay-env\Scripts\python.exe`。
 
 ---
 
@@ -136,7 +144,7 @@ AgentRelay 自动触发条件已经满足
 然后必须调用：
 
 ```bash
-python3 scripts/agent_relay.py "真实问题内容" -m <模式>
+"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" scripts/agent_relay.py "真实问题内容" -m <模式>
 ```
 
 调用成功后，使用当前会话已有的 Tracker 标记机制（例如可用会话 ID 时执行
@@ -670,10 +678,15 @@ retry_count = 0
 
 # 10.在线模型调用方式
 
+DeepSeek 当前将极速、图片和专家能力统一到一个会话。`-m 1`、附带图片的请求和 `-m 2`
+继续表达请求类型并决定历史文件，但都复用同一个持久化会话绑定。绑定不存在或失效时，脚本
+扫描左侧对话栏；仍未找到则用本次问题创建新会话，重命名为 `AgentRelay-DeepSeek` 后绑定。
+不要要求用户预先创建或重命名会话。
+
 ## 极速模式
 
 ```bash
-python3 scripts/agent_relay.py "问题内容" -m 1
+"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" scripts/agent_relay.py "问题内容" -m 1
 ```
 
 支持：
@@ -701,7 +714,7 @@ UI
 ## 专家模式
 
 ```bash
-python3 scripts/agent_relay.py "问题内容" -m 2
+"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" scripts/agent_relay.py "问题内容" -m 2
 ```
 
 支持：
@@ -736,6 +749,25 @@ python3 scripts/agent_relay.py "问题内容" -m 2
 → 专家模式 -m 2
 ```
 
+## 图片转发规则
+
+用户提供了图片、截图或文件，并要求 AgentRelay 查看时，原文件是请求的必要部分。
+必须使用真实、可读取的本地路径调用：
+
+```bash
+"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" scripts/agent_relay.py \
+  "用户的原问题" -m 1 --image "/path/to/image.png"
+```
+
+多张图片对每个路径重复使用 `--image`。调用前应确认文件存在。禁止用 Agent
+自己的 OCR、摘要或视觉描述代替原图，除非用户明确要求只发送文字描述。
+
+如果输入只显示为 `[Image #N]`，且当前运行时没有提供可传给 CLI 的本地文件路径，
+不得进行纯文本 AgentRelay 调用；应直接说明无法取得原图文件，请用户提供或保存图片路径。
+
+图片调用成功后，`AGENT_RELAY_RESULT.images_count` 必须大于 `0`；否则表示本次没有
+实际转发图片，不得向用户声称在线模型已看到原图。
+
 ---
 
 # 11.在线模型回复在哪里【必须记住】
@@ -743,13 +775,13 @@ python3 scripts/agent_relay.py "问题内容" -m 2
 调用：
 
 ```bash
-python3 scripts/agent_relay.py "问题内容" -m 1
+"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" scripts/agent_relay.py "问题内容" -m 1
 ```
 
 或者：
 
 ```bash
-python3 scripts/agent_relay.py "问题内容" -m 2
+"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" scripts/agent_relay.py "问题内容" -m 2
 ```
 
 完成后：
@@ -793,6 +825,19 @@ agent_relay.py
 ```text
 优先检查终端 stdout
 ```
+
+`agent_relay.py` 是同步命令：工具调用返回即表示该进程已结束。返回后应检查：
+
+```text
+💬 AI回复:
+AGENT_RELAY_RESULT={"status":"success", ...}
+```
+
+看到 `AGENT_RELAY_RESULT` 且 `status` 为 `success` 时，禁止再使用 `sleep`、`ps` 或重复调用
+Provider。只有工具明确返回后台 session ID 时，才可轮询该 session。
+
+如果 stdout 在界面中被折叠或截断，根据 `AGENT_RELAY_RESULT.history_file` 读取对应历史 JSON
+一次，取最后一条的 `answer`。不得因输出折叠而重复调用 Provider。
 
 禁止：
 
@@ -1119,7 +1164,7 @@ Unauthorized
 提示用户：
 
 ```bash
-python3 scripts/agent_relay_login.py
+"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" scripts/agent_relay_login.py
 ```
 
 禁止：

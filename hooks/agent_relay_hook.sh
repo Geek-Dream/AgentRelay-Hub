@@ -29,7 +29,13 @@ log_debug() {
 
 PYTHON=${PYTHON:-}
 if [ -z "$PYTHON" ]; then
-    PYTHON=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)
+    if [ -x "$CODEX_HOME/agentrelay-env/bin/python" ]; then
+        PYTHON="$CODEX_HOME/agentrelay-env/bin/python"
+    elif [ -x "$CODEX_HOME/agentrelay-env/Scripts/python.exe" ]; then
+        PYTHON="$CODEX_HOME/agentrelay-env/Scripts/python.exe"
+    else
+        PYTHON=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)
+    fi
 elif [ ! -x "$PYTHON" ]; then
     PYTHON=$(command -v "$PYTHON" 2>/dev/null || true)
 fi

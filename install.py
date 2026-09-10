@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -21,10 +21,25 @@ CODEX_HOME = Path(
 TARGET_HOOKS = CODEX_HOME / "hooks"
 TARGET_SKILL = CODEX_HOME / "skills" / "agent-relay"
 HOOKS_JSON = CODEX_HOME / "hooks.json"
+VENV_DIR = CODEX_HOME / "agentrelay-env"
+VENV_PYTHON = (
+    VENV_DIR / "Scripts" / "python.exe"
+    if os.name == "nt"
+    else VENV_DIR / "bin" / "python"
+)
+REQUIREMENTS = PROJECT_ROOT / "requirements.txt"
 
-HOOK_FILES = ("agent_relay_hook.sh", "agent_relay_tracker.py")
+HOOK_FILES = (
+    "agent_relay_hook.py",
+    "agent_relay_hook.sh",
+    "agent_relay_tracker.py",
+)
 SKILL_FILES = ("SKILL.md",)
-SCRIPT_FILES = ("agent_relay.py", "agent_relay_login.py")
+SCRIPT_FILES = (
+    "agent_relay.py",
+    "agent_relay_login.py",
+    "agent_relay_runtime.py",
+)
 TRACKED_EVENTS = (
     "SessionStart",
     "UserPromptSubmit",
@@ -38,17 +53,37 @@ class InstallError(RuntimeError):
     """安装过程无法安全继续时抛出。"""
 
 
-def copy_if_missing(source: Path, destination: Path) -> bool:
-    """复制安装文件，并保留用户已有文件。"""
+def install_managed_file(source: Path, destination: Path) -> bool:
+    """Atomically install managed code and back up a differing old copy."""
 
-    if destination.exists():
-        print(f"[保留] 已有文件未覆盖：{destination}")
-        return False
     if not source.is_file():
         raise InstallError(f"发布包缺少必要文件：{source}")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, destination)
+    if destination.is_file():
+        if source.read_bytes() == destination.read_bytes():
+            print(f"[保留] 已是最新版本：{destination}")
+            return False
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        backup = destination.with_name(
+            f"{destination.name}.before-agentrelay-update.{timestamp}"
+        )
+        shutil.copy2(destination, backup)
+        print(f"[备份] {backup}")
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=destination.parent,
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        shutil.copy2(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
     print(f"[安装] {destination}")
     return True
 
@@ -57,32 +92,39 @@ def install_files() -> None:
     for filename in HOOK_FILES:
         source = PROJECT_ROOT / "hooks" / filename
         destination = TARGET_HOOKS / filename
-        installed = copy_if_missing(source, destination)
-        if installed and filename.endswith(".sh"):
+        install_managed_file(source, destination)
+        if os.name != "nt" and filename.endswith(".sh"):
             destination.chmod(destination.stat().st_mode | 0o111)
 
     for filename in SKILL_FILES:
-        copy_if_missing(
+        install_managed_file(
             PROJECT_ROOT / "skills" / "agent-relay" / filename,
             TARGET_SKILL / filename,
         )
 
     for filename in SCRIPT_FILES:
-        copy_if_missing(
+        install_managed_file(
             PROJECT_ROOT / "scripts" / filename,
             TARGET_SKILL / "scripts" / filename,
         )
 
 
+def build_hook_command(
+    python_path: Path,
+    hook_path: Path,
+    platform_name: str,
+) -> str:
+    command = [str(python_path), str(hook_path)]
+    if platform_name == "nt":
+        return subprocess.list2cmdline(command)
+    return shlex.join(command)
+
+
 def hook_command() -> str:
-    return (
-        'if [ -x "${CODEX_HOME:-$HOME/.codex}/hooks/'
-        'agent_relay_hook.sh" ]; then /bin/sh '
-        '"${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_hook.sh"; '
-        'else mkdir -p "${CODEX_HOME:-$HOME/.codex}/agent_relay_tracker/'
-        'logs" 2>/dev/null || :; command -p cat >/dev/null 2>>'
-        '"${CODEX_HOME:-$HOME/.codex}/agent_relay_tracker/logs/'
-        'error.log" || :; fi'
+    return build_hook_command(
+        VENV_PYTHON,
+        TARGET_HOOKS / "agent_relay_hook.py",
+        os.name,
     )
 
 
@@ -101,7 +143,7 @@ def load_hooks_config() -> dict:
     return config
 
 
-def has_agent_relay_hook(entries: list) -> bool:
+def find_agent_relay_hook(entries: list):
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -111,10 +153,10 @@ def has_agent_relay_hook(entries: list) -> bool:
         for hook in nested:
             if (
                 isinstance(hook, dict)
-                and "agent_relay_hook.sh" in str(hook.get("command", ""))
+                and "agent_relay_hook" in str(hook.get("command", ""))
             ):
-                return True
-    return False
+                return hook
+    return None
 
 
 def atomic_write_json(path: Path, value: dict) -> None:
@@ -149,7 +191,21 @@ def merge_hooks_json() -> None:
             raise InstallError(
                 f"{HOOKS_JSON} 中的 hooks.{event} 必须是 JSON 数组"
             )
-        if has_agent_relay_hook(entries):
+        existing_hook = find_agent_relay_hook(entries)
+        if existing_hook is not None:
+            if (
+                existing_hook.get("command") != command
+                or existing_hook.get("timeout") != 10
+                or existing_hook.get("type") != "command"
+            ):
+                existing_hook.update(
+                    {
+                        "type": "command",
+                        "command": command,
+                        "timeout": 10,
+                    }
+                )
+                changed = True
             continue
         entries.append(
             {
@@ -180,61 +236,126 @@ def merge_hooks_json() -> None:
     print(f"[安装] 已合并 {HOOKS_JSON}")
 
 
-def command_status(command: list[str]) -> bool:
+def run_checked(command: list[str], description: str) -> None:
+    """运行安装步骤，并把失败转换为清晰的安装错误。"""
+
+    print(f"[执行] {description}")
+    sys.stdout.flush()
     try:
         result = subprocess.run(
             command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
             check=False,
-            timeout=15,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0
+    except OSError as exc:
+        raise InstallError(f"无法执行 {description}：{exc}") from exc
+    if result.returncode != 0:
+        raise InstallError(
+            f"{description} 失败，退出码：{result.returncode}"
+        )
 
 
-def check_environment() -> None:
+def check_base_environment() -> None:
     print("\n环境检查：")
     print(f"[{'正常' if sys.version_info >= (3, 10) else '缺失'}] "
           f"Python {sys.version.split()[0]}（要求 >= 3.10）")
-    print(f"[{'正常' if shutil.which('codex') else '缺失'}] Codex CLI")
-    pip_ok = command_status([sys.executable, "-m", "pip", "--version"])
-    print(f"[{'正常' if pip_ok else '缺失'}] pip")
+    if shutil.which("codex"):
+        print("[正常] Codex CLI")
+    else:
+        print("[警告] PATH 中未找到 Codex CLI；文件仍会安装。")
 
-    playwright_ok = importlib.util.find_spec("playwright") is not None
-    print(f"[{'正常' if playwright_ok else '缺失'}] Playwright")
 
-    chromium_ok = False
-    if playwright_ok:
-        try:
-            browser_list = subprocess.run(
-                [sys.executable, "-m", "playwright", "install", "--list"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-                timeout=15,
-            )
-            chromium_ok = (
-                browser_list.returncode == 0
-                and "chromium" in browser_list.stdout.lower()
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            print(f"[警告] Chromium 检查失败：{exc}")
-    print(f"[{'正常' if chromium_ok else '缺失'}] Playwright Chromium")
+def ensure_virtualenv() -> None:
+    """创建 AgentRelay 独立环境，避免触发 PEP 668。"""
+
+    if VENV_PYTHON.is_file():
+        print(f"[保留] 已有 AgentRelay 虚拟环境：{VENV_DIR}")
+    elif VENV_DIR.exists():
+        raise InstallError(
+            f"虚拟环境目录存在但不完整：{VENV_DIR}。"
+            "请先移动或删除该目录后重试。"
+        )
+    else:
+        run_checked(
+            [sys.executable, "-m", "venv", str(VENV_DIR)],
+            f"创建虚拟环境 {VENV_DIR}",
+        )
+
+    pip_check = subprocess.run(
+        [str(VENV_PYTHON), "-m", "pip", "--version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if pip_check.returncode != 0:
+        raise InstallError(
+            "虚拟环境中没有可用的 pip。Ubuntu/Debian 用户请先安装 "
+            "python3-venv 后重试。"
+        )
+    print(f"[正常] 虚拟环境 Python：{VENV_PYTHON}")
+
+
+def install_dependencies() -> None:
+    if not REQUIREMENTS.is_file():
+        raise InstallError(f"缺少依赖文件：{REQUIREMENTS}")
+    run_checked(
+        [
+            str(VENV_PYTHON),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "-r",
+            str(REQUIREMENTS),
+        ],
+        "在 AgentRelay 虚拟环境中安装 Python 依赖",
+    )
+
+
+def install_and_verify_chromium() -> None:
+    """安装并确认 headed 登录所需的完整 Chromium 可执行文件。"""
+
+    run_checked(
+        [
+            str(VENV_PYTHON),
+            "-m",
+            "playwright",
+            "install",
+            "chromium",
+        ],
+        "安装 Playwright Chromium",
+    )
+
+    probe = (
+        "from pathlib import Path; "
+        "from playwright.sync_api import sync_playwright; "
+        "manager=sync_playwright().start(); "
+        "path=manager.chromium.executable_path; "
+        "manager.stop(); print(path); "
+        "raise SystemExit(0 if Path(path).is_file() else 1)"
+    )
+    result = subprocess.run(
+        [str(VENV_PYTHON), "-c", probe],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    browser_path = result.stdout.strip().splitlines()
+    if result.returncode != 0 or not browser_path:
+        detail = result.stderr.strip() or "未找到 Chromium 可执行文件"
+        raise InstallError(f"Chromium 完整浏览器验证失败：{detail}")
+    print(f"[正常] 完整 Chromium：{browser_path[-1]}")
 
 
 def print_next_steps() -> None:
     login = TARGET_SKILL / "scripts" / "agent_relay_login.py"
-    requirements = PROJECT_ROOT / "requirements.txt"
-    print("\nAgentRelay 基础安装完成。")
+    print("\nAgentRelay 一键安装完成。")
+    print(f"独立 Python 环境：{VENV_DIR}")
     print("接下来请执行：")
-    print(f"  1. {sys.executable} -m pip install -r {requirements}")
-    print(f"  2. {sys.executable} -m playwright install chromium")
-    print(f"  3. {sys.executable} {login}")
+    print(f"  1. {VENV_PYTHON} {login}")
     print("     请在浏览器中手动登录，并完成人机验证/CAPTCHA。")
-    print("  4. 重启 Codex，使其重新加载 hooks.json。")
+    print("  2. 重启 Codex，使其重新加载 hooks.json。")
 
 
 def main() -> int:
@@ -244,9 +365,12 @@ def main() -> int:
         print("[错误] 需要 Python 3.10 或更高版本。", file=sys.stderr)
         return 1
     try:
+        check_base_environment()
+        ensure_virtualenv()
+        install_dependencies()
+        install_and_verify_chromium()
         install_files()
         merge_hooks_json()
-        check_environment()
         print_next_steps()
     except (InstallError, OSError) as exc:
         print(f"[错误] 安装已停止：{exc}", file=sys.stderr)

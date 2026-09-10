@@ -4,6 +4,8 @@ __pycache__/
 
 # AgentRelay runtime state and private data
 agent_relay_login_state.json
+agent_relay_*_login_state.json
+agent_relay_session_bindings.json
 RecentHistoricalDialogue*.json
 raw_hook_payloads.jsonl
 agent_relay_tracker/
@@ -31,6 +33,7 @@ agent_relay_backup/
 # Local environments and editor files
 .venv/
 venv/
+agentrelay-env/
 .DS_Store
 .idea/
 .vscode/

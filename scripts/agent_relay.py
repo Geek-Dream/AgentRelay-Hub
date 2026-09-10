@@ -17,8 +17,8 @@ AI 网站自动对话脚本
 脚本的核心目标：
 
     1. 使用已经保存的登录状态访问 DeepSeek
-    2. 自动读取历史会话
-    3. 根据模式自动寻找目标会话
+    2. 从侧栏结构化链接发现并持久绑定目标会话
+    3. 绑定失效时重新发现；不存在时创建并重命名专用会话
     4. 自动发送用户问题
     5. 通过 DeepSeek 输入框按钮状态判断 AI 是否正在生成
     6. 等待 AI 回复完成
@@ -232,7 +232,7 @@ AI 生成过程中：
 
 运行登录脚本：
 
-    python3 agent_relay_login.py
+    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay_login.py
 
 登录成功以后，会生成：
 
@@ -256,11 +256,11 @@ AI 生成过程中：
 
 运行：
 
-    python3 agent_relay.py "你的问题" -m 1
+    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay.py "你的问题" -m 1
 
 例如：
 
-    python3 agent_relay.py "帮我分析一下这个 Java 项目" -m 1
+    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay.py "帮我分析一下这个 Java 项目" -m 1
 
 含义：
 
@@ -270,23 +270,19 @@ AI 生成过程中：
 
     极速 / 图片
 
-程序会自动寻找：
-
-    极速
-    图片
-
-相关会话。
+DeepSeek 当前将极速、图片和专家能力统一在同一个会话中；该参数继续用于图片能力和历史分类，
+不会切换到另一个 DeepSeek 会话。
 
 ------------------------------------------------------------
 【模式 2：专家 / 思考】
 
 运行：
 
-    python3 agent_relay.py "你的问题" -m 2
+    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay.py "你的问题" -m 2
 
 例如：
 
-    python3 agent_relay.py "请深入分析这个系统架构的问题" -m 2
+    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay.py "请深入分析这个系统架构的问题" -m 2
 
 含义：
 
@@ -296,12 +292,7 @@ AI 生成过程中：
 
     专家 / 思考
 
-程序会自动寻找：
-
-    专家
-    思考
-
-相关会话。
+该参数继续表达专家请求意图和历史分类，但与模式 1 共用同一个 DeepSeek 会话。
 
 ------------------------------------------------------------
 三、交互模式
@@ -309,7 +300,7 @@ AI 生成过程中：
 
 如果不传问题：
 
-    python3 agent_relay.py
+    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay.py
 
 程序会提示：
 
@@ -342,7 +333,7 @@ AI 生成过程中：
 
 问题：
 
-    python3 agent_relay.py "你的问题"
+    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay.py "你的问题"
 
 模式：
 
@@ -362,7 +353,7 @@ AI 生成过程中：
 
 例如：
 
-    python3 agent_relay.py \
+    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay.py \
         "帮我优化这个 Java 代码" \
         --mode 2
 
@@ -372,11 +363,11 @@ AI 生成过程中：
 
 第一次登录：
 
-    python3 agent_relay_login.py
+    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay_login.py
 
 然后：
 
-    python3 agent_relay.py \
+    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay.py \
         "帮我分析 Spring Boot 项目的性能问题" \
         -m 2
 
@@ -446,7 +437,7 @@ AI 生成过程中：
 
 首先重新运行：
 
-    python3 agent_relay_login.py
+    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay_login.py
 
 不要第一时间修改主脚本。
 
@@ -509,41 +500,10 @@ AI 正常生成：
 【会话查找机制】
 ------------------------------------------------------------
 
-当前根据模式寻找：
-
-模式 1：
-
-    极速
-    图片
-
-模式 2：
-
-    专家
-    思考
-
-搜索顺序：
-
-    今天
-        ↓
-    7天内
-        ↓
-    30天内
-        ↓
-    其他日期
-
-如果 DeepSeek 会话名称发生变化：
-
-    例如：
-
-    极速模式
-    专业思考
-    深度思考
-
-那么需要修改：
-
-    DeepSeekAdapter.find_target_session()
-
-中的关键词。
+当前优先读取持久化的 session_id/href；绑定失效时，从左侧对话栏的会话链接恢复。
+日期标题只用于页面展示，不参与会话识别。DeepSeek 的所有请求模式共享 unified 绑定。
+如果侧栏没有兼容的旧会话，程序发送本次真实问题创建会话，将其重命名为
+AgentRelay-DeepSeek，并保存绑定供后续直接使用。
 
 ------------------------------------------------------------
 【最新问题提取机制】
@@ -678,11 +638,7 @@ AI 正常生成：
 
     body.inner_text()
 
-但是以下两个功能暂时仍然使用页面文本：
-
-    1. 获取聊天列表
-
-    2. 提取最新 AI 回复
+会话列表已经改为侧栏结构化链接；回复提取仍保留页面文本兜底。
 
 也就是说：
 
@@ -691,8 +647,8 @@ AI 正常生成：
         ✅
 
     会话列表：
-        body 文本
-        ⚠️
+        侧栏会话 href / session_id
+        ✅
 
     AI 回复提取：
         body 文本
@@ -704,23 +660,8 @@ AI 正常生成：
 【后续推荐优化方向】
 ------------------------------------------------------------
 
-第一优先级：
-
-    将聊天列表从：
-
-        body.inner_text()
-
-    改成：
-
-        DeepSeek 真实侧边栏 DOM
-
-这样可以精确获得：
-
-    会话名称
-    日期
-    会话链接
-
-而不是解析整个网页文本。
+第一优先级：新增 Provider 时实现自己的侧栏会话链接解析、登录验证、发送和回复提取，
+并通过 ProviderRegistry 注册；不要把 Provider 分支堆进 main()。
 
 ------------------------------------------------------------
 
@@ -952,7 +893,33 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
+from urllib.parse import urljoin, urlparse
+
+try:
+    from .agent_relay_runtime import (
+        ProviderSpec,
+        SessionBindingStore,
+        SessionRef,
+        normalize_provider_name,
+        provider_spec,
+        provider_state_file,
+        resolve_codex_home,
+        session_bindings_file,
+        venv_python,
+    )
+except ImportError:
+    from agent_relay_runtime import (
+        ProviderSpec,
+        SessionBindingStore,
+        SessionRef,
+        normalize_provider_name,
+        provider_spec,
+        provider_state_file,
+        resolve_codex_home,
+        session_bindings_file,
+        venv_python,
+    )
 
 # ============================================================
 # 全局配置
@@ -961,26 +928,10 @@ from typing import Dict, List, Optional
 SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_ROOT = SCRIPT_DIR.parent
 WORKSPACE = SKILL_ROOT
-CODEX_HOME = Path(
-    os.environ.get(
-        "CODEX_HOME",
-        str(Path.home() / ".codex"),
-    )
-).expanduser()
-
-DEFAULT_STATE_FILE = (
-    CODEX_HOME
-    / "skills"
-    / "agent-relay"
-    / "agent_relay_login_state.json"
-)
-STATE_FILE = Path(
-    os.path.expanduser(
-        os.environ.get(
-            "AGENT_RELAY_LOGIN_STATE",
-            str(DEFAULT_STATE_FILE),
-        )
-    )
+CODEX_HOME = resolve_codex_home()
+VENV_PYTHON = venv_python(CODEX_HOME)
+DEFAULT_PROVIDER = normalize_provider_name(
+    os.environ.get("AGENT_RELAY_PROVIDER", "deepseek")
 )
 
 LOGIN_SCRIPT = SCRIPT_DIR / "agent_relay_login.py"
@@ -989,7 +940,7 @@ BROWSER_PATH = os.environ.get(
     "AGENT_RELAY_BROWSER_PATH"
 )
 
-PROVIDER_URL = "https://chat.deepseek.com/"
+SESSION_BINDINGS_FILE = session_bindings_file(CODEX_HOME)
 
 DEBUG_MODE = os.environ.get(
     "AGENT_RELAY_DEBUG", "false"
@@ -1083,10 +1034,12 @@ def save_dialogue_history(mode, question, answer, image_paths=None):
             json.dump(history, f, ensure_ascii=False, indent=2)
 
         print(f"✅ 对话已保存到 {history_file}，当前共 {len(history)} 条记录")
+        return history_file
 
     except Exception as e:
         log_error(f"保存历史对话失败: {e}")
         print(f"⚠️ 保存历史对话失败: {e}")
+        return None
 
 
 def manage_images(image_paths):
@@ -1196,7 +1149,19 @@ class SiteAdapter:
     后续新增网站时继承这个类即可。
     """
 
-    name = "unknown"
+    spec = ProviderSpec(
+        name="unknown-provider",
+        base_url="https://invalid.example/",
+    )
+    mode_keywords = {}
+
+    @property
+    def name(self) -> str:
+        return self.spec.name
+
+    @property
+    def base_url(self) -> str:
+        return self.spec.base_url
 
     def is_match(self, page) -> bool:
         """
@@ -1210,17 +1175,80 @@ class SiteAdapter:
         """
         raise NotImplementedError
 
-    def get_chat_list(self, page):
+    def list_sessions(self, page) -> List[SessionRef]:
         """
-        获取聊天列表。
+        从 Provider 的侧栏获取结构化会话列表。
         """
         raise NotImplementedError
 
-    def find_target_session(self, chat_list, mode="default"):
+    def find_target_session(
+            self,
+            sessions: List[SessionRef],
+            mode="default"
+    ) -> Optional[SessionRef]:
         """
-        查找目标会话。
+        按 Provider 自己的模式关键词查找目标会话。
+
+        标题只用于首次发现或绑定失效后的恢复；正常调用直接使用持久化 href。
         """
+        keywords = self.mode_keywords.get(self.session_scope(mode), ())
+        ranked = []
+        for index, session in enumerate(sessions):
+            normalized_title = " ".join(session.title.split()).casefold()
+            for keyword_index, keyword in enumerate(keywords):
+                normalized_keyword = " ".join(str(keyword).split()).casefold()
+                if not normalized_keyword:
+                    continue
+                if normalized_title == normalized_keyword:
+                    match_rank = 0
+                elif normalized_title.startswith(normalized_keyword):
+                    match_rank = 1
+                elif normalized_keyword in normalized_title:
+                    match_rank = 2
+                else:
+                    continue
+                ranked.append(
+                    (match_rank, keyword_index, index, session)
+                )
+                break
+        if not ranked:
+            return None
+        ranked.sort(key=lambda item: item[:3])
+        return ranked[0][3]
+
+    def is_session_reference_valid(self, session: SessionRef) -> bool:
+        """Validate a persisted reference before navigating to it."""
+        return session.provider == self.name
+
+    def session_scope(self, mode: str) -> str:
+        """Return the binding key; Providers may unify multiple request modes."""
+        return mode
+
+    def open_session(self, page, session: SessionRef):
         raise NotImplementedError
+
+    def is_session_open(self, page, session: SessionRef) -> bool:
+        raise NotImplementedError
+
+    def canonical_session_title(self, mode: str) -> str:
+        raise NotImplementedError
+
+    def prepare_new_session(self, page, mode: str) -> None:
+        raise NotImplementedError
+
+    def current_session(self, page, title="") -> Optional[SessionRef]:
+        raise NotImplementedError
+
+    def rename_session(
+            self,
+            page,
+            session: SessionRef,
+            title: str
+    ) -> SessionRef:
+        raise NotImplementedError
+
+    def configure_mode(self, page, mode: str) -> None:
+        """Apply Provider-specific mode controls when the site has them."""
 
     def send_message(self, page, question):
         """
@@ -1268,12 +1296,27 @@ class DeepSeekAdapter(SiteAdapter):
       AI 回复完成
     """
 
-    name = "deepseek"
+    spec = provider_spec("deepseek")
+
+    mode_keywords = {
+        "unified": (
+            "AgentRelay-DeepSeek",
+            "AgentRelay",
+            "DeepSeek",
+            "专家",
+            "思考",
+            "极速",
+            "图片",
+        ),
+    }
 
     URL_KEYWORDS = (
         "chat.deepseek.com",
         "deepseek.com",
     )
+
+    SESSION_LINK_SELECTOR = 'a[href*="/a/chat/s/"]'
+    SESSION_PATH_PREFIX = "/a/chat/s/"
 
     # DeepSeek 输入框发送/停止按钮 icon
     ICON_SELECTOR = (
@@ -1308,10 +1351,11 @@ class DeepSeekAdapter(SiteAdapter):
         """
 
         try:
-            url = page.url.lower()
+            hostname = (urlparse(page.url).hostname or "").lower()
 
             if any(
-                    keyword in url
+                    hostname == keyword
+                    or hostname.endswith("." + keyword)
                     for keyword in self.URL_KEYWORDS
             ):
                 return True
@@ -1355,7 +1399,7 @@ class DeepSeekAdapter(SiteAdapter):
         print("打开 DeepSeek...")
 
         page.goto(
-            PROVIDER_URL,
+            self.base_url,
             wait_until="domcontentloaded",
             timeout=30000
         )
@@ -1372,164 +1416,212 @@ class DeepSeekAdapter(SiteAdapter):
     # 获取聊天列表
     # ========================================================
 
-    def get_chat_list(
+    def _session_from_link(
+            self,
+            title: str,
+            href: str
+    ) -> Optional[SessionRef]:
+        absolute_href = urljoin(self.base_url, href)
+        parsed = urlparse(absolute_href)
+        hostname = (parsed.hostname or "").lower()
+        if not any(
+                hostname == keyword
+                or hostname.endswith("." + keyword)
+                for keyword in self.URL_KEYWORDS
+        ):
+            return None
+        marker_index = parsed.path.find(self.SESSION_PATH_PREFIX)
+        if marker_index < 0:
+            return None
+        session_id = parsed.path[
+            marker_index + len(self.SESSION_PATH_PREFIX):
+        ].split("/", 1)[0]
+        if not session_id:
+            return None
+        normalized_title = " ".join((title or "").split())
+        return SessionRef(
+            provider=self.name,
+            session_id=session_id,
+            title=normalized_title,
+            href=absolute_href,
+        )
+
+    def list_sessions(
             self,
             page
-    ) -> Dict[str, List[str]]:
-        """
-        获取 DeepSeek 对话列表。
+    ) -> List[SessionRef]:
+        """Discover sidebar sessions without depending on dates or CSS hashes."""
 
-        当前仍然使用页面文本解析。
+        sessions = []
+        seen_ids = set()
+        unchanged_rounds = 0
 
-        后续如果确定 DeepSeek 侧边栏 DOM，
-        可以进一步升级成 DOM 定位。
-        """
-
-        body_text = page.inner_text(
-            "body"
-        )
-
-        lines = [
-            line.strip()
-            for line in body_text.split("\n")
-            if line.strip()
-        ]
-
-        result = {}
-        current_date = None
-
-        date_keywords = [
-            "今天",
-            "7天内",
-            "30天内",
-        ]
-
-        for line in lines:
-
-            is_date = False
-
-            # --------------------------------------------
-            # 中文日期分组
-            # --------------------------------------------
-
-            for keyword in date_keywords:
-
-                if line == keyword:
-                    current_date = keyword
-                    result[current_date] = []
-
-                    is_date = True
-                    break
-
-            if is_date:
-                continue
-
-            # --------------------------------------------
-            # YYYY-MM-DD 日期
-            # --------------------------------------------
-
-            parts = line.split("-")
-
-            if (
-                    len(parts) == 3
-                    and len(parts[0]) == 4
-                    and parts[0].isdigit()
-                    and parts[1].isdigit()
-                    and parts[2].isdigit()
-            ):
-                current_date = line
-                result[current_date] = []
-
-                continue
-
-            # --------------------------------------------
-            # 会话名称
-            # --------------------------------------------
-
-            if current_date:
-                result.setdefault(
-                    current_date,
-                    []
-                ).append(line)
-
-        return result
-
-    # ========================================================
-    # 查找目标会话
-    # ========================================================
-
-    def find_target_session(
-            self,
-            chat_list,
-            mode="default"
-    ):
-        """
-        根据模式寻找目标会话。
-
-        default：
-            极速 / 图片
-
-        expert：
-            专家 / 思考
-        """
-
-        keywords_map = {
-
-            "default": [
-                "极速",
-                "图片",
-            ],
-
-            "expert": [
-                "专家",
-                "思考",
-            ],
-        }
-
-        target_keywords = keywords_map.get(
-            mode,
-            keywords_map["default"]
-        )
-
-        date_order = [
-            "今天",
-            "7天内",
-            "30天内",
-        ]
-
-        sorted_dates = []
-
-        for date in date_order:
-
-            if date in chat_list:
-                sorted_dates.append(date)
-
-        # 加入其他日期
-        for date in chat_list:
-
-            if date not in sorted_dates:
-                sorted_dates.append(date)
-
-        # 从最新日期开始寻找
-        for date in sorted_dates:
-
-            sessions = chat_list.get(
-                date,
-                []
+        for _ in range(80):
+            rows = page.locator(
+                self.SESSION_LINK_SELECTOR
+            ).evaluate_all(
+                """
+                elements => elements.map(element => ({
+                    title: (element.innerText || element.textContent || '').trim(),
+                    href: element.getAttribute('href') || ''
+                }))
+                """
             )
 
-            for session_name in sessions:
+            before = len(seen_ids)
+            for row in rows:
+                session = self._session_from_link(
+                    str(row.get("title", "")),
+                    str(row.get("href", "")),
+                )
+                if session is None or session.session_id in seen_ids:
+                    continue
+                seen_ids.add(session.session_id)
+                sessions.append(session)
 
-                for keyword in target_keywords:
+            unchanged_rounds = (
+                unchanged_rounds + 1
+                if len(seen_ids) == before
+                else 0
+            )
 
-                    if keyword in session_name:
-                        return {
-                            "name": session_name,
-                            "date": date,
-                            "mode": mode,
+            scroll_result = page.locator(
+                self.SESSION_LINK_SELECTOR
+            ).first.evaluate(
+                """
+                node => {
+                    let current = node.parentElement;
+                    while (current && current !== document.body) {
+                        const style = getComputedStyle(current);
+                        const scrollable = /auto|scroll/.test(style.overflowY) &&
+                            current.scrollHeight > current.clientHeight + 4;
+                        if (scrollable) {
+                            const before = current.scrollTop;
+                            current.scrollTop = Math.min(
+                                current.scrollTop + Math.max(current.clientHeight * 0.8, 240),
+                                current.scrollHeight
+                            );
+                            return {
+                                found: true,
+                                moved: current.scrollTop > before,
+                                atEnd: current.scrollTop + current.clientHeight >=
+                                    current.scrollHeight - 2
+                            };
                         }
+                        current = current.parentElement;
+                    }
+                    return {found: false, moved: false, atEnd: true};
+                }
+                """
+            ) if rows else {
+                "found": False,
+                "moved": False,
+                "atEnd": True,
+            }
 
+            if (
+                    not scroll_result.get("found")
+                    or (
+                        scroll_result.get("atEnd")
+                        and unchanged_rounds >= 2
+                    )
+                    or unchanged_rounds >= 3
+            ):
+                break
+            page.wait_for_timeout(150)
+
+        debug_log(
+            f"Provider {self.name} discovered {len(sessions)} sidebar sessions"
+        )
+        return sessions
+
+    def is_session_reference_valid(self, session: SessionRef) -> bool:
+        if not super().is_session_reference_valid(session):
+            return False
+        parsed = self._session_from_link(session.title, session.href)
+        return parsed is not None and parsed.session_id == session.session_id
+
+    def canonical_session_title(self, mode: str) -> str:
+        return "AgentRelay-DeepSeek"
+
+    def session_scope(self, mode: str) -> str:
+        # DeepSeek's current model unifies instant, vision and expert requests.
+        # Keep the request mode in output/history, but route every mode to one chat.
+        return "unified"
+
+    def configure_mode(self, page, mode: str) -> None:
+        # The current DeepSeek model handles instant, vision and expert prompts
+        # in the same conversation. Do not couple routing to UI mode toggles.
         return None
+
+    def prepare_new_session(self, page, mode: str) -> None:
+        print(
+            f"\n未找到 {self.canonical_session_title(mode)}，"
+            "正在创建新会话..."
+        )
+        page.goto(
+            self.base_url,
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
+        page.wait_for_timeout(1500)
+        if page.locator("textarea").count() == 0:
+            raise RuntimeError("无法打开 DeepSeek 新会话输入框")
+        self.configure_mode(page, mode)
+
+    def current_session(self, page, title="") -> Optional[SessionRef]:
+        return self._session_from_link(title, page.url)
+
+    def rename_session(
+            self,
+            page,
+            session: SessionRef,
+            title: str
+    ) -> SessionRef:
+        selector = (
+            f'a[href*="{self.SESSION_PATH_PREFIX}{session.session_id}"]'
+        )
+        link = page.locator(selector).first
+        try:
+            link.wait_for(state="attached", timeout=5000)
+            link.hover()
+            more_button = link.locator('[role="button"]').last
+            more_button.click()
+
+            rename_option = page.get_by_text("Rename", exact=True)
+            if rename_option.count() == 0:
+                rename_option = page.get_by_text("重命名", exact=True)
+            rename_option.first.click()
+
+            name_input = page.locator(
+                'input[type="text"].ds-input__input:visible'
+            ).first
+            name_input.fill(title)
+            name_input.press("Enter")
+            deadline = time.monotonic() + 5
+            actual_title = ""
+            while time.monotonic() < deadline:
+                page.wait_for_timeout(200)
+                actual_title = " ".join(link.inner_text().split())
+                if actual_title == title:
+                    break
+            if actual_title != title:
+                raise RuntimeError(
+                    f"重命名未生效，侧栏当前名称：{actual_title!r}"
+                )
+        except Exception as exc:
+            raise RuntimeError(
+                f"DeepSeek 会话重命名失败：{exc}"
+            ) from exc
+
+        renamed = SessionRef(
+            provider=session.provider,
+            session_id=session.session_id,
+            title=title,
+            href=session.href,
+        )
+        print(f"✅ 新会话已重命名为：{title}")
+        return renamed
 
     # ========================================================
     # 获取输入框按钮图标状态
@@ -1783,6 +1875,7 @@ class DeepSeekAdapter(SiteAdapter):
         # 第二阶段：等待 ■ → ↑
         # ----------------------------------------------------
         print("等待 AI 回复完成...")
+        last_progress_report = -1
 
         while (time.time() - start_time) < timeout:
             status = self.get_button_status(page)
@@ -1799,7 +1892,9 @@ class DeepSeekAdapter(SiteAdapter):
                     return True
 
             elapsed = int(time.time() - start_time)
-            print(f"\r⏳ AI 正在生成... {elapsed}s", end="", flush=True)
+            if elapsed != last_progress_report and elapsed % 3 == 0:
+                print(f"⏳ AI 正在生成... {elapsed}s", flush=True)
+                last_progress_report = elapsed
             time.sleep(0.2)
 
         print(f"\n⚠️ AI 回复超过 {timeout} 秒，停止等待")
@@ -1852,7 +1947,7 @@ class DeepSeekAdapter(SiteAdapter):
     def open_session(
             self,
             page,
-            session_name
+            session: SessionRef
     ):
         """
         打开指定 DeepSeek 会话。
@@ -1860,28 +1955,36 @@ class DeepSeekAdapter(SiteAdapter):
 
         print(
             f"\n正在打开会话: "
-            f"{session_name}"
+            f"{session.title or session.session_id}"
         )
 
-        # 优先使用文本定位
-        link = page.locator(
-            "a",
-            has_text=session_name
-        ).first
-
-        if link.count() == 0:
+        if not self.is_session_reference_valid(session):
             raise RuntimeError(
-                f"未找到会话：{session_name}"
+                f"无效的 {self.name} 会话引用：{session.session_id}"
             )
 
-        link.click()
+        page.goto(
+            session.href,
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
+        page.wait_for_timeout(1500)
 
-        page.wait_for_timeout(2000)
+        if not self.is_session_open(page, session):
+            raise RuntimeError(
+                f"会话不可用或已删除：{session.session_id}"
+            )
 
         print(
             f"已打开会话: "
-            f"{session_name}"
+            f"{session.title or session.session_id}"
         )
+
+    def is_session_open(self, page, session: SessionRef) -> bool:
+        current = self._session_from_link(session.title, page.url)
+        if current is None or current.session_id != session.session_id:
+            return False
+        return page.locator("textarea").count() > 0
 
     # ========================================================
     # 发送消息
@@ -2427,6 +2530,39 @@ class DeepSeekAdapter(SiteAdapter):
             return False
 
 
+class ProviderRegistry:
+    """Create Provider adapters without adding Provider branches to main()."""
+
+    def __init__(self):
+        self._factories = {}
+        self.register(DeepSeekAdapter)
+
+    def register(self, factory) -> None:
+        adapter = factory()
+        if not isinstance(adapter, SiteAdapter):
+            raise TypeError("Provider factory 必须创建 SiteAdapter")
+        if adapter.name in self._factories:
+            raise ValueError(f"Provider 已注册：{adapter.name}")
+        self._factories[adapter.name] = factory
+
+    @property
+    def names(self):
+        return tuple(sorted(self._factories))
+
+    def create(self, provider: str) -> SiteAdapter:
+        provider_name = normalize_provider_name(provider)
+        factory = self._factories.get(provider_name)
+        if factory is None:
+            supported = ", ".join(self.names)
+            raise ValueError(
+                f"尚未实现 Provider：{provider_name}；当前支持：{supported}"
+            )
+        return factory()
+
+    def create_all(self) -> List[SiteAdapter]:
+        return [self._factories[name]() for name in self.names]
+
+
 class SiteDetector:
     """
     网站检测器。
@@ -2442,11 +2578,9 @@ class SiteDetector:
     即可。
     """
 
-    def __init__(self):
-
-        self.adapters = [
-            DeepSeekAdapter(),
-        ]
+    def __init__(self, registry=None):
+        self.registry = registry or ProviderRegistry()
+        self.adapters = self.registry.create_all()
 
     def detect(
             self,
@@ -2492,7 +2626,7 @@ class SiteDetector:
 # 登录状态
 # ============================================================
 
-def check_login() -> bool:
+def check_login(state_file: Path) -> bool:
     """
     检查当前 Provider 的登录状态文件。
 
@@ -2505,14 +2639,14 @@ def check_login() -> bool:
     """
 
     if not os.path.exists(
-            STATE_FILE
+            state_file
     ):
         return False
 
     try:
 
         with open(
-                STATE_FILE,
+                state_file,
                 "r",
                 encoding="utf-8"
         ) as file:
@@ -2542,7 +2676,8 @@ def check_login() -> bool:
 # ============================================================
 
 def create_browser_context(
-        playwright
+        playwright,
+        state_file: Path
 ):
     """
     创建 Playwright Browser Context。
@@ -2569,7 +2704,7 @@ def create_browser_context(
     )
 
     context = browser.new_context(
-        storage_state=STATE_FILE
+        storage_state=state_file
     )
 
     return browser, context
@@ -2582,7 +2717,8 @@ def create_browser_context(
 def run_provider(
         question,
         mode,
-        image_paths=None
+        image_paths=None,
+        provider_name=DEFAULT_PROVIDER,
 ):
     """
     执行当前 Provider 的自动对话。
@@ -2592,7 +2728,16 @@ def run_provider(
         sync_playwright
     )
 
-    adapter = DeepSeekAdapter()
+    registry = ProviderRegistry()
+    adapter = registry.create(provider_name)
+    state_file = provider_state_file(
+        adapter.name,
+        CODEX_HOME,
+    )
+    binding_store = SessionBindingStore(
+        SESSION_BINDINGS_FILE
+    )
+    binding_scope = adapter.session_scope(mode)
 
     with sync_playwright() as p:
 
@@ -2603,7 +2748,8 @@ def run_provider(
 
             browser, context = (
                 create_browser_context(
-                    p
+                    p,
+                    state_file,
                 )
             )
 
@@ -2621,7 +2767,7 @@ def run_provider(
             # 网站检测
             # ------------------------------------------------
 
-            detector = SiteDetector()
+            detector = SiteDetector(registry)
 
             detected_adapter = (
                 detector.detect(
@@ -2637,139 +2783,43 @@ def run_provider(
             # 确保当前使用对应 Adapter
             adapter = detected_adapter
 
-            # ------------------------------------------------
-            # 获取会话列表
-            # ------------------------------------------------
+            target = binding_store.get(adapter.name, binding_scope)
+            creating_new_session = False
 
-            print(
-                "\n正在获取对话列表..."
-            )
-
-            chat_list = (
-                adapter.get_chat_list(
-                    page
-                )
-            )
-
-            if not chat_list:
-                print(
-                    "❌ 未能获取到对话列表。"
-                )
-
-                print(
-                    "可能原因："
-                )
-
-                print(
-                    "  1. 登录状态失效"
-                )
-
-                print(
-                    "  2. 页面加载失败"
-                )
-
-                print(
-                    "  3. DeepSeek 页面结构发生变化"
-                )
-
-                return None
-
-            # ------------------------------------------------
-            # 输出对话列表
-            # ------------------------------------------------
-
-            print(
-                "\n=== 你的 DeepSeek 对话列表 ===\n"
-            )
-
-            for date, sessions in (
-                    chat_list.items()
-            ):
-
-                print(
-                    f"[{date}]"
-                )
-
-                for session in sessions:
+            if target and adapter.is_session_reference_valid(target):
+                try:
                     print(
-                        f"    - {session}"
+                        f"\n使用已绑定会话："
+                        f"{target.title or target.session_id}"
                     )
+                    adapter.open_session(page, target)
+                    adapter.configure_mode(page, mode)
+                except Exception as exc:
+                    log_error(
+                        f"绑定会话失效 provider={adapter.name} "
+                        f"mode={mode}: {exc}"
+                    )
+                    print("⚠️ 已绑定会话失效，重新扫描侧栏。")
+                    binding_store.remove(adapter.name, binding_scope)
+                    target = None
 
-            # ------------------------------------------------
-            # 查找两个模式的目标会话
-            # ------------------------------------------------
+            if target is None:
+                print("\n正在扫描左侧对话栏...")
+                sessions = adapter.list_sessions(page)
+                print(f"发现 {len(sessions)} 个会话。")
+                target = adapter.find_target_session(sessions, mode=mode)
 
-            default_target = (
-                adapter.find_target_session(
-                    chat_list,
-                    mode="default"
-                )
-            )
-
-            expert_target = (
-                adapter.find_target_session(
-                    chat_list,
-                    mode="expert"
-                )
-            )
-
-            print(
-                "\n=== 智能匹配结果 ===\n"
-            )
-
-            if default_target:
-
-                print(
-                    "✅ 极速/图片对话（默认）："
-                    f"{default_target['name']}"
-                    f"（{default_target['date']}）"
-                )
-
-            else:
-
-                print(
-                    "❌ 未找到极速/图片类对话"
-                )
-
-            if expert_target:
-
-                print(
-                    "✅ 专家/思考对话（深度思考）："
-                    f"{expert_target['name']}"
-                    f"（{expert_target['date']}）"
-                )
-
-            else:
-
-                print(
-                    "❌ 未找到专家/思考类对话"
-                )
-
-            # ------------------------------------------------
-            # 选择目标
-            # ------------------------------------------------
-
-            target = (
-                default_target
-                if mode == "default"
-                else expert_target
-            )
-
-            if not target:
-                print(
-                    "\n❌ 未找到当前模式对应的目标会话"
-                )
-
-                return None
-
-            # ------------------------------------------------
-            # 打开目标会话
-            # ------------------------------------------------
-
-            adapter.open_session(
-                page,
-                target["name"]
-            )
+                if target is not None:
+                    print(
+                        f"✅ 找到{adapter.canonical_session_title(mode)}类会话："
+                        f"{target.title}"
+                    )
+                    adapter.open_session(page, target)
+                    adapter.configure_mode(page, mode)
+                    binding_store.put(binding_scope, target)
+                else:
+                    creating_new_session = True
+                    adapter.prepare_new_session(page, mode)
 
             # ------------------------------------------------
             # 发送问题
@@ -2818,6 +2868,21 @@ def run_provider(
                 image_path=final_images if final_images else None
             )
 
+            if creating_new_session:
+                deadline = time.monotonic() + 15
+                target = adapter.current_session(
+                    page,
+                    adapter.canonical_session_title(mode),
+                )
+                while target is None and time.monotonic() < deadline:
+                    page.wait_for_timeout(200)
+                    target = adapter.current_session(
+                        page,
+                        adapter.canonical_session_title(mode),
+                    )
+                if target is None:
+                    raise RuntimeError("发送后未获得新会话 URL")
+
             # ------------------------------------------------
             # 等待 AI 回复
             # ------------------------------------------------
@@ -2851,13 +2916,30 @@ def run_provider(
                 )
             )
 
+            if creating_new_session:
+                canonical_title = adapter.canonical_session_title(mode)
+                try:
+                    target = adapter.rename_session(
+                        page,
+                        target,
+                        canonical_title,
+                    )
+                except Exception as exc:
+                    log_error(
+                        f"新会话已创建但重命名失败 "
+                        f"provider={adapter.name} mode={mode}: {exc}"
+                    )
+                    print(f"⚠️ 新会话已创建，但重命名失败：{exc}")
+                binding_store.put(binding_scope, target)
+
             # ------------------------------------------------
             # 返回结果（包含实际使用的图片列表）
             # ------------------------------------------------
 
             return {
-                "session_name": target["name"],
-                "date": target["date"],
+                "provider": adapter.name,
+                "session_id": target.session_id,
+                "session_name": target.title or target.session_id,
                 "mode": mode,
                 "question": question,
                 "answer": answer,
@@ -2925,7 +3007,22 @@ def main():
         )
     )
 
+    parser.add_argument(
+        "--provider",
+        default=DEFAULT_PROVIDER,
+        help=(
+            "在线模型 Provider；也可通过 AGENT_RELAY_PROVIDER 设置。"
+            "当前支持：deepseek"
+        )
+    )
+
     args = parser.parse_args()
+    try:
+        provider_name = normalize_provider_name(args.provider)
+        provider_adapter = ProviderRegistry().create(provider_name)
+    except ValueError as exc:
+        parser.error(str(exc))
+    state_file = provider_state_file(provider_name, CODEX_HOME)
 
     print(
         "=" * 60
@@ -2943,9 +3040,9 @@ def main():
     # 检查登录
     # ========================================================
 
-    if not check_login():
+    if not check_login(state_file):
         print(
-            "\n❌ 未检测到当前 Provider（DeepSeek）的登录状态。"
+            f"\n❌ 未检测到当前 Provider（{provider_name}）的登录状态。"
         )
 
         print(
@@ -2953,7 +3050,7 @@ def main():
         )
 
         print(
-            f"   python3 {LOGIN_SCRIPT}"
+            f"   {VENV_PYTHON} {LOGIN_SCRIPT}"
         )
 
         print()
@@ -2961,7 +3058,7 @@ def main():
         return
 
     print(
-        "\n✅ 检测到登录状态文件。"
+        f"\n✅ 检测到 {provider_adapter.name} 登录状态文件。"
     )
 
     # ========================================================
@@ -2994,6 +3091,16 @@ def main():
     if args.mode is not None:
 
         mode_choice = args.mode
+
+    elif (
+            provider_adapter.session_scope("default")
+            == provider_adapter.session_scope("expert")
+    ):
+        mode_choice = "1"
+        print(
+            f"\n{provider_adapter.name} 使用统一会话，"
+            "无需选择极速/图片/专家模式。"
+        )
 
     else:
 
@@ -3030,7 +3137,8 @@ def main():
         result = run_provider(
             question,
             mode,
-            image_paths=cli_images if cli_images else None
+            image_paths=cli_images if cli_images else None,
+            provider_name=provider_name,
         )
 
         if not result:
@@ -3039,7 +3147,7 @@ def main():
         # ----------------------------------------------------
         # 保存历史对话（新增）
         # ----------------------------------------------------
-        save_dialogue_history(
+        history_file = save_dialogue_history(
             mode=result["mode"],
             question=result["question"],
             answer=result["answer"],
@@ -3057,7 +3165,7 @@ def main():
         print(
             f"📋 会话: "
             f"{result['session_name']} "
-            f"({result['date']})"
+            f"[{result['provider']}]"
         )
 
         print(
@@ -3075,7 +3183,7 @@ def main():
         )
 
         print(
-            "\n💬 AI 回复:"
+            "\n💬 AI回复:"
         )
 
         print(
@@ -3084,6 +3192,20 @@ def main():
 
         print(
             "\n" + "=" * 60
+        )
+
+        completion = {
+            "status": "success",
+            "provider": result["provider"],
+            "mode": result["mode"],
+            "answer_chars": len(result["answer"]),
+            "images_count": len(result.get("images", [])),
+            "history_saved": history_file is not None,
+            "history_file": history_file,
+        }
+        print(
+            "AGENT_RELAY_RESULT="
+            + json.dumps(completion, ensure_ascii=False)
         )
 
     except KeyboardInterrupt:

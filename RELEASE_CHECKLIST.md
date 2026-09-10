@@ -14,6 +14,8 @@
 ## Installation
 
 - [ ] `install.py` passes an isolated first-install test
+- [ ] Installer creates `agentrelay-env` and installs requirements without system pip
+- [ ] Full Playwright Chromium executable is verified for headed login
 - [ ] Existing `hooks.json` entries are preserved during merge
 - [ ] `CODEX_HOME` and default `$HOME/.codex` paths are documented
 - [ ] Installed shell Hook is executable
