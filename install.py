@@ -40,6 +40,7 @@ SCRIPT_FILES = (
     "agent_relay_login.py",
     "agent_relay_runtime.py",
     "orchestrator_runtime.py",
+    "orchestrator_store.py",
 )
 CONFIG_FILES = ("model_registry.json",)
 TRACKED_EVENTS = (

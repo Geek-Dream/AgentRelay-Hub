@@ -167,6 +167,15 @@ AgentRelay 自动触发条件已经满足
 
 # 3. 当前问题
 
+Agent Orchestrator 的编排基础协议、Memory、需求卡和 checkpoint 数据层见
+[references/orchestrator-v1.md](references/orchestrator-v1.md)。需要编排时先按任务复杂度选择模式：
+
+- 小改动走 `direct` 或 `worker`，优先使用已配置的本地模型；Codex 负责审查结果。
+- 需要联网排查、依赖分析或重复失败时走 `expert`；专家默认只给建议，不直接修改工作区。
+- 跨前后端、数据库、消息队列或部署的高风险任务走 `commander`；先生成需求卡并等待确认，再分配子任务。
+
+任何自动派发都必须遵守任务预算、最大深度、最大并发和资源 Owner 约束。模型选择由 Codex 根据注册表能力、当前配置和任务上下文决定；Hook 只产生观测和触发提示。
+
 Agent 在处理技术任务时，需要识别：
 
 ```text
