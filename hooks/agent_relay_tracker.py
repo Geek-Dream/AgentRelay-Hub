@@ -2269,6 +2269,9 @@ def print_status(
             )
         ),
 
+        "task_id": state.get("task_id") or state.get("problem_id"),
+        "relay_round": int(state.get("relay_round", 0) or 0),
+
         "resolved": (
             state.get(
                 "resolved",
@@ -2301,6 +2304,9 @@ def print_status(
             effective_seconds,
             3,
         ),
+
+        "round_effective_time_seconds": round(float(state.get("round_effective_time_seconds", effective_seconds) or 0), 3),
+        "cumulative_effective_time_seconds": round(float(state.get("cumulative_effective_time_seconds", effective_seconds) or 0), 3),
 
         "effective_time_minutes": round(
             effective_seconds / 60,

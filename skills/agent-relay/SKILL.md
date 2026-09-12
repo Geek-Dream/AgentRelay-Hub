@@ -64,7 +64,7 @@ macOS/Linux 使用 `${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python`；Win
 
 注意：任务按 `task_id` 独立追踪。专家调用完成后开启新的 `relay_round`，本轮计时重新开始，但累计处理时间保留。新任务从自己的 `weight=1` 开始，并不会继承其他任务状态。
 
-权重规则为：0–5 分钟 `weight=1`、5–10 分钟 `weight=2`、10–15 分钟 `weight=3`。`weight=3` 表示接近专家阈值；达到 15 分钟才是时间强制触发条件。
+权重规则为：开始处理时 `weight=1`；达到 5 分钟升为 `weight=2`；达到 10 分钟升为 `weight=3`；达到 15 分钟必须进入专家决策。`weight=3` 表示当前轮次已处理至少 10 分钟，但在 15 分钟前仍由 Codex 判断是否提前求助。
 
 注意：
 
@@ -72,19 +72,7 @@ macOS/Linux 使用 `${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python`；Win
 weight = 3
 ```
 
-只是问题难度等级：
-
-```text
-不是在线模型的独立触发条件
-```
-
-例如：
-
-```text
-有效处理时间 = 10 分钟
-weight = 3
-
-→ 不触发在线模型```
+表示当前轮次的时间等级，不单独强制调用在线模型。
 
 只有：
 

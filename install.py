@@ -43,6 +43,7 @@ SCRIPT_FILES = (
     "orchestrator_store.py",
 )
 CONFIG_FILES = ("model_registry.json",)
+REFERENCE_FILES = ("orchestrator-v1.md",)
 TRACKED_EVENTS = (
     "SessionStart",
     "UserPromptSubmit",
@@ -115,6 +116,12 @@ def install_files() -> None:
         install_managed_file(
             PROJECT_ROOT / "scripts" / filename,
             TARGET_SKILL / "scripts" / filename,
+        )
+
+    for filename in REFERENCE_FILES:
+        install_managed_file(
+            PROJECT_ROOT / "skills" / "agent-relay" / "references" / filename,
+            TARGET_SKILL / "references" / filename,
         )
 
 
