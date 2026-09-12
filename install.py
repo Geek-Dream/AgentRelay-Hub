@@ -39,7 +39,9 @@ SCRIPT_FILES = (
     "agent_relay.py",
     "agent_relay_login.py",
     "agent_relay_runtime.py",
+    "orchestrator_runtime.py",
 )
+CONFIG_FILES = ("model_registry.json",)
 TRACKED_EVENTS = (
     "SessionStart",
     "UserPromptSubmit",
@@ -103,6 +105,12 @@ def install_files() -> None:
         )
 
     for filename in SCRIPT_FILES:
+        install_managed_file(
+            PROJECT_ROOT / "scripts" / filename,
+            TARGET_SKILL / "scripts" / filename,
+        )
+
+    for filename in CONFIG_FILES:
         install_managed_file(
             PROJECT_ROOT / "scripts" / filename,
             TARGET_SKILL / "scripts" / filename,

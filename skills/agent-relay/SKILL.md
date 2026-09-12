@@ -3,9 +3,9 @@ name: agent-relay
 description: "当 Agent 长期无法解决技术问题、重复尝试、有效处理时间过长，或用户明确要求调用 AgentRelay/在线模型时，使用已配置的在线模型 Provider 获取外部技术建议。回复默认输出到终端 stdout；Agent 必须自行判断、修改并验证。"
 ---
 
-# AgentRelay
+# AgentRelay / Agent Orchestrator
 
-AgentRelay 是 AI Agent 与外部专家模型之间的中继层，调用当前已配置的在线模型 Provider。
+AgentRelay 是 AI Agent 与外部专家模型之间的中继层，也是 Agent Orchestrator 的 Provider 执行层，调用当前已配置的在线模型 Provider。
 内部 Skill 名称为 `agent-relay`。
 
 用户明确说“调用 AgentRelay”“使用 AgentRelay”或“让 AgentRelay 分析”时，
@@ -53,14 +53,18 @@ macOS/Linux 使用 `${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python`；Win
 
 # 2.在线模型触发机制
 
-满足以下任意条件时，必须调用在线模型：
+满足以下任意条件时，必须进入在线模型决策：
 
 ```text
-1. retry_count >= 3
+1. 当前任务本轮 `retry_count >= 3`
 
-2. 有效问题处理时间 >= 15 分钟
+2. 当前任务本轮有效处理时间 >= 15 分钟
 
 3. 用户明确要求调用在线模型```
+
+注意：任务按 `task_id` 独立追踪。专家调用完成后开启新的 `relay_round`，本轮计时重新开始，但累计处理时间保留。新任务从自己的 `weight=1` 开始，并不会继承其他任务状态。
+
+权重规则为：0–5 分钟 `weight=1`、5–10 分钟 `weight=2`、10–15 分钟 `weight=3`。`weight=3` 表示接近专家阈值；达到 15 分钟才是时间强制触发条件。
 
 注意：
 
