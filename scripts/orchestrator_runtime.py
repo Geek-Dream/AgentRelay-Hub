@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
+from pathlib import Path
 from typing import Iterable, Mapping
 
 
@@ -32,6 +34,16 @@ class ModelRegistry:
         required_set = set(required)
         return [m for m in self.models.values() if required_set.issubset(m.capabilities)]
 
+    @classmethod
+    def from_json(cls, path: str | Path) -> "ModelRegistry":
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+        models = []
+        for item in value.get("models", []):
+            models.append(ModelSpec(name=item["name"], kind=item["kind"],
+                                    capabilities=frozenset(item.get("capabilities", [])),
+                                    scores=item.get("scores", {}), enabled=item.get("enabled", True)))
+        return cls(models)
+
     def best(self, required: Iterable[str], prefer_kinds: Iterable[str] = ()) -> ModelSpec | None:
         candidates = self.suitable(required)
         kind_order = {kind: index for index, kind in enumerate(prefer_kinds)}
@@ -49,4 +61,3 @@ def route_task(*, complexity: int, needs_web: bool = False, needs_edit: bool = F
     if complexity >= 4:
         return RouteDecision("commander", None, "跨模块或高复杂度任务")
     return RouteDecision("direct", None, "由 Codex 直接处理")
-
