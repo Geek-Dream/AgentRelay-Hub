@@ -1627,6 +1627,11 @@ def mark_relay(reason=None, session_id=None):
 
     finally:
         release_lock(lock)
+
+
+def confirm_relay_success(reason=None, session_id=None):
+    """Confirm a successful Expert call and start the next task round."""
+    return mark_relay(reason=reason or "expert_success", session_id=session_id)
 # ============================================================
 # UserPromptSubmit
 # ============================================================
@@ -2366,6 +2371,7 @@ def cli():
         branch --session SESSION_ID
         resolve --session SESSION_ID
         mark-relay --session SESSION_ID REASON
+        confirm-relay --session SESSION_ID REASON
         reset --session SESSION_ID
     """
 
@@ -2493,6 +2499,12 @@ def cli():
 
             print_status(state)
 
+            return 0
+
+        if command == "confirm-relay":
+            reason = " ".join(args)
+            state = confirm_relay_success(reason, session_id=session_id)
+            print_status(state)
             return 0
 
         # ----------------------------------------------------

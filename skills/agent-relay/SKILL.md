@@ -175,7 +175,7 @@ Agent Orchestrator 的编排基础协议、Memory、需求卡和 checkpoint 数�
 JSON
 ```
 
-只把 `content` 当作外部建议，不能把 `status=success` 当作代码已经正确。Codex 必须审查建议、自己执行必要修改并验证。只有实际完成一次 Expert 调用后，才执行 Tracker 的 `mark-relay`，让当前任务进入下一轮；调用失败或被拒绝时不能伪造成功状态。
+只把 `content` 当作外部建议，不能把 `status=success` 当作代码已经正确。Codex 必须审查建议、自己执行必要修改并验证。只有实际完成一次 Expert 调用后，才执行 Tracker 的 `confirm-relay`（兼容旧的 `mark-relay`），让当前任务进入下一轮；调用失败或被拒绝时不能伪造成功状态。
 
 Agent 在处理技术任务时，需要识别：
 
