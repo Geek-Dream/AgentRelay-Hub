@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
+import os
+from pathlib import Path
 from typing import Protocol
 
 try:
@@ -26,7 +28,12 @@ class DeepSeekWebProvider:
     provider_id = "deepseek-web"
 
     def check_available(self) -> bool:
-        return True
+        try:
+            from .agent_relay_runtime import provider_state_file, resolve_codex_home
+        except ImportError:
+            from agent_relay_runtime import provider_state_file, resolve_codex_home
+        state_path = provider_state_file(self.provider_id, resolve_codex_home(), os.environ)
+        return Path(state_path).is_file()
 
     def dispatch(self, request: DispatchRequest) -> DispatchResult:
         started = time.monotonic()
@@ -72,6 +79,11 @@ class Dispatcher:
             return DispatchResult(status="rejected", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,
                                   provider_id=request.model, error="请求超出编排预算")
+        if request.level == "expert" and (not request.read_only or request.allow_file_write):
+            return DispatchResult(status="rejected", task_id=request.task_id,
+                                  request_id=request.request_id, mode=request.level,
+                                  provider_id=request.model,
+                                  error="Expert 请求必须是只读咨询")
         if not request.model or request.model not in self.providers:
             return DispatchResult(status="failed", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,

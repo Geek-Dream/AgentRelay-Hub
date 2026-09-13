@@ -61,6 +61,18 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(result.status, "success")
         self.assertEqual(result.output, "advice")
 
+    def test_default_deepseek_checks_login_state(self):
+        from scripts.orchestrator_dispatcher import DeepSeekWebProvider
+        import os
+        old = os.environ.get("CODEX_HOME")
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ["CODEX_HOME"] = directory
+            self.assertFalse(DeepSeekWebProvider().check_available())
+        if old is None:
+            os.environ.pop("CODEX_HOME", None)
+        else:
+            os.environ["CODEX_HOME"] = old
+
 
 if __name__ == "__main__":
     unittest.main()
