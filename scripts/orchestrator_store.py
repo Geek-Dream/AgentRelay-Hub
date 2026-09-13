@@ -113,6 +113,13 @@ class DispatchRequest:
 
 
 @dataclass(frozen=True)
+class DispatchError:
+    code: str
+    message: str
+    retryable: bool = False
+
+
+@dataclass(frozen=True)
 class DispatchResult:
     status: str
     task_id: str
@@ -123,7 +130,7 @@ class DispatchResult:
     diff: str = ""
     changed_files: tuple[str, ...] = ()
     duration_seconds: float = 0.0
-    error: str | None = None
+    error: DispatchError | None = None
 
 
 @dataclass

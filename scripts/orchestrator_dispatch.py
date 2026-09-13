@@ -52,7 +52,7 @@ def main() -> int:
             "content": result.output,
             "changed_files": list(result.changed_files),
             "duration_seconds": result.duration_seconds,
-            "error": result.error,
+            "error": ({"code": result.error.code, "message": result.error.message, "retryable": result.error.retryable} if result.error else None),
         }, ensure_ascii=False))
         return 0 if result.status == "success" else 1
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -62,4 +62,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

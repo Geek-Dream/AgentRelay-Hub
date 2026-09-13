@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import Protocol
 
 try:
-    from .orchestrator_store import DispatchRequest, DispatchResult
+    from .orchestrator_store import DispatchError, DispatchRequest, DispatchResult
 except ImportError:
-    from orchestrator_store import DispatchRequest, DispatchResult
+    from orchestrator_store import DispatchError, DispatchRequest, DispatchResult
 
 
 class Provider(Protocol):
@@ -41,7 +41,7 @@ class DeepSeekWebProvider:
             return DispatchResult(status="rejected", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,
                                   provider_id=self.provider_id,
-                                  error="DeepSeek Expert 只读咨询，不允许修改工作区")
+                                  error=DispatchError("EXPERT_READ_ONLY", "DeepSeek Expert 只读咨询，不允许修改工作区"))
         try:
             try:
                 from .agent_relay import run_provider
@@ -56,12 +56,12 @@ class DeepSeekWebProvider:
         except TimeoutError as exc:
             return DispatchResult(status="timeout", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,
-                                  provider_id=self.provider_id, error=str(exc),
+                                  provider_id=self.provider_id, error=DispatchError("PROVIDER_TIMEOUT", str(exc), True),
                                   duration_seconds=time.monotonic() - started)
         except Exception as exc:
             return DispatchResult(status="failed", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,
-                                  provider_id=self.provider_id, error=str(exc),
+                                  provider_id=self.provider_id, error=DispatchError("PROVIDER_ERROR", str(exc), True),
                                   duration_seconds=time.monotonic() - started)
 
 
@@ -74,23 +74,23 @@ class Dispatcher:
             return DispatchResult(status="rejected", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,
                                   provider_id=request.model,
-                                  error="当前 Dispatcher 只支持 worker 和 expert")
+                                  error=DispatchError("MODE_NOT_SUPPORTED", "当前 Dispatcher 只支持 worker 和 expert"))
         if request.depth < 0 or request.depth > 2 or request.max_calls < 1:
             return DispatchResult(status="rejected", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,
-                                  provider_id=request.model, error="请求超出编排预算")
+                                  provider_id=request.model, error=DispatchError("BUDGET_EXCEEDED", "请求超出编排预算"))
         if request.level == "expert" and (not request.read_only or request.allow_file_write):
             return DispatchResult(status="rejected", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,
                                   provider_id=request.model,
-                                  error="Expert 请求必须是只读咨询")
+                                  error=DispatchError("EXPERT_READ_ONLY", "Expert 请求必须是只读咨询"))
         if not request.model or request.model not in self.providers:
             return DispatchResult(status="failed", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,
-                                  provider_id=request.model, error="Provider 未配置")
+                                  provider_id=request.model, error=DispatchError("PROVIDER_NOT_CONFIGURED", "Provider 未配置", True))
         provider = self.providers[request.model]
         if not provider.check_available():
             return DispatchResult(status="failed", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,
-                                  provider_id=request.model, error="Provider 当前不可用")
+                                  provider_id=request.model, error=DispatchError("PROVIDER_UNAVAILABLE", "Provider 当前不可用", True))
         return provider.dispatch(request)
