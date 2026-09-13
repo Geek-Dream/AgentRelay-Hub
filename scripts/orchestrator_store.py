@@ -39,6 +39,7 @@ class KnowledgeRecord:
     symptoms: list[str] = field(default_factory=list)
     source: str = "codex"
     confidence: float = 0.5
+    verified: bool = False
     used_count: int = 0
     last_used: str | None = None
     record_id: str | None = None
@@ -67,6 +68,18 @@ class MemoryStore:
         values.append(asdict(record))
         _write_json(self.path, values)
         return record
+
+    def mark_verified(self, record_id: str, confidence: float = 0.9) -> bool:
+        records = self.records()
+        for record in records:
+            if record.record_id == record_id:
+                record.verified = True
+                record.confidence = max(record.confidence, confidence)
+                record.used_count += 1
+                record.last_used = datetime.now(timezone.utc).isoformat()
+                _write_json(self.path, [asdict(item) for item in records])
+                return True
+        return False
 
     def search(self, query: str, limit: int = 5) -> list[KnowledgeRecord]:
         terms = {part.lower() for part in query.split() if len(part) > 1}
