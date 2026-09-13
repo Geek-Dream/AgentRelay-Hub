@@ -1,8 +1,9 @@
 {
+  "default_provider": "deepseek-web",
   "models": [
-    {"name": "local-9b", "kind": "local", "capabilities": ["simple_code_edit", "formatting", "simple_refactor"], "scores": {"reasoning": 4, "coding": 5, "speed": 10}},
-    {"name": "deepseek-web", "kind": "web", "capabilities": ["web_search", "code_analysis", "dependency_analysis", "debugging"], "scores": {"reasoning": 8, "coding": 8, "search": 10, "speed": 6}},
-    {"name": "gpt-api", "kind": "api", "capabilities": ["code_analysis", "dependency_analysis", "debugging", "simple_code_edit"], "scores": {"reasoning": 10, "coding": 10, "speed": 8}}
+    {"name": "deepseek-web", "kind": "web", "enabled": true, "capabilities": ["web_search", "code_analysis", "dependency_analysis", "debugging", "expert_consultation"], "scores": {"reasoning": 8, "coding": 8, "search": 10, "speed": 6}},
+    {"name": "local-9b", "kind": "local", "enabled": false, "capabilities": ["simple_code_edit", "formatting", "simple_refactor"], "scores": {"reasoning": 4, "coding": 5, "speed": 10}},
+    {"name": "gpt-api", "kind": "api", "enabled": false, "capabilities": ["code_analysis", "dependency_analysis", "debugging", "simple_code_edit"], "scores": {"reasoning": 10, "coding": 10, "speed": 8}}
   ],
   "orchestration": {"max_depth": 2, "max_parallel_agents": 3, "max_subtasks": 6, "max_model_calls_per_task": 5}
 }

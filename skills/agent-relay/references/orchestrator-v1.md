@@ -35,6 +35,8 @@
 - `expert`：只提供分析和建议，默认不直接修改项目。
 - `commander`：拆解跨模块任务、分配子任务、协调验证；受并发数和深度预算限制。
 
+默认 Provider 是已经可用的 DeepSeek Web。用户没有部署本地模型时，系统仍然是完整可用的默认 Expert 场景；`local-9b`、GPT API 等属于用户配置后的可选扩展，不是默认安装前提。
+
 ## 资源所有权
 
 任何 Agent 修改文件前必须声明资源 Owner。非 Owner Agent 只能提出建议，除非显式完成 ownership transfer。后续实现文件锁和冲突检测时必须保留 `primary_owner` 标记。
@@ -42,4 +44,3 @@
 ## 预算与防套娃
 
 任务状态应支持 `max_model_calls`、`max_parallel_agents`、`max_depth` 和 `max_minutes`。预算耗尽时停止自动派发并交回 Codex 决策。
-

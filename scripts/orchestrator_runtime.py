@@ -29,6 +29,7 @@ class RouteDecision:
 class ModelRegistry:
     def __init__(self, models: Iterable[ModelSpec] = ()):
         self.models = {model.name: model for model in models if model.enabled}
+        self.default_provider = "deepseek-web"
 
     def suitable(self, required: Iterable[str]) -> list[ModelSpec]:
         required_set = set(required)
@@ -42,7 +43,9 @@ class ModelRegistry:
             models.append(ModelSpec(name=item["name"], kind=item["kind"],
                                     capabilities=frozenset(item.get("capabilities", [])),
                                     scores=item.get("scores", {}), enabled=item.get("enabled", True)))
-        return cls(models)
+        registry = cls(models)
+        registry.default_provider = value.get("default_provider", "deepseek-web")
+        return registry
 
     def best(self, required: Iterable[str], prefer_kinds: Iterable[str] = ()) -> ModelSpec | None:
         candidates = self.suitable(required)
@@ -54,10 +57,12 @@ def route_task(*, complexity: int, needs_web: bool = False, needs_edit: bool = F
                registry: ModelRegistry) -> RouteDecision:
     if complexity <= 1 and needs_edit:
         model = registry.best(("simple_code_edit",), ("local", "api"))
-        return RouteDecision("worker", model.name if model else None, "低复杂度修改")
+        if model:
+            return RouteDecision("worker", model.name, "低复杂度修改")
+        return RouteDecision("direct", None, "未配置本地 Worker，由 Codex 直接处理")
     if needs_web:
         model = registry.best(("web_search",), ("web", "api", "local"))
-        return RouteDecision("expert", model.name if model else None, "需要联网检索")
+        return RouteDecision("expert", model.name if model else registry.default_provider, "需要联网检索")
     if complexity >= 4:
         return RouteDecision("commander", None, "跨模块或高复杂度任务")
     return RouteDecision("direct", None, "由 Codex 直接处理")

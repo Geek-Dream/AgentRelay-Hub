@@ -85,17 +85,31 @@ class DispatchRequest:
     level: str
     prompt: str
     model: str | None = None
+    request_id: str | None = None
+    title: str = ""
+    workspace: str | None = None
+    allowed_files: tuple[str, ...] = ()
+    timeout_seconds: int = 300
     read_only: bool = True
+    allow_file_write: bool = False
+    allow_shell: bool = False
+    allow_network: bool = False
     parent_task_id: str | None = None
     depth: int = 0
+    max_calls: int = 1
 
 
 @dataclass(frozen=True)
 class DispatchResult:
     status: str
     task_id: str
+    request_id: str | None = None
+    mode: str = "expert"
+    provider_id: str | None = None
     output: str = ""
     diff: str = ""
+    changed_files: tuple[str, ...] = ()
+    duration_seconds: float = 0.0
     error: str | None = None
 
 
@@ -125,4 +139,3 @@ class CheckpointStore:
         path = self.directory / f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}-{task_id}.json"
         _write_json(path, {"task_id": task_id, "description": description, "created_at": datetime.now(timezone.utc).isoformat(), "files": list(files)})
         return path
-

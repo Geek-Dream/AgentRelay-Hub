@@ -41,6 +41,7 @@ SCRIPT_FILES = (
     "agent_relay_runtime.py",
     "orchestrator_runtime.py",
     "orchestrator_store.py",
+    "orchestrator_dispatcher.py",
 )
 CONFIG_FILES = ("model_registry.json",)
 REFERENCE_FILES = ("orchestrator-v1.md",)
