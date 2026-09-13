@@ -164,6 +164,19 @@ Agent Orchestrator 的编排基础协议、Memory、需求卡和 checkpoint 数�
 
 任何自动派发都必须遵守任务预算、最大深度、最大并发和资源 Owner 约束。模型选择由 Codex 根据注册表能力、当前配置和任务上下文决定；Hook 只产生观测和触发提示。
 
+## 3.1 Hook 通知后的实际调度
+
+当 Hook 的 `additionalContext` 明确包含“AgentRelay 自动触发条件已经满足”时，先确认通知对应当前仍未解决的任务，且不是单纯等待下载、安装或网络响应。确认需要外援后，构造真实问题的 JSON 工作单，并通过统一 Dispatcher 调用默认 DeepSeek Expert：
+
+```bash
+"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" \
+  scripts/orchestrator_dispatch.py <<'JSON'
+{"task_id":"当前任务ID","request_id":"本次请求ID","mode":"expert","provider_id":"deepseek-web","title":"问题分析","prompt":"这里填写当前真实技术问题和必要上下文","constraints":{"read_only":true,"allow_file_write":false},"budget":{"max_calls":1}}
+JSON
+```
+
+只把 `content` 当作外部建议，不能把 `status=success` 当作代码已经正确。Codex 必须审查建议、自己执行必要修改并验证。只有实际完成一次 Expert 调用后，才执行 Tracker 的 `mark-relay`，让当前任务进入下一轮；调用失败或被拒绝时不能伪造成功状态。
+
 Agent 在处理技术任务时，需要识别：
 
 ```text

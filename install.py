@@ -42,6 +42,7 @@ SCRIPT_FILES = (
     "orchestrator_runtime.py",
     "orchestrator_store.py",
     "orchestrator_dispatcher.py",
+    "orchestrator_dispatch.py",
 )
 CONFIG_FILES = ("model_registry.json",)
 REFERENCE_FILES = ("orchestrator-v1.md",)
