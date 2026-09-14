@@ -1,4 +1,4 @@
-# AgentRelay
+# AgentRelay 🔀
 
 **AgentRelay - A local AI relay layer for Codex CLI, connecting your coding agent with external expert models.**
 
@@ -9,10 +9,16 @@ AgentRelay 是 Codex 的自动专家代理中继系统。它通过 Codex Hook �
 当前内置的首个 Provider 示例为 **DeepSeek**。公开 Skill、Hook、Tracker 和命令均使用
 AgentRelay 通用命名；未来可以在同一中继流程下增加其他 Provider。
 
-AgentRelay 不把 Hook 直接连接到在线模型：Hook 只产生 `additionalContext`，真正的调用仍由
-Codex Agent 按 Skill 规则发起。
+AgentRelay 不把 Hook 直接连接到在线模型：Hook 根据重试次数、有效处理时间，或保守识别到的
+直接调用句式产生候选 `additionalContext`。Codex Agent 必须先核对当前问题、用户真实意图和
+求援价值，审核通过后才按 Skill 发起调用；Agent 的语义判断优先级高于 Hook 提醒。
 
-### Commander 与模型配置
+Tracker 先按 Codex Session 隔离，再在每个 Session 内按问题隔离。每个问题拥有自己的有效
+处理时间、权重、重试次数和 AgentRelay 触发状态；暂停、解决或切换问题后，旧问题只保留为
+历史快照，不再参与当前问题的触发判断。权重规则为：小于 5 分钟为 1，达到 5 分钟为 2，
+达到 10 分钟为 3；达到 15 分钟进入外援审核。
+
+### Commander 与模型配置 🧠
 
 Commander 的默认 Worker 是当前已安装并已登录的 `codex` CLI，通过多个隔离的
 `codex exec` 子进程协同工作，不要求 DeepSeek、本地 9B 或 GPT API。它会按任务动态规划
@@ -69,7 +75,7 @@ python3 scripts/agentrelay_console.py commander-merge task-1 \
 “启用审查官模式”，未批准前不会启动子 Agent。CLI 默认使用文本确认；`--json` 输出可供支持
 勾选项/自定义输入的宿主界面渲染，普通终端仍安全回退为默认确认卡。
 
-## 架构
+## 架构 🏗️
 
 ```text
 Codex
@@ -87,8 +93,14 @@ Provider Adapter
 DeepSeek（当前示例）
 ```
 
-自动触发依据包括重复失败、有效处理时间和既有权重信息。用户也可以明确说“调用
-AgentRelay”“让 AgentRelay 分析”或“调用 DeepSeek”。否定请求不会触发调用。
+Hook 的候选提醒依据可机械验证的重复失败和有效处理时间，也会保守预筛选“现在调用
+DeepSeek”“你触发一下 DeepSeek”“`$agent-relay` 帮我测试”等行动句式，因此显式测试请求
+不受权重和重试门槛限制。单纯出现 DeepSeek/AgentRelay 关键词不会提醒；讨论规则、引用日志、
+举例、假设和否定表达也会被排除。用户是否真的要求当前调用最终由 Agent 结合完整语境判断。
+
+当前问题首次求援成功后进入连续外援协作：Agent 应自行实施并验证建议；如果失败、出现同一
+目标下的新错误，或在线模型要求更多信息，Agent 收集新事实后可以直接继续追问，不必重新等待
+权重或重试门槛。问题解决、暂停、放弃或切换后，该问题的外援资格结束，新问题重新独立判定。
 
 ## Provider 兼容性
 
@@ -104,7 +116,7 @@ DeepSeek 当前把极速、图片和专家能力统一到同一会话。AgentRel
 通用 Provider Adapter 仍保留独立的会话作用域和能力接口。未来接入千问等网站时，只需新增
 对应 Adapter、Provider 配置及侧栏链接解析规则；不需要修改主调用流程。
 
-## Requirements
+## Requirements 🛠️
 
 - Codex CLI（当前稳定版本）
 - Python >= 3.10
@@ -182,8 +194,17 @@ scripts/agent_relay_login.py
   "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" status
 ```
 
-正常的新状态应显示 `retry_count: 0`、`relay_triggered: false` 和
+正常的新状态应显示 `retry_count: 0`、`relay_triggered: false`、`relay_call_count: 0` 和
 `should_trigger: false`。测试 Skill 实际调用前需要重启 Codex。
+
+无需 Session ID 查看最近活动会话和会话内问题：
+
+```bash
+"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" \
+  "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" status
+"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" \
+  "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" problems
+```
 
 ## 目录结构
 
@@ -214,6 +235,9 @@ AgentRelay-Hub/
 ```text
 $CODEX_HOME/
 ├── agentrelay-env/          # AgentRelay 独立 Python、pip、Playwright
+├── agent_relay_tracker/
+│   ├── sessions/            # 每个 Codex Session 的当前状态
+│   └── problems/            # 按 Session 分组的问题独立快照
 ├── hooks/
 ├── skills/agent-relay/
 └── hooks.json
@@ -262,7 +286,8 @@ Linux 如果已经存在 Chromium，但启动时报缺少系统库，可按 Play
 ## 安全边界
 
 AgentRelay 不绕过 CAPTCHA，不保存账号密码，不在 Hook 中直接访问任何在线 Provider，也不会
-把 Provider 建议自动视为最终答案。Agent 必须自行判断、修改并验证。
+把 Provider 建议自动视为最终答案。Agent 必须自行判断、修改并验证，不能只把在线回复或脚本
+转交用户后结束任务。
 
 ## License
 

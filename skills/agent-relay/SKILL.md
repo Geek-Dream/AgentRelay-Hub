@@ -3,15 +3,16 @@ name: agent-relay
 description: "当 Agent 长期无法解决技术问题、重复尝试、有效处理时间过长，或用户明确要求调用 AgentRelay/在线模型时，使用已配置的在线模型 Provider 获取外部技术建议。回复默认输出到终端 stdout；Agent 必须自行判断、修改并验证。"
 ---
 
-# AgentRelay / Agent Orchestrator
+# AgentRelay
 
-AgentRelay 是 AI Agent 与外部专家模型之间的中继层，也是 Agent Orchestrator 的 Provider 执行层，调用当前已配置的在线模型 Provider。
+AgentRelay 是 AI Agent 与外部专家模型之间的中继层，调用当前已配置的在线模型 Provider。
 内部 Skill 名称为 `agent-relay`。
 
-用户明确说“调用 AgentRelay”“使用 AgentRelay”或“让 AgentRelay 分析”时，
+用户真正要求当前执行“调用 AgentRelay”“使用 AgentRelay”或“让 AgentRelay 分析”时，
 等价于明确请求当前配置的在线模型 Provider。“调用在线模型”等表达同样兼容。
-此类明确请求应直接调用 AgentRelay；除非用户要求补充上下文，否则不应先搜索工作区、
-猜测未知术语或改写用户的问题。
+必须由 Agent 结合完整语境确认这是当前行动指令；讨论规则、引用日志、举例、假设、询问
+触发机制，或包含否定表达时，都不是显式调用请求。Hook 可以保守预筛选直接行动句式并提醒
+Agent 审核，但无权仅凭关键词替 Agent 下结论。
 
 ## 1. Skill 目录
 
@@ -51,20 +52,16 @@ macOS/Linux 使用 `${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python`；Win
 
 
 
-# 2.在线模型触发机制
+# 2. 首次进入外援协作
 
-满足以下任意条件时，必须进入在线模型决策：
+以下任意条件可让当前问题进入首次外援审核：
 
 ```text
-1. 当前任务本轮 `retry_count >= 3`
+1. retry_count >= 3
 
-2. 当前任务本轮有效处理时间 >= 15 分钟
+2. 有效问题处理时间 >= 15 分钟
 
-3. 用户明确要求调用在线模型```
-
-注意：任务按 `task_id` 独立追踪。专家调用完成后开启新的 `relay_round`，本轮计时重新开始，但累计处理时间保留。新任务从自己的 `weight=1` 开始，并不会继承其他任务状态。
-
-权重规则为：开始处理时 `weight=1`；达到 5 分钟升为 `weight=2`；达到 10 分钟升为 `weight=3`；达到 15 分钟必须进入专家决策。`weight=3` 表示当前轮次已处理至少 10 分钟，但在 15 分钟前仍由 Codex 判断是否提前求助。
+3. 用户消息呈现直接调用的行动句式，经 Agent 结合完整语境审核确认```
 
 注意：
 
@@ -72,9 +69,21 @@ macOS/Linux 使用 `${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python`；Win
 weight = 3
 ```
 
-表示当前轮次的时间等级，不单独强制调用在线模型。
+只是问题难度等级：
 
-只有：
+```text
+不是在线模型的独立触发条件
+```
+
+例如：
+
+```text
+有效处理时间 = 10 分钟
+weight = 3
+
+→ 不触发在线模型```
+
+首次求援的门槛只有：
 
 ```text
 retry_count >= 3
@@ -86,111 +95,79 @@ retry_count >= 3
 有效问题处理时间 >= 15 分钟
 ```
 
-或者：
+或者用户当前明确要求调用在线模型。
+
+Hook 给出的计数通知只是候选提醒。收到提醒后，Agent 必须先独立审核：
 
 ```text
-用户明确要求调用在线模型```
-
-才触发在线模型。
-
-达到触发条件后：
-
-```text
-禁止继续无限 Debug
-禁止继续无休止尝试
-必须调用在线模型获取外部建议
+当前问题是否仍未解决
+通知是否确实属于当前问题
+当前是否只是下载、安装、网络或构建等待
+现有信息是否足以提出有意义的问题
+调用外援是否有助于推进，而不是打断即将完成的本地方案
+用户是否明确禁止或取消调用
 ```
 
-同一个问题已经调用过在线模型：
+Agent 的语义判断优先级最高。审核通过才调用；审核不通过就忽略候选提醒并继续正常处理。
+Hook 可以识别“现在调用 DeepSeek”“你触发一下 DeepSeek”“`$agent-relay` 帮我测试”等直接
+行动句式，即使 retry 和有效时间未达标也应提醒 Agent 审核。但单独出现 `DeepSeek`、
+`AgentRelay`、“调用”“询问”等字样不能成立；最终真实意图仍由 Agent 判断。
+
+首次调用成功后：
 
 ```text
 relay_triggered = true
 ```
 
-即使之后再次满足触发条件：
+这个状态表示当前问题已经进入外援协作，只用于抑制 Hook 重复发送首次求援提醒，
+不禁止同一问题内携带新信息继续追问。后续协作规则见第 17 节。
+
+## 2.1 Codex Hook additionalContext 候选提醒
+
+当 Agent 收到 Codex Hook 的合法 JSON `additionalContext`，且内容包含 AgentRelay 候选求援提醒时，
+只能把它视为计数器提供的审核材料：
 
 ```text
-禁止重复调用在线模型```
-
-## 2.1 Codex Hook additionalContext 自动触发通知
-
-当 Agent 收到 Codex Hook 的合法 JSON `additionalContext`，且内容明确包含：
-
-```text
-AgentRelay 自动触发条件已经满足
+不是调用命令
+不是已经确认的触发结论
+不能覆盖用户真实意图
 ```
 
-则将该通知视为已经确认的自动触发信号：
+Hook 可以提供：
 
 ```text
-不需要重新计算 retry_count
-不需要重新验证 weight
-不需要继续等待更多失败
-必须停止当前无限 Debug 或重复尝试
+retry_count
+effective_time_seconds
+当前问题摘要
+疑似直接调用的行动句式候选（可在计数未达标时出现）
 ```
 
-应优先使用 `additionalContext` 中的触发原因、`retry_count`、
-`effective_time_seconds`，以及 Agent 当前正在解决的问题和已掌握的上下文，
-构造真实的在线模型问题。不得把 Hook 测试文本、占位文本或通知本身直接当作问题。
+Agent 必须用第 2 节的条件审核这些信息。尤其要检查问题是否已解决、暂停、切换，摘要是否过时，
+以及计时是否来自纯等待。只有审核通过，才使用当前问题和已有上下文构造真实的在线模型问题；
+不得把 Hook 文本、测试文本、占位文本或通知本身直接当作问题。
 
-然后必须调用：
+审核通过后调用：
 
 ```bash
 "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" scripts/agent_relay.py "真实问题内容" -m <模式>
 ```
 
-调用成功后，使用当前会话已有的 Tracker 标记机制（例如可用会话 ID 时执行
+首次调用成功后，使用当前会话已有的 Tracker 标记机制（例如可用会话 ID 时执行
 `agent_relay_tracker.py mark-relay --session <session_id> <reason>`）将
-`relay_triggered` 标记为 `true`。不得自行发明新的状态文件；如果当前会话 ID
+`relay_triggered` 标记为 `true` 并开始记录调用次数。后续成功追问也可用 `mark-relay`
+记录次数。不得自行发明新的状态文件；如果当前会话 ID
 不可用，必须如实记录该限制，不得修改 Tracker 以绕过它。
 
 调用完成后优先读取 stdout 中 `💬 AI回复:` 之后的内容。在线模型回复只是建议，
 仍须由 Agent 分析建议、进行最小修改并完成验证。
 
-`relay_triggered = true` 只禁止同一问题的再次自动调用；没有新的用户明确请求时，
-不得因 `additionalContext`、`retry_count` 或处理时间再次自动调用。用户之后明确要求
-再次调用在线模型时，仍允许按明确请求调用。
+`relay_triggered = true` 只禁止 Hook 为同一问题重复发送首次求援提醒。当前问题采用在线建议后
+仍未解决、出现新错误，或在线模型明确要求更多信息时，Agent 可以直接继续追问，无需重新等待
+retry 或时间门槛，也不需要用户再次明确要求。
 
 ---
 
 # 3. 当前问题
-
-基础编排默认使用本地规则和 Codex self/subagent，不依赖本地模型、DeepSeek 或其他 API。配置外部 Provider 后，模型只能提供分析或受限的结构化修改建议；RequirementCard、ConfirmationCard、状态机、验证、回滚和 Memory 始终由主 Agent/Workflow 控制。
-
-Commander 也不以 DeepSeek、本地模型或 GPT API 为前提。若当前环境存在可用的 `codex` CLI，主 Agent 可以显式启动 1 到 5 个隔离的 `codex exec` 子 Agent；每个子 Agent 继承当前 Codex 认证和默认模型，在独立 workspace 中工作，完成后只提交报告和隔离目录结果。角色由任务动态规划，可包含前端样式、前端脚本、后端数据库、后端代码、Git 审计等，不固定为三个窗口。没有 `codex` CLI 时仍保留离线角色规划、任务上下文和审查报告，但不得把“已规划”伪报为“已执行”。DeepSeek、本地 9B、GPT API 只属于可选 Provider。
-
-Commander 子 Agent 的求援约束：同一个网页 Provider 会话、同一个本地模型服务全局只能被一个角色占用；角色首次选定的网页 Provider 默认保持黏性，只有 Cookie/代理熔断后才切换。子 Agent 只能通过受控 `commander_provider_call.py` 使用网页或本地 Provider，不能调用 GPT/API Provider，不能再启动 Commander。Cookie/session 失效或代理错误会熔断并最多通知用户三次，通知包含重新登录脚本位置和代理提示；恢复认证后由主 Commander 根据历史质量决定切回原 Provider 或继续替代 Provider。
-
-每个 Commander 子 Agent 都有父任务预先分配的独立 `task_id`、重试计数和有效处理时间，绝不与父任务或兄弟任务累加。例如前端已处理 13 分钟、后端处理 2 分钟，不会触发任何一个子 Agent 的 15 分钟外援阈值。子 Agent 自己达到 `retry_count >= 3` 或有效处理时间达到 15 分钟时，只向 Commander 发出一次“需要决策”的通知，子 Agent 保持继续工作；Provider 登录、Cookie 或代理故障同样只会通知和降级，不会阻塞其本地工作。
-
-Commander 子任务完成后，主审查官必须先比较每个隔离 workspace 与启动前基线，检查路径、主工作区并发修改和角色间冲突，再生成合并计划和用户摘要。合并计划会列出完成角色、未完成角色、修改文件、验证状态和冲突原因；只有用户批准独立的合并确认卡后，才逐文件写回主 workspace。任何冲突都暂停合并，不覆盖用户修改。
-
-Agent Orchestrator 的编排基础协议、Memory、需求卡和 checkpoint 数据层见
-[references/orchestrator-v1.md](references/orchestrator-v1.md)。需要编排时先按任务复杂度选择模式：
-
-任务确认状态可通过离线 CLI 管理：
-`python3 -m scripts.orchestrator_task task list`、`task show <task_id>`、`task approve <task_id>`、`task reject <task_id>`、`task cancel <task_id>`、`task execute <task_id>`。加 `--json` 可输出机器可读结果；只有 approved 任务允许执行。
-
-中断任务不会自动恢复。对 executing 任务可使用 `task recover <task_id> --action fail|retry`；失败任务可使用 `task retry <task_id>`，默认最多一次显式重试。completed、pending 和正在执行的任务不会被重复执行。
-
-- 小改动走 `direct` 或 `worker`，优先使用已配置的本地模型；Codex 负责审查结果。
-- 需要联网排查、依赖分析或重复失败时走 `expert`；专家默认只给建议，不直接修改工作区。
-- 跨前后端、数据库、消息队列或部署的高风险任务走 `commander`；先生成需求卡并等待确认，再分配子任务。
-
-任何自动派发都必须遵守任务预算、最大深度、最大并发和资源 Owner 约束。模型选择由 Codex 根据注册表能力、当前配置和任务上下文决定；Hook 只产生观测和触发提示。
-
-## 3.1 Hook 通知后的实际调度
-
-当 Hook 的 `additionalContext` 明确包含“AgentRelay 自动触发条件已经满足”时，先确认通知对应当前仍未解决的任务，且不是单纯等待下载、安装或网络响应。确认需要外援后，构造真实问题的 JSON 工作单，并通过统一 Dispatcher 调用默认 DeepSeek Expert：
-
-```bash
-"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" \
-  scripts/orchestrator_dispatch.py <<'JSON'
-{"task_id":"当前任务ID","request_id":"本次请求ID","mode":"expert","provider_id":"deepseek-web","title":"问题分析","prompt":"这里填写当前真实技术问题和必要上下文","constraints":{"read_only":true,"allow_file_write":false},"budget":{"max_calls":1}}
-JSON
-```
-
-只把 `content` 当作外部建议，不能把 `status=success` 当作代码已经正确。Codex 必须审查建议、自己执行必要修改并验证。只有实际完成一次 Expert 调用后，才执行 Tracker 的 `confirm-relay --session <session_id> --task <task_id>`（兼容旧的 `mark-relay`），让匹配的当前任务进入下一轮；调用失败、被拒绝或 task_id 不匹配时不能伪造成功状态。
 
 Agent 在处理技术任务时，需要识别：
 
@@ -226,6 +203,31 @@ Agent 在处理技术任务时，需要识别：
 ```
 
 不要因为发现新的错误信息，就立即认为是完全新的问题。
+
+Tracker 使用两层隔离：
+
+```text
+Codex Session
+├─ 问题 A：独立 effective_time / weight / retry_count
+├─ 问题 B：独立 effective_time / weight / retry_count
+└─ 当前活动问题
+```
+
+同一 Session 内的问题不得合并计时。用户切换到无关问题时，旧问题应归档，新问题从：
+
+```text
+effective_time_seconds = 0
+weight = 1
+retry_count = 0
+```
+
+开始。用户说“先不处理”“暂停”“跳过”当前问题时，应立即停止当前问题计时；没有新任务时，
+当前活动状态回到空闲零值。问题解决后也立即归档并清空当前计时器，历史快照仍保留在该
+Session 的问题目录中。
+
+Tracker 会结合下一条用户消息与 Stop Hook 的 `last_assistant_message` 判断继续、切换、暂停或
+明确完成。Agent 在实际验证成功后仍应明确写出“已完成/已修复/验证通过”，不要在尚未解决时
+使用这些完成措辞。
 
 ---
 
@@ -286,13 +288,13 @@ weight = 3
 
 ```text
 有效处理时间 = 10 分钟
-weight = 3
+weight = 2
 
 retry_count = 0
 用户没有明确要求在线模型
 → 不触发在线模型```
 
-真正的在线模型触发条件仍然只有：
+首次进入外援审核的条件仍然只有：
 
 ```text
 retry_count >= 3
@@ -307,7 +309,9 @@ retry_count >= 3
 或者：
 
 ```text
-用户明确要求调用在线模型```
+Hook 发现直接行动句式候选，且 Agent 确认用户真正要求现在调用在线模型```
+
+计数条件满足后仍须由 Agent 审核当前问题是否值得调用；weight 本身不负责触发。
 
 Weight 的作用是：
 
@@ -625,10 +629,10 @@ retry_count 可能一直很低
 effective_time_seconds >= 15 分钟
 ```
 
-仍然：
+仍然达到：
 
 ```text
-必须调用在线模型```
+首次外援审核门槛```
 
 注意：
 
@@ -636,13 +640,13 @@ effective_time_seconds >= 15 分钟
 weight = 3
 ```
 
-可能在：
+只会在：
 
 ```text
 有效问题处理时间 >= 10 分钟
 ```
 
-时出现。
+时出现；15 分钟仍是独立的外援触发门槛。
 
 但是：
 
@@ -686,6 +690,14 @@ effective_time_seconds >= 15 分钟
 
 确认解决后，当前问题结束。
 
+当前活动计时器立即回到：
+
+```text
+effective_time_seconds = 0
+weight = 0
+retry_count = 0
+```
+
 下一个问题默认：
 
 ```text
@@ -701,6 +713,19 @@ weight = 1
 
 weight = 1
 retry_count = 0
+```
+
+无需手查 Session ID 即可查看最近活动会话：
+
+```bash
+python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" status
+```
+
+查看会话列表和最近会话内的独立问题：
+
+```bash
+python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" sessions
+python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" problems
 ```
 
 ---
@@ -855,15 +880,22 @@ agent_relay.py
 优先检查终端 stdout
 ```
 
-`agent_relay.py` 是同步命令：工具调用返回即表示该进程已结束。返回后应检查：
+`agent_relay.py` 本身是同步命令，但终端工具可能因为等待窗口到期先返回后台 session ID。
+如果工具明确返回 `Process running with session ID ...`，必须使用终端工具提供的
+`write_stdin`/继续读取机制轮询**这个原 session ID**，直到进程结束并取得最终 stdout。
+禁止运行 `sleep 15`、`sleep 60` 等新命令代替轮询；这些命令会创建无关的新 session，
+永远读不到原 AgentRelay 结果。
+
+进程结束后应检查：
 
 ```text
 💬 AI回复:
 AGENT_RELAY_RESULT={"status":"success", ...}
 ```
 
-看到 `AGENT_RELAY_RESULT` 且 `status` 为 `success` 时，禁止再使用 `sleep`、`ps` 或重复调用
-Provider。只有工具明确返回后台 session ID 时，才可轮询该 session。
+看到 `AGENT_RELAY_RESULT` 且 `status` 为 `success` 时，禁止再使用 `sleep`、`ps` 或因为
+“没看到结果”而重复调用 Provider。后续因实施失败而带新信息继续追问，属于第 17 节规定的
+外援协作，不属于重复读取。
 
 如果 stdout 在界面中被折叠或截断，根据 `AGENT_RELAY_RESULT.history_file` 读取对应历史 JSON
 一次，取最后一条的 `answer`。不得因输出折叠而重复调用 Provider。
@@ -1058,6 +1090,10 @@ Agent 分析建议
 验证
 ```
 
+在线回复不是交付结果。只要安全且在用户授权范围内，Agent 应自行编辑文件、执行脚本、调整配置
+并验证，不能把在线模型给出的分析或脚本原样转交用户后就结束任务。只有缺少用户专属信息、
+需要新的权限或授权、涉及危险操作，或本地确实无法取得必要条件时，才向用户提问或请求操作。
+
 必须检查：
 
 ```text
@@ -1138,8 +1174,23 @@ go test ./...
 
 ---
 
-# 17. 再次调用在线模型
-同一个问题再次调用时：
+# 17. 当前问题内的连续外援协作
+
+首次调用成功后，当前问题进入外援协作阶段。Agent 必须先实施并验证在线建议。
+
+出现以下任一情况时，可以直接继续调用在线模型，不重新等待 retry、有效时间或用户显式请求：
+
+```text
+实施建议后验证失败
+出现属于同一目标的新错误
+在线模型要求提供更多日志、配置、代码或环境信息
+建议存在关键歧义，无法安全实施
+```
+
+如果在线模型要求更多信息，Agent 应先使用现有工具自行收集，再把信息发回同一在线会话。
+只有信息属于用户专属秘密、需要授权或本地无法取得时，才询问用户。
+
+每次后续追问必须增加至少一种真实的新信息：
 
 禁止：
 
@@ -1161,19 +1212,34 @@ go test ./...
 
 这样在线模型可以继续分析。
 
+没有新信息时禁止机械重复追问。此时应继续本地排查，或在确实缺少用户信息/权限时向用户说明
+阻塞点。不要设置固定的一次调用上限，也不要无进展地无限空问；是否继续以“同一问题仍未解决
+且本轮有新增事实可以推动分析”为准。
+
+以下情况结束当前问题的连续外援资格：
+
+```text
+问题已实际验证解决
+用户暂停、跳过或放弃当前问题
+用户切换到无关问题
+登录失效或 Provider 不可用
+必须等待用户提供信息或授权，当前无法继续
+```
+
+新问题必须重新独立计算首次求援门槛，不能继承旧问题的外援资格。
+
 ---
 
-# 18. 最大调用次数
+# 18. 防重复与问题隔离
 
-同一个问题自动触发在线模型后：
+同一个问题首次成功调用在线模型后：
 
 ```text
 relay_triggered = true
 ```
 
-禁止再次自动触发在线模型。
-
-只有用户明确要求再次调用在线模型时，才允许再次调用。
+Hook 禁止再次发送首次求援候选提醒，但 Agent 可以按第 17 节进行有新信息的连续追问。
+`relay_triggered` 不是“一生只能调用一次”的锁，而是“当前问题已经进入外援协作”的标记。
 
 ---
 
@@ -1246,7 +1312,7 @@ Agent 自主分析
 retry_count +1
 ```
 
-判断是否满足触发条件：
+判断是否达到首次求援审核门槛：
 
 ```text
 retry_count >= 3
@@ -1261,7 +1327,7 @@ retry_count >= 3
 或者：
 
 ```text
-用户明确要求调用在线模型```
+Hook 发现直接行动句式候选，交给 Agent 结合完整语境确认```
 
 ↓
 
@@ -1271,24 +1337,19 @@ relay_triggered = false
 
 ↓
 
-满足任意触发条件：
-
-必须调用在线模型
+Hook 达到计数门槛或发现直接行动句式时发送候选提醒
 ↓
-
-如果：
-
-relay_triggered = true
-
-↓
-
-禁止因为 retry_count 或有效问题处理时间再次自动调用在线模型。
-
-↓
-
-只有用户明确要求再次调用在线模型：
-
-才允许再次调用。
+Agent 审核当前问题、真实意图与求援价值
+├─ 不值得调用：忽略提醒，继续正常处理
+└─ 值得调用：首次调用在线模型并进入外援协作
+   ↓
+   relay_triggered = true
+   ↓
+   Agent 实施建议并验证
+   ├─ 成功：结束当前问题
+   ├─ 失败或新错误：带新结果继续追问，不重新等待门槛
+   ├─ 在线模型要更多信息：Agent 收集后继续追问
+   └─ 缺用户信息/授权或危险操作：询问用户
 
 ```text
 最小修改
@@ -1342,13 +1403,13 @@ RecentHistoricalDialogue-Expert.json
 
 10. 下载、安装、网络等待不增加 weight。
 
-11. 每累计 5 分钟有效处理时间增加 1 weight。
+11. 有效时间小于 5 分钟为 weight 1；达到 5 分钟为 weight 2；达到 10 分钟为 weight 3。
 
 12. weight = 3 只是问题复杂度等级，不会单独触发在线模型。
 
-13. retry_count >= 3 必须调用在线模型。
+13. retry_count >= 3 时 Hook 可发首次求援候选提醒，最终由 Agent 审核是否值得调用。
 
-14. 有效问题处理时间 >= 15 分钟必须调用在线模型。
+14. 有效问题处理时间 >= 15 分钟时 Hook 可发首次求援候选提醒，最终由 Agent 审核。
 
 15.在线模型回复不等于问题解决。
 
@@ -1364,14 +1425,47 @@ retry_count = 0
 weight = 1
 retry_count = 0
 
-19. 同一个问题自动调用在线模型后：
+19. Hook 可预筛选直接调用的行动句式，即使计数未达标也发送候选提醒；单纯出现关键词不提醒。
+
+20. 用户显式请求最终必须由 Agent 理解完整语境并审核确认，Hook 候选不能直接下令调用。
+
+21. 同一个问题首次调用在线模型后：
 
 relay_triggered = true
 
-禁止再次自动触发。
+Hook 不再重复发送首次提醒，但 Agent 可在实施失败、新错误或缺信息时带新事实继续追问。
 
-只有用户明确要求再次调用在线模型时，
-才允许再次调用.
+22. 在线回复不是最终交付；Agent 必须自行实施并验证，不能只把回复或脚本交给用户。
 
-20.在线模型是技术顾问，Agent 必须自行判断。
+23. 工具返回后台 session ID 时必须轮询原 session，禁止用 sleep 代替。
+
+24. 新问题不能继承旧问题的外援资格。
+
+25. 在线模型是技术顾问，Agent 始终保留最高判断权。
 ```
+
+## Commander 子任务合并
+
+Commander 是主审查官协调的 1 到 5 个隔离子 Agent。角色按任务动态规划，可包含前端样式、
+前端脚本、后端代码、数据库和 Git 审计；没有可用 Provider 时仍可由 Codex 子 Agent 离线执行，
+不能把“已规划”伪报成“已完成”。子 Agent 继承父任务的约束，但不能递归启动 Commander。
+
+每个子 Agent 都必须使用独立 workspace 和父任务预分配的 `task_id`。它们的重试次数、有效时间、
+权重和外援提醒完全隔离；达到三次重试或 15 分钟时，只通知 Commander 并继续工作。网页会话和本地
+模型服务同一时间只能由一个角色占用，API Provider 不得被 Commander 子 Agent 直接调用。
+
+子任务结束后，主审查官必须读取每个报告、状态、验证结果和基线差异，再生成合并计划与用户进度
+摘要。合并计划至少包含完成/未完成角色、修改文件、验证结果、冲突原因和继续工作状态。必须先
+展示独立的合并确认卡；只有用户批准后才逐文件写回主 workspace。主 workspace 被用户修改、角色
+之间内容冲突、路径越界或验证失败时，合并暂停且不得覆盖用户文件。
+
+合并结果需记录成功角色、未完成角色、实际修改文件和验证状态，并交给主审查官总结。运行时事件
+可通过以下命令查看和驱动：
+
+```bash
+python3 scripts/agentrelay_console.py commander-merge TASK_ID \
+  --workspace /path/to/project --runtime-root .agentrelay/commander
+```
+
+确认卡、需求卡、验证卡和回滚卡始终由主 Agent/Workflow 控制；外部模型只提供建议或受限修改，
+不能绕过确认、隔离、审查和验证流程。

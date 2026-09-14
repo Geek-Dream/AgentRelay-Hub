@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-AgentRelay 自动触发状态追踪器
+AgentRelay 候选求援状态追踪器
 
 职责：
 1. 接收 Codex Hook 事件
@@ -51,6 +51,7 @@ CODEX_DIR = Path(
 TRACKER_DIR = CODEX_DIR / "agent_relay_tracker"
 HISTORY_DIR = TRACKER_DIR / "history"
 SESSIONS_DIR = TRACKER_DIR / "sessions"
+PROBLEMS_DIR = TRACKER_DIR / "problems"
 LOGS_DIR = TRACKER_DIR / "logs"
 
 CURRENT_FILE = TRACKER_DIR / "current.json"
@@ -175,38 +176,118 @@ def get_session_file(session_id):
     )
 
 
+def get_problem_file(session_id, problem_id):
+    """返回会话内某个问题的独立快照路径。"""
+
+    session_id = normalize_session_id(session_id)
+    problem_id = normalize_session_id(problem_id)
+
+    if not session_id or not problem_id:
+        return None
+
+    return PROBLEMS_DIR / session_id / f"{problem_id}.json"
+
+
 # ============================================================
 # 常量
 # ============================================================
 
 MAX_WEIGHT = 3
-TIME_PER_WEIGHT = 5 * 60
+WEIGHT_TWO_SECONDS = 5 * 60
+# The historical warning ladder is 5m -> weight 2, 10m -> weight 3;
+# 15m is the independent escalation threshold.
+WEIGHT_THREE_SECONDS = 10 * 60
 
-EXPLICIT_RELAY_PATTERNS = [
-    r"调用\s*agent[-_\s]*relay",
-    r"使用\s*agent[-_\s]*relay",
-    r"让\s*agent[-_\s]*relay",
-    r"请\s*agent[-_\s]*relay",
-    r"调用\s*deepseek",
-    r"使用\s*deepseek",
-    r"让\s*deepseek",
-    r"问\s*deepseek",
-    r"咨询\s*deepseek",
-    r"交给\s*deepseek",
-    r"请\s*deepseek",
-    r"让\s*deepseek\s*分析",
-    r"让\s*deepseek\s*解决",
-    r"调用\s*深度求索",
-    r"使用\s*深度求索",
-    r"问\s*深度求索",
+PAUSE_PROBLEM_PATTERNS = [
+    r"先(?:不|别|不要)处理",
+    r"暂时(?:不|别|不要)处理",
+    r"先放一放",
+    r"暂停(?:这个|当前)?问题",
+    r"先别管",
+    r"跳过(?:这个|当前)?问题",
+    r"(?:pause|skip)\s+(?:this\s+)?(?:issue|problem|task)",
 ]
 
-EXPLICIT_RELAY_NEGATION_PATTERNS = [
-    r"(?:请\s*)?(?:不要|不|勿|禁止|无需|不必|不用|请勿)\s*(?:调用|使用|触发|启动|让|请|问|咨询|交给)\s*(?:deepseek|深度求索|agent[-_\s]*relay)",
-    r"(?:不要再|不再)\s*(?:调用|使用)\s*(?:deepseek|深度求索|agent[-_\s]*relay)",
-    r"(?:do\s+not|don't|dont|no\s+need\s+to|without)\s+(?:call|use)\s+(?:deepseek|agent[-_\s]*relay)",
+NEW_PROBLEM_PATTERNS = [
+    r"换(?:个|一个)(?:问题|话题)",
+    r"另(?:外|一个)(?:有|的)?(?:问题|事情)",
+    r"再问(?:个|一个)",
+    r"新(?:的)?问题",
+    r"转而处理",
+    r"(?:new|another|different)\s+(?:issue|problem|task|topic)",
 ]
 
+CONTINUATION_PATTERNS = [
+    r"继续",
+    r"还是",
+    r"仍然",
+    r"依然",
+    r"又(?:出现|报错|失败|不行)",
+    r"刚才|上面|前面|之前",
+    r"这个问题|当前问题|同一个问题",
+    r"没(?:有)?解决|没好|不行|失败了|又报错",
+    r"修改后|测试后|运行后|安装后",
+    r"你说的|你刚刚|我没明白|什么意思",
+    r"为什么|为啥|怎么做|如何做|然后呢|还有呢|可以吗|确定吗|好了吗",
+    r"^(?:不对|不是|对|好的|明白了|知道了)[。！!？?]?$",
+    r"(?:continue|still|again|same\s+(?:issue|problem)|previous|didn.?t\s+work|not\s+fixed)",
+]
+
+RESOLUTION_PATTERNS = [
+    r"已(?:经)?完成",
+    r"完成了",
+    r"已(?:经)?修复",
+    r"问题已(?:经)?解决",
+    r"已经解决",
+    r"验证通过",
+    r"测试(?:已)?通过",
+    r"构建(?:已)?通过",
+    r"编译(?:已)?通过",
+    r"运行正常",
+    r"全部通过",
+    r"可以封板",
+    r"\b(?:done|fixed|resolved)\b",
+    r"\btests? pass(?:ed)?\b",
+]
+
+UNRESOLVED_PATTERNS = [
+    r"未完成|尚未完成|还没完成",
+    r"未解决|尚未解决|还没解决|没有解决",
+    r"测试失败|验证失败|构建失败|编译失败",
+    r"仍然(?:失败|报错|不行)",
+    r"无法(?:完成|解决|验证)",
+    r"需要你(?:提供|确认|选择)",
+    r"等待你(?:提供|确认|选择)",
+    r"如果.*(?:完成|修复|解决|通过)",
+    r"需要(?:再|你)?(?:测试|验证|确认)",
+    r"\b(?:not|isn.?t)\s+(?:done|fixed|resolved|complete)\b",
+    r"\b(?:failed|blocked|cannot|can.?t)\b",
+]
+
+# Hook 只做保守的“行动句式”预筛选。它不能证明用户真的要求调用，
+# 只能让 Agent 再做一次完整语义审核。
+EXPLICIT_RELAY_CANDIDATE_PATTERNS = [
+    r"^\s*\$agent-relay(?:\s|$)",
+    r"^\s*agent[-_\s]*relay(?:\s|$)",
+    r"^\s*(?:请|麻烦|劳驾)?\s*(?:你\s*)?(?:现在|马上|立即)?\s*(?:帮我\s*)?(?:去\s*)?(?:调用|触发|启动|使用)(?:一下)?\s*(?:deepseek|深度求索|agent[-_\s]*relay|在线模型|外援模型)",
+    r"^\s*(?:请|麻烦|劳驾)?\s*(?:你\s*)?(?:现在|马上|立即)?\s*(?:帮我\s*)?(?:去\s*)?(?:问|咨询|找)(?:一下)?\s*(?:deepseek|深度求索|agent[-_\s]*relay|在线模型|外援模型)",
+    r"^\s*(?:请|麻烦|劳驾)?\s*(?:你\s*)?(?:现在|马上|立即)?\s*(?:帮我\s*)?(?:让|交给)\s*(?:deepseek|深度求索|agent[-_\s]*relay|在线模型|外援模型)",
+    r"^\s*(?:call|use|ask)\s+(?:deepseek|agent[-_\s]*relay|the\s+online\s+model)",
+]
+
+EXPLICIT_RELAY_CANDIDATE_NEGATIONS = [
+    r"(?:不要|不必|不用|无需|禁止|别|勿|请勿).*(?:deepseek|深度求索|agent[-_\s]*relay|在线模型|外援模型)",
+    r"(?:do\s+not|don't|dont|no\s+need\s+to|without).*(?:deepseek|agent[-_\s]*relay|online\s+model)",
+]
+
+EXPLICIT_RELAY_META_PREFIXES = [
+    r"^\s*(?:如果|假如|假设|比如|例如|譬如|当我说|用户说|文档说)",
+    r"^\s*(?:我|我们)?\s*(?:只是|正在|想要)?\s*(?:讨论|描述|解释|评审|分析)(?:一下)?",
+]
+
+EXPLICIT_RELAY_META_TERMS = [
+    r"(?:这句话|这个词|关键词|关键字|字样|触发规则|触发机制|误触发)",
+]
 
 # ============================================================
 # 默认状态
@@ -214,21 +295,28 @@ EXPLICIT_RELAY_NEGATION_PATTERNS = [
 
 def default_state(session_id=None, agent_id=None):
     return {
+        "schema_version": 2,
         "agent_id": agent_id,
         "session_id": session_id,
         "problem_active": False,
         "problem_id": None,
+        "problem_status": "idle",
 
-        # 编排任务标识。旧状态没有该字段时由迁移逻辑回填 problem_id。
+        # Orchestrator/Commander identity.  A child receives an explicit
+        # task_id from its parent; it must never infer one from a session.
         "task_id": None,
         "relay_round": 0,
 
         "created_at": None,
         "updated_at": None,
 
+        "initial_prompt": None,
         "last_prompt": None,
+        "problem_prompts": [],
+        "last_assistant_message": None,
 
         "turn_count": 0,
+        "turn_closed": False,
 
         # 语义重试次数。
         #
@@ -251,33 +339,52 @@ def default_state(session_id=None, agent_id=None):
         # 下载、安装、网络等待等操作不计入。
         "effective_time_seconds": 0.0,
 
-        # 当前专家轮次的有效时间与任务全生命周期累计时间。
-        # effective_time_seconds 保留为兼容字段，等同于本轮时间。
+        # Commander consumes the current relay round while the problem
+        # history keeps the lifetime total for local inspection.
         "round_effective_time_seconds": 0.0,
         "cumulative_effective_time_seconds": 0.0,
 
+        # 当前 Agent 主动处理区间的起点。UserPromptSubmit 开始计时，
+        # PreToolUse / Stop 结算；下载、安装和网络等待期间暂停。
+        "active_started_at": None,
+
         # 难度权重：
         #
-        # < 5 分钟   -> 1
-        # >= 5 分钟  -> 2
-        # >= 10 分钟 -> 3
-        "weight": 1,
+        # < 5 分钟    -> 1
+        # >= 5 分钟   -> 2
+        # >= 15 分钟  -> 3
+        #
+        # 注意：
+        # weight == 3 不直接触发 AgentRelay。
+        "weight": 0,
 
-        # 当前问题是否已经触发 AgentRelay。
+        # 当前问题是否已经进入 AgentRelay 外援协作。
+        # 该值只抑制 Hook 重复发送“首次求援”候选提醒，
+        # 不禁止 Agent 在同一问题内携带新结果继续追问。
         "relay_triggered": False,
 
-        # 当前问题是否已经发出过自动触发通知。
+        # 当前问题的外援协作是否仍处于活动状态。
+        "relay_collaboration_active": False,
+
+        # 当前问题成功调用 AgentRelay 的次数（首次 + 后续追问）。
+        "relay_call_count": 0,
+
+        # 当前问题是否已经发出过首次求援候选提醒。
         # 这不代表 AgentRelay 已经调用成功。
         "relay_signal_emitted": False,
 
         # 触发通知只属于这个问题，避免旧状态污染新问题。
         "relay_signal_problem_id": None,
 
-        # AgentRelay 触发原因。
+        # AgentRelay 首次进入外援协作的原因。
         "relay_trigger_reason": None,
 
-        # 用户是否明确要求 AgentRelay。
-        "explicit_relay_request": False,
+        # 最近一次 AgentRelay 调用原因，后续追问时更新。
+        "relay_last_reason": None,
+
+        # Hook 从当前用户消息中发现了疑似直接调用句式。
+        # 这只是交给 Agent 审核的候选，不是已经确认的显式请求。
+        "explicit_relay_candidate": False,
 
         # 当前正在执行的工具。
         #
@@ -300,6 +407,10 @@ def default_state(session_id=None, agent_id=None):
 
         # 当前问题是否已经解决。
         "resolved": False,
+
+        # 当前问题结束原因和时间，供会话内问题历史查看。
+        "closed_reason": None,
+        "closed_at": None,
     }
 
 
@@ -336,6 +447,11 @@ def ensure_dirs():
     )
 
     SESSIONS_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    PROBLEMS_DIR.mkdir(
         parents=True,
         exist_ok=True,
     )
@@ -471,21 +587,49 @@ def read_state(session_id=None, agent_id=None):
 
         base.update(data)
 
+        # Migrate states written before Commander task envelopes existed.
+        # Keep the problem id as a stable fallback while allowing an explicit
+        # parent-assigned task id to remain isolated from sibling sessions.
+        if not base.get("task_id"):
+            base["task_id"] = base.get("problem_id")
+        if "round_effective_time_seconds" not in data:
+            base["round_effective_time_seconds"] = float(
+                base.get("effective_time_seconds", 0) or 0
+            )
+        if "cumulative_effective_time_seconds" not in data:
+            base["cumulative_effective_time_seconds"] = float(
+                base.get("effective_time_seconds", 0) or 0
+            )
+
+        # 旧版曾通过关键词正则把用户文本直接判成显式调用请求。
+        # 显式请求现在只由 Agent 做语义判断，Tracker 不再保留该状态。
+        base.pop("explicit_relay_request", None)
+
+        # v1 只有“每会话一份累计状态”。迁移后先视为上一轮已经结束，
+        # 下一条消息再按问题相关性决定继续还是切分，避免旧计时无条件污染新问题。
+        if int(data.get("schema_version", 1) or 1) < 2:
+            base["schema_version"] = 2
+            base["problem_status"] = (
+                "active" if base.get("problem_active") else "idle"
+            )
+            base["initial_prompt"] = base.get("last_prompt")
+            base["problem_prompts"] = (
+                [base.get("last_prompt")] if base.get("last_prompt") else []
+            )
+            base["turn_closed"] = True
+            base["active_started_at"] = None
+            # Preserve the legacy v1 ladder for archived sessions during
+            # migration (v1 raised weight 3 only at the 15-minute mark).
+            legacy_seconds = float(base.get("effective_time_seconds", 0) or 0)
+            if base.get("problem_active"):
+                base["weight"] = 3 if legacy_seconds >= 15 * 60 else (2 if legacy_seconds >= 5 * 60 else 1)
+            else:
+                base["weight"] = 0
+
         # 如果 Session 状态文件缺少 session_id，
         # 使用当前调用传入的 session_id 修复。
         if session_id:
             base["session_id"] = session_id
-
-        # 兼容第一代状态文件，并补齐编排任务/轮次字段。
-        if not base.get("task_id"):
-            base["task_id"] = base.get("problem_id")
-        if "relay_round" not in base:
-            base["relay_round"] = 0
-        legacy_time = float(base.get("effective_time_seconds", 0) or 0)
-        if "round_effective_time_seconds" not in base:
-            base["round_effective_time_seconds"] = legacy_time
-        if "cumulative_effective_time_seconds" not in base:
-            base["cumulative_effective_time_seconds"] = legacy_time
 
         return base
 
@@ -494,6 +638,32 @@ def read_state(session_id=None, agent_id=None):
             session_id=session_id,
             agent_id=agent_id
         )
+
+def atomic_write_json(path, value):
+    """原子写入 JSON，避免并发读取半截文件。"""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_file = path.with_suffix(path.suffix + ".tmp")
+
+    with open(temp_file, "w", encoding="utf-8") as f:
+        json.dump(value, f, ensure_ascii=False, indent=2)
+
+    os.replace(temp_file, path)
+
+
+def write_problem_snapshot(state):
+    """把当前问题写入其所属会话的问题目录。"""
+
+    problem_file = get_problem_file(
+        state.get("session_id"),
+        state.get("problem_id"),
+    )
+
+    if problem_file is None:
+        return
+
+    atomic_write_json(problem_file, state)
+
 
 def write_state(state, session_id=None, agent_id=None):
     """
@@ -555,26 +725,21 @@ def write_state(state, session_id=None, agent_id=None):
     if agent_id:
         state["agent_id"] = agent_id
 
-    temp_file = state_file.with_suffix(
-        ".tmp"
+    if not state.get("task_id") and state.get("problem_id"):
+        state["task_id"] = state["problem_id"]
+    effective = float(state.get("effective_time_seconds", 0) or 0)
+    state["round_effective_time_seconds"] = float(
+        state.get("round_effective_time_seconds", effective) or 0
+    )
+    state["cumulative_effective_time_seconds"] = max(
+        float(state.get("cumulative_effective_time_seconds", effective) or 0),
+        effective,
     )
 
-    with open(
-        temp_file,
-        "w",
-        encoding="utf-8",
-    ) as f:
-        json.dump(
-            state,
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
+    state["updated_at"] = iso_now()
 
-    os.replace(
-        temp_file,
-        state_file,
-    )
+    atomic_write_json(state_file, state)
+    write_problem_snapshot(state)
 
 def update_state(mutator):
     """
@@ -717,6 +882,166 @@ def normalize_text(value):
     ).strip()
 
 
+def matches_any_pattern(text, patterns):
+    text = normalize_text(text)
+    return any(
+        re.search(pattern, text, re.IGNORECASE)
+        for pattern in patterns
+    )
+
+
+def contains_explicit_relay_candidate(text):
+    """
+    保守识别“现在调用外援”的行动句式。
+
+    这里只为 Hook 生成候选提醒。引用、代码、假设、规则讨论和否定句
+    不应产生候选；最终是否调用始终由 Agent 理解完整语境后决定。
+    """
+
+    text = normalize_text(text)
+    if not text:
+        return False
+
+    # 先移除常见引用和代码区域，避免把示例命令当成当前行动指令。
+    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    text = re.sub(r"`[^`\n]*`", " ", text)
+    text = re.sub(r"[“‘][^”’\n]*[”’]", " ", text)
+    text = re.sub(r'"[^"\n]*"', " ", text)
+
+    # 按自然语句和逗号分段，既支持“先说明上下文，再下达调用指令”，
+    # 也能排除“如果我说你调用 DeepSeek”这种假设片段。
+    clauses = re.split(r"[。！？!?；;，,\n]+", text)
+
+    for clause in clauses:
+        clause = normalize_text(clause)
+        if not clause:
+            continue
+
+        if matches_any_pattern(clause, EXPLICIT_RELAY_CANDIDATE_NEGATIONS):
+            continue
+        if matches_any_pattern(clause, EXPLICIT_RELAY_META_PREFIXES):
+            continue
+        if matches_any_pattern(clause, EXPLICIT_RELAY_META_TERMS):
+            continue
+        if matches_any_pattern(clause, EXPLICIT_RELAY_CANDIDATE_PATTERNS):
+            return True
+
+    return False
+
+
+def assistant_indicates_resolution(text):
+    """仅在助手明确声称完成且没有反向表述时判定解决。"""
+
+    text = normalize_text(text)
+
+    if not text or matches_any_pattern(text, UNRESOLVED_PATTERNS):
+        return False
+
+    return matches_any_pattern(text, RESOLUTION_PATTERNS)
+
+
+def significant_terms(text):
+    """提取保守的中英文关键词，用于区分同会话内的问题。"""
+
+    text = normalize_text(text).lower()
+    terms = set(
+        re.findall(r"[a-z0-9_./:-]{3,}", text)
+    )
+    ignored = {
+        "这个", "问题", "一下", "可以", "现在", "然后", "就是",
+        "需要", "已经", "一个", "什么", "怎么", "处理", "修改",
+        "检查", "告诉", "进行", "里面", "目前", "时候", "发现",
+    }
+
+    for chunk in re.findall(r"[\u4e00-\u9fff]{2,}", text):
+        for width in (2, 3):
+            for index in range(max(0, len(chunk) - width + 1)):
+                term = chunk[index:index + width]
+                if term not in ignored:
+                    terms.add(term)
+
+    return terms
+
+
+def prompt_belongs_to_current_problem(state, prompt):
+    """保守判断新消息是否仍属于当前问题链。"""
+
+    prompt = normalize_text(prompt)
+
+    if matches_any_pattern(prompt, PAUSE_PROBLEM_PATTERNS):
+        return False
+
+    if matches_any_pattern(prompt, NEW_PROBLEM_PATTERNS):
+        return False
+
+    if matches_any_pattern(prompt, CONTINUATION_PATTERNS):
+        return True
+
+    # Agent 尚未结束当前轮时收到的 steer，默认属于同一问题。
+    if not state.get("turn_closed", False):
+        return True
+
+    prompts = state.get("problem_prompts") or []
+    corpus = " ".join(
+        [state.get("initial_prompt") or ""]
+        + [normalize_text(value) for value in prompts[-8:]]
+    )
+    current_terms = significant_terms(corpus)
+    new_terms = significant_terms(prompt)
+    shared = current_terms & new_terms
+
+    if len(shared) >= 2:
+        return True
+
+    # 路径、错误码、命令或英文技术标识的精确复现足以认为是延续。
+    if any(re.search(r"[a-z0-9_./:-]", term) for term in shared):
+        return True
+
+    return False
+
+
+def pause_prompt_starts_new_problem(prompt):
+    """判断暂停旧问题的同一条消息是否明确指定了新任务。"""
+
+    prompt = normalize_text(prompt)
+    return bool(re.search(
+        r"(?:改为|转而|然后|接着|现在|先去|先来|[,，;；。]\s*先)"
+        r"(?:再)?(?:处理|解决|检查|修改|实现|做)",
+        prompt,
+        re.IGNORECASE,
+    ))
+
+
+def accrue_active_time(state, ended_at=None):
+    """结算 Agent 主动分析/思考时间，并刷新当前问题权重。"""
+
+    started_at = state.get("active_started_at")
+    state["active_started_at"] = None
+
+    if started_at is None or not state.get("problem_active"):
+        return 0.0
+
+    ended_at = float(ended_at if ended_at is not None else now_ts())
+    duration = max(0.0, ended_at - float(started_at))
+    state["effective_time_seconds"] = (
+        float(state.get("effective_time_seconds", 0) or 0)
+        + duration
+    )
+    state["weight"] = calculate_weight(
+        state["effective_time_seconds"]
+    )
+    return duration
+
+
+def start_active_time(state, started_at=None):
+    """开始记录当前问题的主动处理时间。"""
+
+    if state.get("problem_active"):
+        state["active_started_at"] = float(
+            started_at if started_at is not None else now_ts()
+        )
+
+
 def build_solution_key(tool_name, tool_input):
     """
     为一次工具方案生成保守的稳定标识。
@@ -789,36 +1114,6 @@ def record_failed_solution(state, solution_key, tool_name):
     )
 
     return result
-
-
-def contains_explicit_relay_request(text):
-    """
-    判断用户是否明确要求调用 AgentRelay。
-    """
-
-    text = normalize_text(text)
-
-    if not text:
-        return False
-
-    # 否定请求不能触发 AgentRelay。
-    for pattern in EXPLICIT_RELAY_NEGATION_PATTERNS:
-        if re.search(
-            pattern,
-            text,
-            re.IGNORECASE,
-        ):
-            return False
-
-    for pattern in EXPLICIT_RELAY_PATTERNS:
-        if re.search(
-            pattern,
-            text,
-            re.IGNORECASE,
-        ):
-            return True
-
-    return False
 
 
 def is_error_like_output(value):
@@ -900,6 +1195,15 @@ EXCLUDED_COMMAND_PATTERNS = [
     r"\buv\s+pip\s+install\b",
     r"\bconda\s+install\b",
     r"\bpython.*-m\s+pip\s+install\b",
+    r"\bdocker\s+pull\b",
+    r"\bdocker\s+build\b",
+    r"\b(?:npm|pnpm|yarn)\s+(?:run\s+)?build\b",
+    r"\b(?:mvn|mvnw)\b.*\b(?:compile|package|install|test)\b",
+    r"\b(?:gradle|gradlew)\b.*\b(?:build|test|assemble)\b",
+    r"\bcargo\s+(?:build|test)\b",
+    r"\bgo\s+(?:build|test)\b",
+    r"\bxcodebuild\b",
+    r"\bagent_relay\.py\b",
 ]
 
 
@@ -947,7 +1251,7 @@ def calculate_weight(
     >= 5 分钟：
         weight = 2
 
-    >= 10 分钟：
+    >= 15 分钟：
         weight = 3
 
     注意：
@@ -964,10 +1268,10 @@ def calculate_weight(
         effective_seconds or 0
     )
 
-    if effective_seconds >= 10 * 60:
+    if effective_seconds >= WEIGHT_THREE_SECONDS:
         return 3
 
-    if effective_seconds >= 5 * 60:
+    if effective_seconds >= WEIGHT_TWO_SECONDS:
         return 2
 
     return 1
@@ -979,16 +1283,21 @@ def calculate_weight(
 
 def get_trigger_conditions(state):
     """
-    统一计算当前问题是否满足 AgentRelay 条件。
+    统一计算是否应向 Agent 发出“考虑首次求援”的候选提醒。
 
-    三个真正的触发条件：
+    Tracker 判断两个可机械验证的计数条件，并对用户消息做保守的
+    直接行动句式预筛选：
 
     1. retry_count >= 3
     2. effective_time >= 15 分钟
-    3. 用户明确要求 AgentRelay
 
-    weight 只是难度指标，
-    不是独立触发条件。
+    3. 当前消息疑似直接要求调用 AgentRelay
+
+    第 3 项只是候选，不能由 DeepSeek / AgentRelay 关键词本身成立。
+    用户是否真的要求当前调用必须由 Agent 结合语境判断。
+
+    即使计数条件满足，Hook 也只发候选提醒；是否值得调用以及是否
+    与当前未解决问题匹配，最终由 Agent 判断。
     """
 
     retry_count = int(
@@ -999,13 +1308,18 @@ def get_trigger_conditions(state):
         or 0
     )
 
-    effective_seconds = float(state.get("round_effective_time_seconds", state.get("effective_time_seconds", 0)) or 0)
+    round_value = state.get("round_effective_time_seconds")
+    legacy_value = state.get("effective_time_seconds", 0)
+    # Older callers only populated effective_time_seconds.  Treat a missing
+    # or zero round value as legacy data unless the legacy value is also zero.
+    effective_seconds = float(
+        (legacy_value if (round_value is None or
+                          (float(round_value or 0) == 0 and float(legacy_value or 0) > 0))
+         else round_value) or 0
+    )
 
-    explicit_request = bool(
-        state.get(
-            "explicit_relay_request",
-            False,
-        )
+    explicit_candidate = bool(
+        state.get("explicit_relay_candidate", False)
     )
 
     already_triggered = bool(
@@ -1037,27 +1351,24 @@ def get_trigger_conditions(state):
         "effective_time_seconds": (
             effective_seconds
         ),
+
         "round_effective_time_seconds": effective_seconds,
-        "cumulative_effective_time_seconds": float(state.get("cumulative_effective_time_seconds", effective_seconds) or 0),
+        "cumulative_effective_time_seconds": float(state.get(
+            "cumulative_effective_time_seconds", effective_seconds
+        ) or 0),
 
         "time_trigger": (
             effective_seconds >= 15 * 60
         ),
 
-        "explicit_request": (
-            explicit_request
-        ),
-
-        "explicit_trigger": (
-            explicit_request
-        ),
+        "explicit_candidate": explicit_candidate,
 
         "weight": int(
             state.get(
                 "weight",
-                1,
+                0,
             )
-            or 1
+            or 0
         ),
 
         "already_triggered": (
@@ -1065,6 +1376,8 @@ def get_trigger_conditions(state):
         ),
 
         "signal_emitted": signal_emitted,
+
+        "requires_agent_validation": True,
     }
 
     automatic_trigger = (
@@ -1072,10 +1385,10 @@ def get_trigger_conditions(state):
         or conditions["time_trigger"]
     )
 
-    # 自动触发受防重复状态限制；用户显式请求是一次性放行事件，
-    # 即使当前问题已经自动触发过 AgentRelay 也必须允许。
+    # 直接行动候选不受计数门槛限制；即使权重和重试为零，也要交给
+    # Agent 审核。计数提醒则只为尚未进入外援协作的问题发送一次。
     conditions["should_trigger"] = (
-        conditions["explicit_trigger"]
+        explicit_candidate
         or (
             automatic_trigger
             and not already_triggered
@@ -1084,11 +1397,9 @@ def get_trigger_conditions(state):
     )
 
     if (
-        conditions["explicit_trigger"]
+        conditions["explicit_candidate"]
     ):
-        conditions["reason"] = (
-            "explicit_request"
-        )
+        conditions["reason"] = "user_direct_request_candidate"
 
     elif (
         conditions["retry_trigger"]
@@ -1113,29 +1424,21 @@ def get_trigger_conditions(state):
 
 
 # ============================================================
-# AgentRelay 触发信号输出
+# AgentRelay 候选提醒输出
 # ============================================================
 
-def emit_relay_trigger(state):
+def emit_relay_trigger(state, hook_event_name="PostToolUse"):
     """
-    当 PostToolUse 后当前问题满足 AgentRelay 自动触发条件时，
-    向 stdout 输出 Codex Hook 可消费的 JSON additionalContext。
+    当当前问题达到计数门槛或出现直接行动句式候选时，
+    向 Agent 输出候选提醒。
 
     注意：
-    - 这里只负责通知 Agent
+    - 这里只负责提醒 Agent 做语义审核
+    - 提醒本身不是调用命令，也不是已经确认的触发结论
     - 不在 Tracker 内直接调用 agent_relay.py
     - 不修改 state["relay_triggered"]
     """
 
-    try:
-        from scripts.task_monitor import TaskMonitor
-    except ImportError:
-        try:
-            from task_monitor import TaskMonitor
-        except ImportError:
-            TaskMonitor = None
-    if TaskMonitor:
-        TaskMonitor().observe_tracker_state(state)
     conditions = get_trigger_conditions(state)
 
     if not conditions.get("should_trigger"):
@@ -1152,43 +1455,45 @@ def emit_relay_trigger(state):
         )
 
     additional_context = (
-        "AgentRelay 自动触发条件已经满足。"
-        f"触发原因: {conditions.get('reason')}。"
+        "AgentRelay 候选求援提醒（不是调用命令）。"
+        f"候选原因: {conditions.get('reason')}。"
         f"retry_count: {conditions.get('retry_count')}。"
         "effective_time_seconds: "
         f"{int(conditions.get('effective_time_seconds', 0))}。"
         f"当前问题: {problem_context or '未记录用户问题摘要'}。"
-        "请根据 AgentRelay Skill 判断并调用 AgentRelay；"
-        "Hook 不会自行调用 agent_relay.py。"
+        "模型判断优先级最高：必须先核对问题仍未解决、提醒与当前问题匹配、"
+        "当前不是单纯等待，并判断外援是否确实值得调用。只有模型审核通过后"
+        "才可根据 AgentRelay Skill 调用；审核不通过就忽略本提醒并继续正常处理。"
+        "Hook 不会调用 agent_relay.py；用户消息候选只来自保守的直接行动句式预筛选，"
+        "单独出现 DeepSeek 或 AgentRelay 字样不能触发。"
     )
 
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "additionalContext": additional_context,
-        },
-    }, ensure_ascii=False), flush=True)
+    if hook_event_name == "Stop":
+        output = {
+            "decision": "block",
+            "reason": additional_context,
+        }
+    else:
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": additional_context,
+            },
+        }
 
-    state["relay_signal_emitted"] = True
-    state["relay_signal_problem_id"] = state.get(
-        "problem_id"
-    )
+    print(json.dumps(output, ensure_ascii=False), flush=True)
 
-    # 显式请求只消费一次，避免后续每个 PostToolUse 重复发信号。
-    state["explicit_relay_request"] = False
+    # 显式行动候选是一次性消息，不消耗当前问题未来的计数门槛提醒。
+    if not conditions.get("explicit_candidate"):
+        state["relay_signal_emitted"] = True
+        state["relay_signal_problem_id"] = state.get(
+            "problem_id"
+        )
+    state["explicit_relay_candidate"] = False
 
-    write_state(state)
+    write_state(state, session_id=state.get("session_id"))
 
     return True
-
-def task_context_snapshot(state):
-    """Return a stable task event envelope for Orchestrator integrations."""
-    return {"task_id": state.get("task_id") or state.get("problem_id"),
-            "retry_count": int(state.get("retry_count", 0) or 0),
-            "weight": int(state.get("weight", 0) or 0),
-            "need_escalation": bool(state.get("need_escalation", False)),
-            "effective_time_seconds": float(state.get("round_effective_time_seconds", 0) or 0),
-            "problem_active": bool(state.get("problem_active", False))}
 
 # ============================================================
 # 问题生命周期
@@ -1198,9 +1503,9 @@ def archive_current_problem(
     state,
 ):
     """
-    将当前问题归档到：
+    将当前问题归档到所属会话的问题目录：
 
-        ~/.codex/agent_relay_tracker/history/
+        ~/.codex/agent_relay_tracker/problems/<session_id>/
 
     每个问题一个 JSON 文件。
     """
@@ -1213,26 +1518,26 @@ def archive_current_problem(
         return
 
     try:
-        archive_file = (
-            HISTORY_DIR
-            / f"{problem_id}.json"
-        )
-
-        with open(
-            archive_file,
-            "w",
-            encoding="utf-8",
-        ) as f:
-            json.dump(
-                state,
-                f,
-                ensure_ascii=False,
-                indent=2,
-            )
-
+        write_problem_snapshot(state)
     except Exception:
         # 归档失败不能影响 Codex。
         pass
+
+
+def close_problem_state(state, status, reason=None):
+    """停止当前问题计时并保存独立快照。"""
+
+    accrue_active_time(state)
+    state["problem_active"] = False
+    state["problem_status"] = status
+    state["resolved"] = status == "resolved"
+    state["closed_reason"] = normalize_text(reason) or status
+    state["closed_at"] = iso_now()
+    state["turn_closed"] = True
+    state["pending_tools"] = {}
+    state["relay_collaboration_active"] = False
+    archive_current_problem(state)
+    return state
 
 
 def create_new_problem(
@@ -1261,6 +1566,8 @@ def create_new_problem(
     )
 
     state["problem_active"] = True
+    state["problem_status"] = "active"
+    state["weight"] = 1
 
     state["problem_id"] = (
         problem_id
@@ -1271,19 +1578,19 @@ def create_new_problem(
 
     state["updated_at"] = iso_now()
 
-    state["last_prompt"] = (
-        normalize_text(prompt)
+    normalized_prompt = normalize_text(prompt)
+    state["initial_prompt"] = normalized_prompt
+    state["last_prompt"] = normalized_prompt
+    state["problem_prompts"] = (
+        [normalized_prompt] if normalized_prompt else []
     )
 
     state["turn_count"] = 1
-    state["relay_round"] = 0
+    state["turn_closed"] = False
+    start_active_time(state)
 
-    state[
-        "explicit_relay_request"
-    ] = (
-        contains_explicit_relay_request(
-            prompt
-        )
+    state["explicit_relay_candidate"] = (
+        contains_explicit_relay_candidate(prompt)
     )
 
     log_event(
@@ -1313,8 +1620,10 @@ def start_new_problem(prompt=None, session_id=None):
         if old_state.get(
             "problem_active"
         ):
-            archive_current_problem(
-                old_state
+            close_problem_state(
+                old_state,
+                "superseded",
+                "manual_new_problem",
             )
 
         state = create_new_problem(
@@ -1335,17 +1644,7 @@ def resolve_problem(session_id=None):
     """
     将当前问题标记为已经解决。
 
-    注意：
-
-    这里不会立即删除 current.json。
-
-    而是：
-
-        problem_active = false
-        resolved = true
-
-    下一次用户产生新问题时，
-    再创建新的问题状态。
+    已解决问题保留在会话问题历史；当前计时器立即回到空闲零值。
     """
 
     lock = acquire_lock()
@@ -1356,11 +1655,12 @@ def resolve_problem(session_id=None):
         if state.get(
             "problem_active"
         ):
-            state["resolved"] = True
-
-            state[
-                "problem_active"
-            ] = False
+            agent_id = state.get("agent_id")
+            close_problem_state(
+                state,
+                "resolved",
+                "verified_complete",
+            )
 
             log_event(
                 "problem_resolved",
@@ -1387,10 +1687,10 @@ def resolve_problem(session_id=None):
                 },
             )
 
-            archive_current_problem(
-                state
+            state = default_state(
+                session_id=session_id,
+                agent_id=agent_id,
             )
-
             write_state(state, session_id)
 
         return state
@@ -1565,16 +1865,14 @@ def mark_new_branch(session_id=None):
 
 def mark_relay(reason=None, session_id=None):
     """
-    标记当前问题已经触发 AgentRelay。
+    标记当前问题已经进入 AgentRelay 外援协作。
 
     注意：
 
     这里不负责启动 AgentRelay。
 
-    这里只记录：
-
-        AgentRelay 已经被触发
-        触发原因是什么
+    这里只记录当前问题已经进入外援协作，以及成功调用次数。
+    第一次调用和携带新结果的后续追问都使用同一个当前问题状态。
 
     真正调用 AgentRelay Playwright
     由 Skill / 外部流程负责。
@@ -1585,19 +1883,21 @@ def mark_relay(reason=None, session_id=None):
     try:
         state = read_state(session_id)
 
-        state[
-            "relay_triggered"
-        ] = True
+        first_call = not bool(state.get("relay_triggered", False))
+        normalized_reason = normalize_text(reason) or "unknown"
 
-        state[
-            "relay_trigger_reason"
-        ] = (
-            normalize_text(reason)
-            or "unknown"
+        state["relay_triggered"] = True
+        state["relay_collaboration_active"] = True
+        state["relay_call_count"] = (
+            int(state.get("relay_call_count", 0) or 0) + 1
         )
+        state["relay_last_reason"] = normalized_reason
+
+        if first_call or not state.get("relay_trigger_reason"):
+            state["relay_trigger_reason"] = normalized_reason
 
         log_event(
-            "relay_triggered",
+            "relay_triggered" if first_call else "relay_followup",
             {
                 "problem_id": (
                     state.get(
@@ -1606,10 +1906,10 @@ def mark_relay(reason=None, session_id=None):
                 ),
 
                 "reason": (
-                    state.get(
-                        "relay_trigger_reason"
-                    )
+                    normalized_reason
                 ),
+
+                "relay_call_count": state.get("relay_call_count", 1),
 
                 "retry_count": (
                     state.get(
@@ -1627,16 +1927,6 @@ def mark_relay(reason=None, session_id=None):
             },
         )
 
-        # 专家调用完成后开启下一轮：保留累计时间，但清零本轮计时和重试。
-        state["relay_round"] = int(state.get("relay_round", 0) or 0) + 1
-        state["round_effective_time_seconds"] = 0.0
-        state["effective_time_seconds"] = 0.0
-        state["retry_count"] = 0
-        state["weight"] = 1
-        state["relay_triggered"] = False
-        state["relay_signal_emitted"] = False
-        state["relay_signal_problem_id"] = None
-
         write_state(state, session_id)
 
         return state
@@ -1646,13 +1936,50 @@ def mark_relay(reason=None, session_id=None):
 
 
 def confirm_relay_success(reason=None, session_id=None, task_id=None):
-    """Confirm a successful Expert call and start the next task round."""
-    if task_id:
+    """Record a successful expert call and begin a fresh relay round.
+
+    The problem remains active and its cumulative time is retained, while
+    retry/time counters are reset for the next round.  A mismatched task id
+    is rejected so a sibling Commander child cannot mutate this session.
+    """
+    state = read_state(session_id)
+    current_task = state.get("task_id") or state.get("problem_id")
+    if task_id and current_task != task_id:
+        return None
+    state = mark_relay(reason or "expert_success", session_id=session_id)
+    lock = acquire_lock()
+    try:
         state = read_state(session_id)
-        current_task = state.get("task_id") or state.get("problem_id")
-        if current_task != task_id:
-            return None
-    return mark_relay(reason=reason or "expert_success", session_id=session_id)
+        state["relay_round"] = int(state.get("relay_round", 0) or 0) + 1
+        state["round_effective_time_seconds"] = 0.0
+        state["effective_time_seconds"] = 0.0
+        state["retry_count"] = 0
+        state["weight"] = 1
+        state["relay_signal_emitted"] = False
+        state["relay_signal_problem_id"] = None
+        state["relay_collaboration_active"] = True
+        write_state(state, session_id)
+        return state
+    finally:
+        release_lock(lock)
+
+
+def task_context_snapshot(state):
+    """Return the minimal task event envelope consumed by RuntimeManager."""
+    round_value = state.get("round_effective_time_seconds")
+    legacy_value = state.get("effective_time_seconds", 0)
+    round_time = float((legacy_value if (round_value is None or
+                                         (float(round_value or 0) == 0 and float(legacy_value or 0) > 0))
+                        else round_value) or 0)
+    conditions = get_trigger_conditions({**state, "effective_time_seconds": round_time})
+    return {
+        "task_id": state.get("task_id") or state.get("problem_id"),
+        "retry_count": int(state.get("retry_count", 0) or 0),
+        "weight": int(state.get("weight", 0) or 0),
+        "need_escalation": bool(conditions.get("retry_trigger") or conditions.get("time_trigger")),
+        "effective_time_seconds": round_time,
+        "problem_active": bool(state.get("problem_active", False)),
+    }
 # ============================================================
 # UserPromptSubmit
 # ============================================================
@@ -1669,7 +1996,7 @@ def handle_user_prompt(
     1. 没有当前问题 -> 创建新问题
     2. 当前问题已经解决 -> 创建新问题
     3. 当前问题继续对话 -> 更新 turn_count
-    4. 检测用户是否明确要求 AgentRelay
+    4. 显式 AgentRelay 请求留给 Agent 做语义判断，Hook 不扫描关键词
     """
 
     prompt = normalize_text(prompt)
@@ -1681,10 +2008,23 @@ def handle_user_prompt(
             session_id=session_id
         )
 
+        pause_requested = matches_any_pattern(
+            prompt,
+            PAUSE_PROBLEM_PATTERNS,
+        )
+
         # 没有当前问题
         if not state.get(
             "problem_active"
         ):
+            if pause_requested and not pause_prompt_starts_new_problem(prompt):
+                state = default_state(
+                    session_id=session_id,
+                    agent_id=state.get("agent_id"),
+                )
+                write_state(state, session_id=session_id)
+                return state
+
             state = create_new_problem(
                 prompt,
                 session_id=session_id,
@@ -1698,23 +2038,61 @@ def handle_user_prompt(
 
             return state
 
-        # 当前问题已经解决
-        if state.get("resolved"):
-            archive_current_problem(
-                state
+        # 暂停旧问题时，它的时间、权重和重试立即停止参与当前判断。
+        if pause_requested:
+            old_problem_id = state.get("problem_id")
+            agent_id = state.get("agent_id")
+            close_problem_state(
+                state,
+                "paused",
+                "user_paused",
             )
 
+            if pause_prompt_starts_new_problem(prompt):
+                state = create_new_problem(
+                    prompt,
+                    session_id=session_id,
+                    agent_id=agent_id,
+                )
+            else:
+                state = default_state(
+                    session_id=session_id,
+                    agent_id=agent_id,
+                )
+
+            log_event(
+                "problem_paused",
+                {
+                    "session_id": session_id,
+                    "problem_id": old_problem_id,
+                },
+            )
+            write_state(state, session_id=session_id)
+            return state
+
+        # 上一轮已经结束且新消息与旧问题无关，自动切成独立问题。
+        if not prompt_belongs_to_current_problem(state, prompt):
+            old_problem_id = state.get("problem_id")
+            agent_id = state.get("agent_id")
+            close_problem_state(
+                state,
+                "superseded",
+                "new_user_problem",
+            )
             state = create_new_problem(
                 prompt,
                 session_id=session_id,
-                agent_id=state.get("agent_id"),
+                agent_id=agent_id,
             )
-
-            write_state(
-                state,
-                session_id=session_id,
+            log_event(
+                "problem_switched",
+                {
+                    "session_id": session_id,
+                    "previous_problem_id": old_problem_id,
+                    "problem_id": state.get("problem_id"),
+                },
             )
-
+            write_state(state, session_id=session_id)
             return state
 
         # 当前问题继续
@@ -1730,23 +2108,24 @@ def handle_user_prompt(
         )
 
         state["last_prompt"] = prompt
+        prompts = list(state.get("problem_prompts") or [])
+        if prompt:
+            prompts.append(prompt)
+        state["problem_prompts"] = prompts[-12:]
+        state["turn_closed"] = False
+        if state.get("active_started_at") is None:
+            start_active_time(state)
 
-        # 检测用户明确要求 AgentRelay
-        if contains_explicit_relay_request(
-            prompt
-        ):
-            state[
-                "explicit_relay_request"
-            ] = True
+        # Hook 只标记疑似直接行动句式，最终是否调用由 Agent 审核。
+        state["explicit_relay_candidate"] = (
+            contains_explicit_relay_candidate(prompt)
+        )
 
+        if state["explicit_relay_candidate"]:
             log_event(
-                "explicit_relay_request",
+                "explicit_relay_candidate",
                 {
-                    "problem_id": (
-                        state.get(
-                            "problem_id"
-                        )
-                    ),
+                    "problem_id": state.get("problem_id"),
                     "prompt": prompt,
                 },
             )
@@ -1833,6 +2212,9 @@ def handle_pre_tool_use(
                 session_id=session_id,
                 agent_id=state.get("agent_id"),
             )
+
+        # UserPromptSubmit 到工具启动之间是 Agent 的主动分析/思考时间。
+        accrue_active_time(state, ended_at=started_at)
 
         pending_tools = state.get(
             "pending_tools",
@@ -1988,23 +2370,30 @@ def handle_post_tool_use(
             and not excluded
             and duration > 0
         ):
-            current_round_time = float(state.get("round_effective_time_seconds", state.get("effective_time_seconds", 0)) or 0)
-            current_total_time = float(state.get("cumulative_effective_time_seconds", state.get("effective_time_seconds", 0)) or 0)
+            current_round_time = float(state.get(
+                "round_effective_time_seconds",
+                state.get("effective_time_seconds", 0),
+            ) or 0)
+            current_total_time = float(state.get(
+                "cumulative_effective_time_seconds",
+                state.get("effective_time_seconds", 0),
+            ) or 0)
             state["round_effective_time_seconds"] = current_round_time + duration
             state["cumulative_effective_time_seconds"] = current_total_time + duration
-            # Legacy consumers read this field; it now means current-round time.
+            # Keep the legacy field as the current round for trigger consumers.
             state["effective_time_seconds"] = state["round_effective_time_seconds"]
+
+        # 工具结束后 Agent 继续分析，重新开始主动处理计时。
+        start_active_time(state)
 
         # ====================================================
         # Weight
         # ====================================================
 
-        state["weight"] = calculate_weight(
-            float(
-                state.get("round_effective_time_seconds", state.get("effective_time_seconds", 0))
-                or 0
-            )
-        )
+        state["weight"] = calculate_weight(float(
+            state.get("round_effective_time_seconds",
+                      state.get("effective_time_seconds", 0)) or 0
+        ))
 
         # ====================================================
         # 工具失败统计
@@ -2113,7 +2502,7 @@ def handle_post_tool_use(
 # Stop
 # ============================================================
 
-def handle_stop(session_id=None):
+def handle_stop(session_id=None, last_assistant_message=None):
     """
     Stop Hook。
 
@@ -2132,42 +2521,78 @@ def handle_stop(session_id=None):
             session_id=session_id
         )
 
+        accrue_active_time(state)
+        assistant_message = normalize_text(last_assistant_message)
+        state["last_assistant_message"] = assistant_message
+        stop_event_state = state
+
+        # 如果门槛是在最后一段思考期间达到，Stop Hook 阻止本轮直接结束，
+        # 把候选提醒送回 Agent 做最终语义审核。
+        if state.get("problem_active") and emit_relay_trigger(
+            state,
+            hook_event_name="Stop",
+        ):
+            state["turn_closed"] = False
+            start_active_time(state)
+            write_state(state, session_id=session_id)
+            return state
+
+        if (
+            state.get("problem_active")
+            and assistant_indicates_resolution(assistant_message)
+        ):
+            completed_state = state
+            agent_id = state.get("agent_id")
+            close_problem_state(
+                completed_state,
+                "resolved",
+                "assistant_verified_complete",
+            )
+            state = default_state(
+                session_id=session_id,
+                agent_id=agent_id,
+            )
+        elif state.get("problem_active"):
+            state["turn_closed"] = True
+
         log_event(
             "stop",
             {
                 "problem_id": (
-                    state.get(
+                    stop_event_state.get(
                         "problem_id"
                     )
                 ),
 
                 "retry_count": (
-                    state.get(
+                    stop_event_state.get(
                         "retry_count",
                         0,
                     )
                 ),
 
                 "effective_time_seconds": (
-                    state.get(
+                    stop_event_state.get(
                         "effective_time_seconds",
                         0,
                     )
                 ),
 
                 "weight": (
-                    state.get(
+                    stop_event_state.get(
                         "weight",
                         1,
                     )
                 ),
 
                 "failed_tool_call_count": (
-                    state.get(
+                    stop_event_state.get(
                         "failed_tool_call_count",
                         0,
                     )
                 ),
+
+                "problem_status": stop_event_state.get("problem_status"),
             },
         )
 
@@ -2257,6 +2682,56 @@ def handle_session_start(session_id=None):
 # 状态输出
 # ============================================================
 
+def latest_session_id():
+    """返回最近更新的会话，供无需手查 ID 的状态命令使用。"""
+
+    ensure_dirs()
+    candidates = list(SESSIONS_DIR.glob("*.json"))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime).stem
+
+
+def problem_summaries(session_id):
+    """列出指定会话下相互独立的问题快照。"""
+
+    session_id = normalize_session_id(session_id)
+    if not session_id:
+        return []
+
+    directory = PROBLEMS_DIR / session_id
+    values = []
+    for path in directory.glob("*.json") if directory.is_dir() else []:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                state = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            continue
+        values.append({
+            "problem_id": state.get("problem_id"),
+            "status": state.get("problem_status", "active"),
+            "initial_prompt": state.get("initial_prompt") or state.get("last_prompt"),
+            "last_prompt": state.get("last_prompt"),
+            "effective_time_seconds": round(float(
+                state.get("effective_time_seconds", 0) or 0
+            ), 3),
+            "weight": state.get("weight", 0),
+            "retry_count": state.get("retry_count", 0),
+            "relay_triggered": state.get("relay_triggered", False),
+            "relay_collaboration_active": state.get(
+                "relay_collaboration_active",
+                False,
+            ),
+            "relay_call_count": int(
+                state.get("relay_call_count", 0) or 0
+            ),
+            "created_at": state.get("created_at"),
+            "closed_at": state.get("closed_at"),
+        })
+
+    values.sort(key=lambda value: value.get("created_at") or "")
+    return values
+
 def print_status(
     state=None,
 ):
@@ -2282,6 +2757,8 @@ def print_status(
     )
 
     output = {
+        "session_id": state.get("session_id"),
+
         "problem_active": (
             state.get(
                 "problem_active",
@@ -2297,6 +2774,12 @@ def print_status(
 
         "task_id": state.get("task_id") or state.get("problem_id"),
         "relay_round": int(state.get("relay_round", 0) or 0),
+
+        "problem_status": state.get("problem_status", "idle"),
+
+        "initial_prompt": state.get("initial_prompt"),
+
+        "last_prompt": state.get("last_prompt"),
 
         "resolved": (
             state.get(
@@ -2331,8 +2814,12 @@ def print_status(
             3,
         ),
 
-        "round_effective_time_seconds": round(float(state.get("round_effective_time_seconds", effective_seconds) or 0), 3),
-        "cumulative_effective_time_seconds": round(float(state.get("cumulative_effective_time_seconds", effective_seconds) or 0), 3),
+        "round_effective_time_seconds": round(float(state.get(
+            "round_effective_time_seconds", effective_seconds
+        ) or 0), 3),
+        "cumulative_effective_time_seconds": round(float(state.get(
+            "cumulative_effective_time_seconds", effective_seconds
+        ) or 0), 3),
 
         "effective_time_minutes": round(
             effective_seconds / 60,
@@ -2342,14 +2829,7 @@ def print_status(
         "weight": (
             state.get(
                 "weight",
-                1,
-            )
-        ),
-
-        "explicit_relay_request": (
-            state.get(
-                "explicit_relay_request",
-                False,
+                0,
             )
         ),
 
@@ -2360,10 +2840,27 @@ def print_status(
             )
         ),
 
+        "relay_collaboration_active": (
+            state.get(
+                "relay_collaboration_active",
+                False,
+            )
+        ),
+
+        "relay_call_count": int(
+            state.get("relay_call_count", 0) or 0
+        ),
+
         "relay_trigger_reason": (
             state.get(
                 "relay_trigger_reason"
             )
+        ),
+
+        "relay_last_reason": state.get("relay_last_reason"),
+
+        "explicit_relay_candidate": bool(
+            state.get("explicit_relay_candidate", False)
         ),
 
         "trigger_conditions": conditions,
@@ -2387,19 +2884,23 @@ def cli():
     CLI：
 
         status [--session SESSION_ID]
+        sessions
+        problems [--session SESSION_ID]
         new [--session SESSION_ID] [PROMPT]
         retry --session SESSION_ID
         branch --session SESSION_ID
         resolve --session SESSION_ID
         mark-relay --session SESSION_ID REASON
-        confirm-relay --session SESSION_ID REASON
         reset --session SESSION_ID
     """
 
     ensure_dirs()
 
     if len(sys.argv) < 2:
-        print_status()
+        session_id = normalize_session_id(
+            os.environ.get("CODEX_SESSION_ID")
+        ) or latest_session_id()
+        print_status(read_state(session_id=session_id))
         return 0
 
     command = sys.argv[1]
@@ -2443,6 +2944,11 @@ def cli():
         # ----------------------------------------------------
 
         if command == "status":
+            session_id = (
+                session_id
+                or normalize_session_id(os.environ.get("CODEX_SESSION_ID"))
+                or latest_session_id()
+            )
             state = read_state(
                 session_id=session_id
             )
@@ -2460,6 +2966,52 @@ def cli():
                 "event_type": "TRACKER_SNAPSHOT",
             })
             print(json.dumps(snapshot, ensure_ascii=False))
+            return 0
+
+        # ----------------------------------------------------
+        # sessions / problems
+        # ----------------------------------------------------
+
+        if command == "sessions":
+            values = []
+            for path in sorted(
+                SESSIONS_DIR.glob("*.json"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            ):
+                state = read_state(session_id=path.stem)
+                values.append({
+                    "session_id": path.stem,
+                    "problem_id": state.get("problem_id"),
+                    "problem_status": state.get("problem_status", "idle"),
+                    "last_prompt": state.get("last_prompt"),
+                    "effective_time_seconds": round(float(
+                        state.get("effective_time_seconds", 0) or 0
+                    ), 3),
+                    "weight": state.get("weight", 0),
+                    "retry_count": state.get("retry_count", 0),
+                    "relay_triggered": state.get("relay_triggered", False),
+                    "relay_collaboration_active": state.get(
+                        "relay_collaboration_active",
+                        False,
+                    ),
+                    "relay_call_count": int(
+                        state.get("relay_call_count", 0) or 0
+                    ),
+                })
+            print(json.dumps(values, ensure_ascii=False, indent=2))
+            return 0
+
+        if command == "problems":
+            session_id = (
+                session_id
+                or normalize_session_id(os.environ.get("CODEX_SESSION_ID"))
+                or latest_session_id()
+            )
+            print(json.dumps({
+                "session_id": session_id,
+                "problems": problem_summaries(session_id),
+            }, ensure_ascii=False, indent=2))
             return 0
 
         # ----------------------------------------------------
@@ -2534,7 +3086,6 @@ def cli():
             return 0
 
         if command == "confirm-relay":
-            reason = " ".join(args)
             task_id = None
             if "--task" in args:
                 index = args.index("--task")
@@ -2542,8 +3093,10 @@ def cli():
                     print("Error: --task requires TASK_ID", file=sys.stderr)
                     return 1
                 task_id = args[index + 1]
-                reason = " ".join(args[:index] + args[index + 2:])
-            state = confirm_relay_success(reason, session_id=session_id, task_id=task_id)
+                args = args[:index] + args[index + 2:]
+            state = confirm_relay_success(
+                " ".join(args), session_id=session_id, task_id=task_id
+            )
             if state is None:
                 print("Error: task_id does not match current session", file=sys.stderr)
                 return 1
@@ -2732,6 +3285,16 @@ def extract_prompt(
     )
 
 
+def extract_last_assistant_message(data):
+    return normalize_text(first_value(
+        data,
+        "last_assistant_message",
+        "lastAssistantMessage",
+        "assistant_message",
+        "assistantMessage",
+    ))
+
+
 # ============================================================
 # Hook 事件入口
 # ============================================================
@@ -2829,7 +3392,8 @@ def handle_hook_event(
 
     if event_name == "Stop":
         return handle_stop(
-            session_id=session_id
+            session_id=session_id,
+            last_assistant_message=extract_last_assistant_message(data),
         )
 
     return read_state(

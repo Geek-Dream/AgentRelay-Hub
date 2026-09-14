@@ -1,8 +1,8 @@
 #!/bin/sh
 
 # Portable Codex Hook wrapper for AgentRelay.
-# The wrapper never calls an online Provider. It only forwards Tracker's
-# PostToolUse additionalContext JSON to Codex.
+# The wrapper never calls an online Provider or treats keywords as confirmed
+# intent. It forwards numeric and conservative action-phrase candidates.
 
 HOME_DIR=${HOME:-$(pwd)}
 CODEX_HOME=${CODEX_HOME:-"$HOME_DIR/.codex"}
@@ -82,11 +82,11 @@ if [ -x "$ORCA_HOOK" ]; then
         log_error "Orca Hook failed"
 fi
 
-# Only a complete PostToolUse hookSpecificOutput object is forwarded.
-# Stop and all other events intentionally produce empty stdout.
+# Forward candidate reminders. Codex must semantically validate them before
+# deciding whether an online Provider is worth calling.
 if [ -n "$TRACKER_OUTPUT" ] &&
     printf '%s' "$TRACKER_OUTPUT" |
-        "$PYTHON" -c 'import json, sys; data=json.load(sys.stdin); output=data.get("hookSpecificOutput"); assert isinstance(output, dict) and output.get("hookEventName") == "PostToolUse" and isinstance(output.get("additionalContext"), str)' \
+        EVENT_TYPE="$EVENT_TYPE" "$PYTHON" -c 'import json, os, sys; data=json.load(sys.stdin); event=os.environ.get("EVENT_TYPE"); output=data.get("hookSpecificOutput"); valid=(event == "Stop" and data.get("decision") == "block" and bool(str(data.get("reason") or "").strip())) or (event == "PostToolUse" and isinstance(output, dict) and output.get("hookEventName") == "PostToolUse" and isinstance(output.get("additionalContext"), str)); assert valid' \
         >/dev/null 2>>"$ERROR_LOG"; then
     printf '%s\n' "$TRACKER_OUTPUT"
 elif [ -n "$TRACKER_OUTPUT" ]; then

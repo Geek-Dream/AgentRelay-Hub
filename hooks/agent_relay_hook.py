@@ -155,7 +155,7 @@ def ingest_tracker_context(payload: dict) -> None:
         return None
 
 
-def ingest_tracker_snapshot() -> None:
+def ingest_tracker_snapshot(session_id: str | None = None) -> None:
     """Bridge the tracker state produced by this Hook invocation to Runtime."""
     child_configuration = commander_child_runtime()
     if os.environ.get("AGENTRELAY_COMMANDER_CHILD") == "1" and child_configuration is None:
@@ -166,8 +166,11 @@ def ingest_tracker_snapshot() -> None:
     if not runtime_dir:
         return
     try:
+        command = [sys.executable, str(TRACKER), "snapshot"]
+        if session_id:
+            command.extend(["--session", session_id])
         snapshot = subprocess.run(
-            [sys.executable, str(TRACKER), "snapshot"],
+            command,
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=4, check=False,
         )
@@ -197,13 +200,19 @@ def log_error(message: str) -> None:
         pass
 
 
-def valid_hook_output(value: str) -> bool:
+def valid_hook_output(value: str, event_name: str | None = None) -> bool:
     if not value.strip():
         return False
     try:
         payload = json.loads(value)
     except json.JSONDecodeError:
         return False
+    if event_name == "Stop":
+        return (
+            payload.get("decision") == "block"
+            and isinstance(payload.get("reason"), str)
+            and bool(payload.get("reason", "").strip())
+        )
     output = payload.get("hookSpecificOutput")
     return (
         isinstance(output, dict)
@@ -220,11 +229,19 @@ def main() -> int:
         log_error(f"Tracker not found: {TRACKER}")
         return 0
 
+    event_name = ""
     try:
         try:
             payload = json.loads(raw_payload)
         except json.JSONDecodeError:
             payload = {}
+        if isinstance(payload, dict):
+            event_name = str(
+                payload.get("hook_event_name")
+                or payload.get("event")
+                or payload.get("event_name")
+                or ""
+            )
         ingest_tracker_context(payload)
         task_result = run_orchestrator_task(payload) if isinstance(payload, dict) else None
         result = subprocess.run(
@@ -245,11 +262,16 @@ def main() -> int:
             f"Tracker exited with code {result.returncode}: "
             f"{result.stderr.strip()}"
         )
-    ingest_tracker_snapshot()
-    if valid_hook_output(result.stdout):
+    snapshot_session = payload.get("session_id") if isinstance(payload, dict) else None
+    if not snapshot_session and isinstance(payload, dict):
+        snapshot_session = payload.get("sessionId") or payload.get("session")
+    ingest_tracker_snapshot(str(snapshot_session).strip() if snapshot_session else None)
+    if valid_hook_output(result.stdout, event_name=event_name):
         if task_result is not None:
             output = json.loads(result.stdout)
-            output["hookSpecificOutput"]["orchestratorTask"] = task_result
+            hook_output = output.get("hookSpecificOutput")
+            if isinstance(hook_output, dict):
+                hook_output["orchestratorTask"] = task_result
             result.stdout = json.dumps(output, ensure_ascii=False)
         sys.stdout.write(result.stdout.rstrip() + "\n")
         sys.stdout.flush()
