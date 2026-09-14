@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import argparse
 from datetime import datetime
 from pathlib import Path
 
@@ -39,7 +40,29 @@ SCRIPT_FILES = (
     "agent_relay.py",
     "agent_relay_login.py",
     "agent_relay_runtime.py",
+    "orchestrator_runtime.py",
+    "orchestrator_store.py",
+    "orchestrator_dispatcher.py",
+    "orchestrator_dispatch.py",
+    "orchestrator_core.py",
+    "agentrelay_daemon.py",
+    "agentrelay_console.py",
+    "commander_provider_call.py",
+    "commander_provider_pool.py",
+    "task_monitor.py",
+    "runtime_manager.py",
+    "recovery_manager.py",
+    "agent_provider.py",
+    "agent_adapter.py",
+    "model_router.py",
+    "multi_agent.py",
+    "research_commander.py",
+    "agent_orchestration.py",
+    "orchestrator_task.py",
+    "task_scheduler.py",
 )
+CONFIG_FILES = ("model_registry.json",)
+REFERENCE_FILES = ("orchestrator-v1.md",)
 TRACKED_EVENTS = (
     "SessionStart",
     "UserPromptSubmit",
@@ -47,6 +70,10 @@ TRACKED_EVENTS = (
     "PostToolUse",
     "Stop",
 )
+PUBLISH_BLOCKLIST = {
+    "agent_relay_login_state.json", "agent_relay_session_bindings.json",
+    "raw_hook_payloads.jsonl", "cookies", "sessions",
+}
 
 
 class InstallError(RuntimeError):
@@ -107,6 +134,30 @@ def install_files() -> None:
             PROJECT_ROOT / "scripts" / filename,
             TARGET_SKILL / "scripts" / filename,
         )
+
+    for filename in CONFIG_FILES:
+        install_managed_file(
+            PROJECT_ROOT / "scripts" / filename,
+            TARGET_SKILL / "scripts" / filename,
+        )
+
+    for filename in REFERENCE_FILES:
+        install_managed_file(
+            PROJECT_ROOT / "skills" / "agent-relay" / "references" / filename,
+            TARGET_SKILL / "references" / filename,
+        )
+
+
+def validate_publish_tree() -> None:
+    """Refuse to package credentials, browser state, or runtime data."""
+    for path in PROJECT_ROOT.rglob("*"):
+        if not path.is_file():
+            continue
+        relative_parts = set(path.relative_to(PROJECT_ROOT).parts)
+        if relative_parts & PUBLISH_BLOCKLIST or any(
+            token in path.name.lower() for token in ("cookie", "session_bindings", "login_state")
+        ):
+            raise InstallError(f"发布目录包含禁止安装的敏感文件：{path}")
 
 
 def build_hook_command(
@@ -350,7 +401,7 @@ def install_and_verify_chromium() -> None:
 
 def print_next_steps() -> None:
     login = TARGET_SKILL / "scripts" / "agent_relay_login.py"
-    print("\nAgentRelay 一键安装完成。")
+    print("\n✅ AgentRelay 一键安装完成。")
     print(f"独立 Python 环境：{VENV_DIR}")
     print("接下来请执行：")
     print(f"  1. {VENV_PYTHON} {login}")
@@ -358,19 +409,60 @@ def print_next_steps() -> None:
     print("  2. 重启 Codex，使其重新加载 hooks.json。")
 
 
-def main() -> int:
+def write_daemon_service_config() -> Path | None:
+    """Install a service descriptor only when explicitly requested."""
+    if os.environ.get("AGENTRELAY_INSTALL_DAEMON") != "1":
+        return None
+    daemon = TARGET_SKILL / "scripts" / "agentrelay_daemon.py"
+    command = [str(VENV_PYTHON), str(daemon), "--runtime", str(TARGET_SKILL / "runtime" / "tasks")]
+    if sys.platform == "darwin":
+        from scripts.research_commander import service_config
+        target = CODEX_HOME / "launchagents" / "com.agentrelay.daemon.plist"
+        target.parent.mkdir(parents=True, exist_ok=True); target.write_text(service_config("launchd", TARGET_SKILL, command), encoding="utf-8")
+    elif sys.platform.startswith("linux"):
+        from scripts.research_commander import service_config
+        target = CODEX_HOME / "systemd" / "agentrelay.service"
+        target.parent.mkdir(parents=True, exist_ok=True); target.write_text(service_config("systemd", TARGET_SKILL, command), encoding="utf-8")
+    print(f"[生成] daemon 服务配置：{target}")
+    return target
+
+
+def register_daemon_service(target: Path) -> None:
+    """Explicitly register a generated service; never run during normal install."""
+    if sys.platform == "darwin":
+        domain = f"gui/{os.getuid()}"
+        subprocess.run(["launchctl", "bootstrap", domain, str(target)], check=True)
+        print(f"[注册] launchd：{target}")
+    elif sys.platform.startswith("linux"):
+        subprocess.run(["systemctl", "--user", "enable", "--now", str(target)], check=True)
+        print(f"[注册] systemd：{target}")
+    else:
+        raise InstallError("当前平台不支持自动注册 daemon 服务")
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="安装 AgentRelay Codex Skill")
+    parser.add_argument("--install-daemon", action="store_true", help="生成 launchd/systemd daemon 配置")
+    parser.add_argument("--register-daemon", action="store_true", help="显式注册已生成的 daemon 服务")
+    args = parser.parse_args(argv)
     print(f"AgentRelay 安装程序：{PROJECT_ROOT}")
     print(f"Codex 目录：{CODEX_HOME}")
     if sys.version_info < (3, 10):
         print("[错误] 需要 Python 3.10 或更高版本。", file=sys.stderr)
         return 1
     try:
+        validate_publish_tree()
         check_base_environment()
         ensure_virtualenv()
         install_dependencies()
         install_and_verify_chromium()
         install_files()
         merge_hooks_json()
+        if args.install_daemon or args.register_daemon:
+            os.environ["AGENTRELAY_INSTALL_DAEMON"] = "1"
+        service = write_daemon_service_config()
+        if args.register_daemon and service is not None:
+            register_daemon_service(service)
         print_next_steps()
     except (InstallError, OSError) as exc:
         print(f"[错误] 安装已停止：{exc}", file=sys.stderr)

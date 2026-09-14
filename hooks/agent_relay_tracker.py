@@ -219,6 +219,10 @@ def default_state(session_id=None, agent_id=None):
         "problem_active": False,
         "problem_id": None,
 
+        # 编排任务标识。旧状态没有该字段时由迁移逻辑回填 problem_id。
+        "task_id": None,
+        "relay_round": 0,
+
         "created_at": None,
         "updated_at": None,
 
@@ -247,14 +251,16 @@ def default_state(session_id=None, agent_id=None):
         # 下载、安装、网络等待等操作不计入。
         "effective_time_seconds": 0.0,
 
+        # 当前专家轮次的有效时间与任务全生命周期累计时间。
+        # effective_time_seconds 保留为兼容字段，等同于本轮时间。
+        "round_effective_time_seconds": 0.0,
+        "cumulative_effective_time_seconds": 0.0,
+
         # 难度权重：
         #
         # < 5 分钟   -> 1
         # >= 5 分钟  -> 2
         # >= 10 分钟 -> 3
-        #
-        # 注意：
-        # weight == 3 不直接触发 AgentRelay。
         "weight": 1,
 
         # 当前问题是否已经触发 AgentRelay。
@@ -469,6 +475,17 @@ def read_state(session_id=None, agent_id=None):
         # 使用当前调用传入的 session_id 修复。
         if session_id:
             base["session_id"] = session_id
+
+        # 兼容第一代状态文件，并补齐编排任务/轮次字段。
+        if not base.get("task_id"):
+            base["task_id"] = base.get("problem_id")
+        if "relay_round" not in base:
+            base["relay_round"] = 0
+        legacy_time = float(base.get("effective_time_seconds", 0) or 0)
+        if "round_effective_time_seconds" not in base:
+            base["round_effective_time_seconds"] = legacy_time
+        if "cumulative_effective_time_seconds" not in base:
+            base["cumulative_effective_time_seconds"] = legacy_time
 
         return base
 
@@ -982,13 +999,7 @@ def get_trigger_conditions(state):
         or 0
     )
 
-    effective_seconds = float(
-        state.get(
-            "effective_time_seconds",
-            0,
-        )
-        or 0
-    )
+    effective_seconds = float(state.get("round_effective_time_seconds", state.get("effective_time_seconds", 0)) or 0)
 
     explicit_request = bool(
         state.get(
@@ -1026,6 +1037,8 @@ def get_trigger_conditions(state):
         "effective_time_seconds": (
             effective_seconds
         ),
+        "round_effective_time_seconds": effective_seconds,
+        "cumulative_effective_time_seconds": float(state.get("cumulative_effective_time_seconds", effective_seconds) or 0),
 
         "time_trigger": (
             effective_seconds >= 15 * 60
@@ -1114,6 +1127,15 @@ def emit_relay_trigger(state):
     - 不修改 state["relay_triggered"]
     """
 
+    try:
+        from scripts.task_monitor import TaskMonitor
+    except ImportError:
+        try:
+            from task_monitor import TaskMonitor
+        except ImportError:
+            TaskMonitor = None
+    if TaskMonitor:
+        TaskMonitor().observe_tracker_state(state)
     conditions = get_trigger_conditions(state)
 
     if not conditions.get("should_trigger"):
@@ -1158,6 +1180,15 @@ def emit_relay_trigger(state):
     write_state(state)
 
     return True
+
+def task_context_snapshot(state):
+    """Return a stable task event envelope for Orchestrator integrations."""
+    return {"task_id": state.get("task_id") or state.get("problem_id"),
+            "retry_count": int(state.get("retry_count", 0) or 0),
+            "weight": int(state.get("weight", 0) or 0),
+            "need_escalation": bool(state.get("need_escalation", False)),
+            "effective_time_seconds": float(state.get("round_effective_time_seconds", 0) or 0),
+            "problem_active": bool(state.get("problem_active", False))}
 
 # ============================================================
 # 问题生命周期
@@ -1234,6 +1265,7 @@ def create_new_problem(
     state["problem_id"] = (
         problem_id
     )
+    state["task_id"] = problem_id
 
     state["created_at"] = iso_now()
 
@@ -1244,6 +1276,7 @@ def create_new_problem(
     )
 
     state["turn_count"] = 1
+    state["relay_round"] = 0
 
     state[
         "explicit_relay_request"
@@ -1594,12 +1627,32 @@ def mark_relay(reason=None, session_id=None):
             },
         )
 
+        # 专家调用完成后开启下一轮：保留累计时间，但清零本轮计时和重试。
+        state["relay_round"] = int(state.get("relay_round", 0) or 0) + 1
+        state["round_effective_time_seconds"] = 0.0
+        state["effective_time_seconds"] = 0.0
+        state["retry_count"] = 0
+        state["weight"] = 1
+        state["relay_triggered"] = False
+        state["relay_signal_emitted"] = False
+        state["relay_signal_problem_id"] = None
+
         write_state(state, session_id)
 
         return state
 
     finally:
         release_lock(lock)
+
+
+def confirm_relay_success(reason=None, session_id=None, task_id=None):
+    """Confirm a successful Expert call and start the next task round."""
+    if task_id:
+        state = read_state(session_id)
+        current_task = state.get("task_id") or state.get("problem_id")
+        if current_task != task_id:
+            return None
+    return mark_relay(reason=reason or "expert_success", session_id=session_id)
 # ============================================================
 # UserPromptSubmit
 # ============================================================
@@ -1935,20 +1988,12 @@ def handle_post_tool_use(
             and not excluded
             and duration > 0
         ):
-            current_effective_time = float(
-                state.get(
-                    "effective_time_seconds",
-                    0,
-                )
-                or 0
-            )
-
-            state[
-                "effective_time_seconds"
-            ] = (
-                current_effective_time
-                + duration
-            )
+            current_round_time = float(state.get("round_effective_time_seconds", state.get("effective_time_seconds", 0)) or 0)
+            current_total_time = float(state.get("cumulative_effective_time_seconds", state.get("effective_time_seconds", 0)) or 0)
+            state["round_effective_time_seconds"] = current_round_time + duration
+            state["cumulative_effective_time_seconds"] = current_total_time + duration
+            # Legacy consumers read this field; it now means current-round time.
+            state["effective_time_seconds"] = state["round_effective_time_seconds"]
 
         # ====================================================
         # Weight
@@ -1956,10 +2001,7 @@ def handle_post_tool_use(
 
         state["weight"] = calculate_weight(
             float(
-                state.get(
-                    "effective_time_seconds",
-                    0,
-                )
+                state.get("round_effective_time_seconds", state.get("effective_time_seconds", 0))
                 or 0
             )
         )
@@ -2253,6 +2295,9 @@ def print_status(
             )
         ),
 
+        "task_id": state.get("task_id") or state.get("problem_id"),
+        "relay_round": int(state.get("relay_round", 0) or 0),
+
         "resolved": (
             state.get(
                 "resolved",
@@ -2285,6 +2330,9 @@ def print_status(
             effective_seconds,
             3,
         ),
+
+        "round_effective_time_seconds": round(float(state.get("round_effective_time_seconds", effective_seconds) or 0), 3),
+        "cumulative_effective_time_seconds": round(float(state.get("cumulative_effective_time_seconds", effective_seconds) or 0), 3),
 
         "effective_time_minutes": round(
             effective_seconds / 60,
@@ -2344,6 +2392,7 @@ def cli():
         branch --session SESSION_ID
         resolve --session SESSION_ID
         mark-relay --session SESSION_ID REASON
+        confirm-relay --session SESSION_ID REASON
         reset --session SESSION_ID
     """
 
@@ -2400,6 +2449,17 @@ def cli():
 
             print_status(state)
 
+            return 0
+
+        if command == "snapshot":
+            state = read_state(session_id=session_id)
+            snapshot = task_context_snapshot(state)
+            snapshot.update({
+                "request": state.get("last_prompt") or "",
+                "session_id": state.get("session_id") or session_id,
+                "event_type": "TRACKER_SNAPSHOT",
+            })
+            print(json.dumps(snapshot, ensure_ascii=False))
             return 0
 
         # ----------------------------------------------------
@@ -2471,6 +2531,23 @@ def cli():
 
             print_status(state)
 
+            return 0
+
+        if command == "confirm-relay":
+            reason = " ".join(args)
+            task_id = None
+            if "--task" in args:
+                index = args.index("--task")
+                if index + 1 >= len(args):
+                    print("Error: --task requires TASK_ID", file=sys.stderr)
+                    return 1
+                task_id = args[index + 1]
+                reason = " ".join(args[:index] + args[index + 2:])
+            state = confirm_relay_success(reason, session_id=session_id, task_id=task_id)
+            if state is None:
+                print("Error: task_id does not match current session", file=sys.stderr)
+                return 1
+            print_status(state)
             return 0
 
         # ----------------------------------------------------

@@ -1,0 +1,11 @@
+{
+  "default_provider": "deepseek-web",
+  "models": [
+    {"name": "codex-self", "kind": "agent", "enabled": true, "capabilities": ["task_decision", "review", "safe_execution", "verification", "rollback"], "scores": {"reasoning": 10, "coding": 10, "speed": 7}},
+    {"name": "codex-subagent", "kind": "agent", "enabled": true, "capabilities": ["code_analysis", "research", "review"], "scores": {"reasoning": 8, "coding": 8, "speed": 8}},
+    {"name": "deepseek-web", "kind": "web", "enabled": true, "capabilities": ["web_search", "code_analysis", "dependency_analysis", "debugging", "expert_consultation"], "scores": {"reasoning": 8, "coding": 8, "search": 10, "speed": 6}},
+    {"name": "local-9b", "kind": "local", "enabled": false, "capabilities": ["simple_code_edit", "formatting", "simple_refactor"], "scores": {"reasoning": 4, "coding": 5, "speed": 10}},
+    {"name": "gpt-api", "kind": "api", "enabled": false, "capabilities": ["code_analysis", "dependency_analysis", "debugging", "simple_code_edit"], "scores": {"reasoning": 10, "coding": 10, "speed": 8}}
+  ],
+  "orchestration": {"max_depth": 2, "max_parallel_agents": 5, "max_subtasks": 8, "max_model_calls_per_task": 5}
+}

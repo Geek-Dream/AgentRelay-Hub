@@ -2719,6 +2719,7 @@ def run_provider(
         mode,
         image_paths=None,
         provider_name=DEFAULT_PROVIDER,
+        timeout=300,
 ):
     """
     执行当前 Provider 的自动对话。
@@ -2891,7 +2892,7 @@ def run_provider(
                 adapter.wait_for_response(
                     page,
                     question=question,
-                    timeout=300
+                    timeout=timeout,
                 )
             )
 
