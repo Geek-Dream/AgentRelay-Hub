@@ -52,6 +52,12 @@ class ModelRegistry:
         kind_order = {kind: index for index, kind in enumerate(prefer_kinds)}
         return max(candidates, key=lambda m: (m.scores.get("reasoning", 0), -kind_order.get(m.kind, 99)), default=None)
 
+    def register(self, model: ModelSpec) -> None:
+        if model.enabled: self.models[model.name] = model
+
+    def choose_for_task(self, complexity: int, *, needs_web=False, needs_edit=False) -> RouteDecision:
+        return route_task(complexity=complexity, needs_web=needs_web, needs_edit=needs_edit, registry=self)
+
 
 def route_task(*, complexity: int, needs_web: bool = False, needs_edit: bool = False,
                registry: ModelRegistry) -> RouteDecision:

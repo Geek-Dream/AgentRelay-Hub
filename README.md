@@ -12,6 +12,63 @@ AgentRelay 通用命名；未来可以在同一中继流程下增加其他 Provi
 AgentRelay 不把 Hook 直接连接到在线模型：Hook 只产生 `additionalContext`，真正的调用仍由
 Codex Agent 按 Skill 规则发起。
 
+### Commander 与模型配置
+
+Commander 的默认 Worker 是当前已安装并已登录的 `codex` CLI，通过多个隔离的
+`codex exec` 子进程协同工作，不要求 DeepSeek、本地 9B 或 GPT API。它会按任务动态规划
+1 到 5 个角色，例如前端样式、前端脚本、后端数据库、后端代码和 Git 审计；只需要一个角色
+时不会强行启动三个。每个角色使用独立 workspace，结果由主 Agent 审查，未经确认卡批准不会
+合并回用户工作区。
+
+显式运行示例：
+
+```bash
+PYTHONPATH=. python3 scripts/agentrelay_console.py commander task-1 \
+  "大型跨模块重构" --workspace /path/to/project --max-agents 5
+```
+
+真实子 Agent 执行前，必须先通过 `task create` 生成确认卡，再执行
+`task approve task-1`；未批准时只能使用 `--offline-plan` 查看角色规划。
+
+DeepSeek、本地模型和 GPT API 是可选的角色 Provider；配置后可以按角色覆盖当前 Codex，
+但没有这些 Provider 不会使 Commander 退化为空任务。
+
+Provider 按接入方式分类，而不是按品牌分类：任意网页会话模型都属于 `web`，任意
+OpenAI-compatible 或中转站接口都属于 `api`，本地服务属于 `local`。DeepSeek、千问、Kimi、
+GPT 只是 Provider ID 的示例。新增网页模型仍需为该网站提供真实浏览器 Adapter；仅登记名称
+不会伪造可用性。新增 API 模型可设置 `AGENTRELAY_API_PROVIDERS_JSON`，例如：
+
+```json
+[{"id":"kimi-api","endpoint":"https://gateway.example/v1","api_key_env":"KIMI_API_KEY","model":"model-name"}]
+```
+
+Commander 子 Agent 的 Provider 规则：同一个网页会话或本地模型进程全局一次只允许一个角色
+使用；角色第一次选择的网页 Provider 会持续复用其会话。子 Agent 可以通过受控入口使用网页
+模型或本地模型，但不能使用 GPT/API Provider，也不能递归启动 Commander。Cookie 失效或代理
+不可用会熔断 Provider，并最多提示三次登录脚本/代理端口；重新认证后，主 Commander 按已记录
+质量决定恢复原 Provider 还是继续临时替代 Provider。
+
+每个子 Agent 的 `retry_count` 和有效处理时间独立追踪，不与其他角色或父任务相加。达到自己的
+三次重试或 15 分钟阈值时，Commander 只收到一次“需要决策、子 Agent 继续工作”的通知；外部
+Provider 失败也不会暂停其本地工作。
+
+Commander 完成子任务后，主审查官会读取每个隔离 workspace 的基线差异、报告和验证状态，生成
+合并计划、冲突列表、修改文件清单和进度摘要。主工作区不会自动写入；批准生成的合并确认卡后，
+才执行逐文件合并。命令示例：
+
+```bash
+python3 scripts/agentrelay_console.py commander-merge task-1 \
+  --workspace /path/to/project --runtime-root .agentrelay/commander
+```
+
+如果主工作区在审查期间被用户修改，或两个角色对同一文件给出不同内容，合并会暂停并报告冲突，
+不会覆盖用户文件。
+
+工作流分为三档：单一低风险修改直接处理；多个普通修改点生成一张汇总执行确认卡；跨模块或
+高风险任务先显示需求卡，用户确认需求后再显示执行卡。若评估建议 Commander，第二张卡会改为
+“启用审查官模式”，未批准前不会启动子 Agent。CLI 默认使用文本确认；`--json` 输出可供支持
+勾选项/自定义输入的宿主界面渲染，普通终端仍安全回退为默认确认卡。
+
 ## 架构
 
 ```text
@@ -167,7 +224,7 @@ $CODEX_HOME/
 - `CODEX_HOME`：Codex 配置根目录，默认 `$HOME/.codex`
 - `AGENT_RELAY_LOGIN_STATE`：可选，自定义 Playwright storage state 路径
 - `AGENT_RELAY_<PROVIDER>_LOGIN_STATE`：可选，指定某个 Provider 的 storage state
-- `AGENT_RELAY_PROVIDER`：默认 Provider，当前为 `deepseek`
+- `AGENT_RELAY_PROVIDER`：在线咨询脚本的 Provider，默认值为 `deepseek`；主编排流程默认离线，不依赖该 Provider
 - `AGENT_RELAY_SESSION_BINDINGS`：可选，自定义会话绑定 JSON 路径
 - `AGENT_RELAY_BROWSER_PATH`：可选，自定义 Chromium 可执行文件
 - `AGENT_RELAY_DEBUG=true`：可选，显示诊断输出；默认关闭

@@ -3,6 +3,10 @@ __pycache__/
 *.py[cod]
 
 # AgentRelay runtime state and private data
+runtime/
+.agentrelay/
+commander-events.jsonl
+merge-plan.json
 agent_relay_login_state.json
 agent_relay_*_login_state.json
 agent_relay_session_bindings.json

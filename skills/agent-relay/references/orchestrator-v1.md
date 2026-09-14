@@ -35,7 +35,7 @@
 - `expert`：只提供分析和建议，默认不直接修改项目。
 - `commander`：拆解跨模块任务、分配子任务、协调验证；受并发数和深度预算限制。
 
-默认 Provider 是已经可用的 DeepSeek Web。用户没有部署本地模型时，系统仍然是完整可用的默认 Expert 场景；`local-9b`、GPT API 等属于用户配置后的可选扩展，不是默认安装前提。
+默认编排 Provider 是无需外部服务的本地规则/Codex self-subagent。DeepSeek Web/API、`local-9b`、GPT API 等都是用户显式配置后的可选增强；没有任何外部模型时，需求卡、确认卡、执行、验证、回滚和 Memory 仍必须完整工作。
 
 ## 资源所有权
 

@@ -54,7 +54,7 @@ def provider_state_file(
         return Path(os.path.expanduser(explicit))
 
     skill_root = codex_home / "skills" / "agent-relay"
-    if provider_name == "deepseek":
+    if provider_name in {"deepseek", "deepseek-web"}:
         return skill_root / "agent_relay_login_state.json"
     return skill_root / f"agent_relay_{provider_name}_login_state.json"
 

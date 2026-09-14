@@ -261,8 +261,6 @@ def default_state(session_id=None, agent_id=None):
         # < 5 分钟   -> 1
         # >= 5 分钟  -> 2
         # >= 10 分钟 -> 3
-        #
-        # 5 分钟为 weight 1，10 分钟为 weight 2，15 分钟为 weight 3。
         "weight": 1,
 
         # 当前问题是否已经触发 AgentRelay。
@@ -1129,6 +1127,15 @@ def emit_relay_trigger(state):
     - 不修改 state["relay_triggered"]
     """
 
+    try:
+        from scripts.task_monitor import TaskMonitor
+    except ImportError:
+        try:
+            from task_monitor import TaskMonitor
+        except ImportError:
+            TaskMonitor = None
+    if TaskMonitor:
+        TaskMonitor().observe_tracker_state(state)
     conditions = get_trigger_conditions(state)
 
     if not conditions.get("should_trigger"):
@@ -1173,6 +1180,15 @@ def emit_relay_trigger(state):
     write_state(state)
 
     return True
+
+def task_context_snapshot(state):
+    """Return a stable task event envelope for Orchestrator integrations."""
+    return {"task_id": state.get("task_id") or state.get("problem_id"),
+            "retry_count": int(state.get("retry_count", 0) or 0),
+            "weight": int(state.get("weight", 0) or 0),
+            "need_escalation": bool(state.get("need_escalation", False)),
+            "effective_time_seconds": float(state.get("round_effective_time_seconds", 0) or 0),
+            "problem_active": bool(state.get("problem_active", False))}
 
 # ============================================================
 # 问题生命周期
@@ -1629,8 +1645,13 @@ def mark_relay(reason=None, session_id=None):
         release_lock(lock)
 
 
-def confirm_relay_success(reason=None, session_id=None):
+def confirm_relay_success(reason=None, session_id=None, task_id=None):
     """Confirm a successful Expert call and start the next task round."""
+    if task_id:
+        state = read_state(session_id)
+        current_task = state.get("task_id") or state.get("problem_id")
+        if current_task != task_id:
+            return None
     return mark_relay(reason=reason or "expert_success", session_id=session_id)
 # ============================================================
 # UserPromptSubmit
@@ -2430,6 +2451,17 @@ def cli():
 
             return 0
 
+        if command == "snapshot":
+            state = read_state(session_id=session_id)
+            snapshot = task_context_snapshot(state)
+            snapshot.update({
+                "request": state.get("last_prompt") or "",
+                "session_id": state.get("session_id") or session_id,
+                "event_type": "TRACKER_SNAPSHOT",
+            })
+            print(json.dumps(snapshot, ensure_ascii=False))
+            return 0
+
         # ----------------------------------------------------
         # new
         # ----------------------------------------------------
@@ -2503,7 +2535,18 @@ def cli():
 
         if command == "confirm-relay":
             reason = " ".join(args)
-            state = confirm_relay_success(reason, session_id=session_id)
+            task_id = None
+            if "--task" in args:
+                index = args.index("--task")
+                if index + 1 >= len(args):
+                    print("Error: --task requires TASK_ID", file=sys.stderr)
+                    return 1
+                task_id = args[index + 1]
+                reason = " ".join(args[:index] + args[index + 2:])
+            state = confirm_relay_success(reason, session_id=session_id, task_id=task_id)
+            if state is None:
+                print("Error: task_id does not match current session", file=sys.stderr)
+                return 1
             print_status(state)
             return 0
 

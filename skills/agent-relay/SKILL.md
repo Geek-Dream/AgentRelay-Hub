@@ -155,8 +155,23 @@ AgentRelay 自动触发条件已经满足
 
 # 3. 当前问题
 
+基础编排默认使用本地规则和 Codex self/subagent，不依赖本地模型、DeepSeek 或其他 API。配置外部 Provider 后，模型只能提供分析或受限的结构化修改建议；RequirementCard、ConfirmationCard、状态机、验证、回滚和 Memory 始终由主 Agent/Workflow 控制。
+
+Commander 也不以 DeepSeek、本地模型或 GPT API 为前提。若当前环境存在可用的 `codex` CLI，主 Agent 可以显式启动 1 到 5 个隔离的 `codex exec` 子 Agent；每个子 Agent 继承当前 Codex 认证和默认模型，在独立 workspace 中工作，完成后只提交报告和隔离目录结果。角色由任务动态规划，可包含前端样式、前端脚本、后端数据库、后端代码、Git 审计等，不固定为三个窗口。没有 `codex` CLI 时仍保留离线角色规划、任务上下文和审查报告，但不得把“已规划”伪报为“已执行”。DeepSeek、本地 9B、GPT API 只属于可选 Provider。
+
+Commander 子 Agent 的求援约束：同一个网页 Provider 会话、同一个本地模型服务全局只能被一个角色占用；角色首次选定的网页 Provider 默认保持黏性，只有 Cookie/代理熔断后才切换。子 Agent 只能通过受控 `commander_provider_call.py` 使用网页或本地 Provider，不能调用 GPT/API Provider，不能再启动 Commander。Cookie/session 失效或代理错误会熔断并最多通知用户三次，通知包含重新登录脚本位置和代理提示；恢复认证后由主 Commander 根据历史质量决定切回原 Provider 或继续替代 Provider。
+
+每个 Commander 子 Agent 都有父任务预先分配的独立 `task_id`、重试计数和有效处理时间，绝不与父任务或兄弟任务累加。例如前端已处理 13 分钟、后端处理 2 分钟，不会触发任何一个子 Agent 的 15 分钟外援阈值。子 Agent 自己达到 `retry_count >= 3` 或有效处理时间达到 15 分钟时，只向 Commander 发出一次“需要决策”的通知，子 Agent 保持继续工作；Provider 登录、Cookie 或代理故障同样只会通知和降级，不会阻塞其本地工作。
+
+Commander 子任务完成后，主审查官必须先比较每个隔离 workspace 与启动前基线，检查路径、主工作区并发修改和角色间冲突，再生成合并计划和用户摘要。合并计划会列出完成角色、未完成角色、修改文件、验证状态和冲突原因；只有用户批准独立的合并确认卡后，才逐文件写回主 workspace。任何冲突都暂停合并，不覆盖用户修改。
+
 Agent Orchestrator 的编排基础协议、Memory、需求卡和 checkpoint 数据层见
 [references/orchestrator-v1.md](references/orchestrator-v1.md)。需要编排时先按任务复杂度选择模式：
+
+任务确认状态可通过离线 CLI 管理：
+`python3 -m scripts.orchestrator_task task list`、`task show <task_id>`、`task approve <task_id>`、`task reject <task_id>`、`task cancel <task_id>`、`task execute <task_id>`。加 `--json` 可输出机器可读结果；只有 approved 任务允许执行。
+
+中断任务不会自动恢复。对 executing 任务可使用 `task recover <task_id> --action fail|retry`；失败任务可使用 `task retry <task_id>`，默认最多一次显式重试。completed、pending 和正在执行的任务不会被重复执行。
 
 - 小改动走 `direct` 或 `worker`，优先使用已配置的本地模型；Codex 负责审查结果。
 - 需要联网排查、依赖分析或重复失败时走 `expert`；专家默认只给建议，不直接修改工作区。
@@ -175,7 +190,7 @@ Agent Orchestrator 的编排基础协议、Memory、需求卡和 checkpoint 数�
 JSON
 ```
 
-只把 `content` 当作外部建议，不能把 `status=success` 当作代码已经正确。Codex 必须审查建议、自己执行必要修改并验证。只有实际完成一次 Expert 调用后，才执行 Tracker 的 `confirm-relay`（兼容旧的 `mark-relay`），让当前任务进入下一轮；调用失败或被拒绝时不能伪造成功状态。
+只把 `content` 当作外部建议，不能把 `status=success` 当作代码已经正确。Codex 必须审查建议、自己执行必要修改并验证。只有实际完成一次 Expert 调用后，才执行 Tracker 的 `confirm-relay --session <session_id> --task <task_id>`（兼容旧的 `mark-relay`），让匹配的当前任务进入下一轮；调用失败、被拒绝或 task_id 不匹配时不能伪造成功状态。
 
 Agent 在处理技术任务时，需要识别：
 

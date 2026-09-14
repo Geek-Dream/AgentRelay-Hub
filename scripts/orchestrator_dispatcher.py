@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 import os
+import re
 from pathlib import Path
 from typing import Protocol
 
@@ -27,6 +28,12 @@ class DeepSeekWebProvider:
 
     provider_id = "deepseek-web"
 
+    @staticmethod
+    def _safe_error(value: object) -> str:
+        text = str(value)
+        text = re.sub(r"(?i)(cookie|token|password|authorization|set-cookie)\s*[:=]\s*[^\s,;]+", r"\1=[REDACTED]", text)
+        return text[:500]
+
     def check_available(self) -> bool:
         try:
             from .agent_relay_runtime import provider_state_file, resolve_codex_home
@@ -47,7 +54,10 @@ class DeepSeekWebProvider:
                 from .agent_relay import run_provider
             except ImportError:
                 from agent_relay import run_provider
-            result = run_provider(request.prompt, "expert", provider_name=self.provider_id)
+            # Legacy DeepSeek adapter is registered as "deepseek"; keep the
+            # external orchestrator name "deepseek-web" stable.
+            result = run_provider(request.prompt, "expert", provider_name="deepseek",
+                                  timeout=request.timeout_seconds)
             return DispatchResult(status="success", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,
                                   provider_id=self.provider_id,
@@ -56,20 +66,33 @@ class DeepSeekWebProvider:
         except TimeoutError as exc:
             return DispatchResult(status="timeout", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,
-                                  provider_id=self.provider_id, error=DispatchError("PROVIDER_TIMEOUT", str(exc), True),
+                                  provider_id=self.provider_id, error=DispatchError("PROVIDER_TIMEOUT", self._safe_error(exc), True),
                                   duration_seconds=time.monotonic() - started)
         except Exception as exc:
             return DispatchResult(status="failed", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,
-                                  provider_id=self.provider_id, error=DispatchError("PROVIDER_ERROR", str(exc), True),
+                                  provider_id=self.provider_id, error=DispatchError("PROVIDER_ERROR", self._safe_error(exc), True),
                                   duration_seconds=time.monotonic() - started)
 
 
 class Dispatcher:
-    def __init__(self, providers: dict[str, Provider] | None = None):
-        self.providers = providers or {"deepseek-web": DeepSeekWebProvider()}
+    def __init__(self, providers: dict[str, Provider] | None = None, *, enable_external: bool = False):
+        provider = DeepSeekWebProvider()
+        self.providers = dict(providers or {})
+        if enable_external and not self.providers:
+            self.providers.update({"deepseek-web": provider, "deepseek": provider})
+        if providers and "deepseek" in providers and "deepseek-web" not in providers:
+            self.providers["deepseek-web"] = providers["deepseek"]
 
     def dispatch(self, request: DispatchRequest) -> DispatchResult:
+        if os.environ.get("AGENTRELAY_COMMANDER_CHILD") == "1" and str(request.model or "").lower() in {
+            "gpt-api", "api", "openai", "openai-api"
+        }:
+            return DispatchResult(status="rejected", task_id=request.task_id,
+                                  request_id=request.request_id, mode=request.level,
+                                  provider_id=request.model,
+                                  error=DispatchError("COMMANDER_CHILD_API_DENIED",
+                                                       "Commander 子 Agent 不允许调用 API Provider"))
         if request.level not in {"worker", "expert"}:
             return DispatchResult(status="rejected", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,
@@ -84,13 +107,14 @@ class Dispatcher:
                                   request_id=request.request_id, mode=request.level,
                                   provider_id=request.model,
                                   error=DispatchError("EXPERT_READ_ONLY", "Expert 请求必须是只读咨询"))
-        if not request.model or request.model not in self.providers:
+        provider_id = "deepseek-web" if request.model == "deepseek" else request.model
+        if not provider_id or provider_id not in self.providers:
             return DispatchResult(status="failed", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,
                                   provider_id=request.model, error=DispatchError("PROVIDER_NOT_CONFIGURED", "Provider 未配置", True))
-        provider = self.providers[request.model]
+        provider = self.providers[provider_id]
         if not provider.check_available():
             return DispatchResult(status="failed", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,
-                                  provider_id=request.model, error=DispatchError("PROVIDER_UNAVAILABLE", "Provider 当前不可用", True))
+                                  provider_id=provider_id, error=DispatchError("PROVIDER_UNAVAILABLE", "Provider 当前不可用", True))
         return provider.dispatch(request)

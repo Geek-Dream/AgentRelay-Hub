@@ -42,7 +42,7 @@ def main() -> int:
             depth=int(value.get("depth", 0)),
             max_calls=int(value.get("budget", {}).get("max_calls", 1)),
         )
-        result = Dispatcher().dispatch(request)
+        result = Dispatcher(enable_external=True).dispatch(request)
         print(json.dumps({
             "request_id": result.request_id,
             "task_id": result.task_id,
