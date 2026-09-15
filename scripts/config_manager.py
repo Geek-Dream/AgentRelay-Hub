@@ -149,6 +149,14 @@ def _first(items: object) -> dict[str, Any] | None:
     return None
 
 
+def _selected(items: object, preferred: str = "") -> dict[str, Any] | None:
+    if isinstance(items, list) and preferred:
+        for item in items:
+            if isinstance(item, dict) and item.get("enabled", True) and str(item.get("id", "")) == preferred:
+                return item
+    return _first(items)
+
+
 def apply_config_to_environment(home: Path | None = None) -> dict[str, Any]:
     """把加密配置映射到当前进程，显式环境变量优先。"""
     config = load_config(home)
@@ -159,7 +167,7 @@ def apply_config_to_environment(home: Path | None = None) -> dict[str, Any]:
         os.environ.setdefault("AGENTRELAY_COMMANDER_COMMAND", str(commander.get("command", "codex exec")))
         os.environ.setdefault("AGENTRELAY_COMMANDER_MAX_AGENTS", str(commander.get("max_agents", 5)))
 
-    web = _first(config.get("web_providers"))
+    web = _selected(config.get("web_providers"), str(config.get("default_provider", "")))
     if web:
         provider_id = str(web.get("id", "deepseek-web"))
         os.environ.setdefault("AGENT_RELAY_PROVIDER", provider_id.removesuffix("-web"))
