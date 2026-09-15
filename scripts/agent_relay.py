@@ -1562,6 +1562,9 @@ class DeepSeekAdapter(SiteAdapter):
             config = load_config(CODEX_HOME)
             entries = config.get("web_providers", [])
             entry = next((item for item in entries if isinstance(item, dict) and item.get("id") == "deepseek-web"), None)
+            if entry is None:
+                # 旧安装没有网页配置时，继续复用历史统一会话标题；配置中心保存后才启用分模式标题。
+                return defaults["default"]
             titles = ((entry or {}).get("conversation") or {}).get("titles", {})
             return str(titles.get(mode) or titles.get("hybrid") or defaults.get(mode, defaults["default"]))
         except Exception:
