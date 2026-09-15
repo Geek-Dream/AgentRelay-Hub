@@ -871,13 +871,9 @@ class Orchestrator:
             agent.context = child
             runtime._persist_child_context(agent)
 
-        configured_command = os.environ.get("AGENTRELAY_COMMANDER_COMMAND", "").strip()
-        try:
-            command_prefix = shlex.split(configured_command) if configured_command else [codex, "exec"]
-        except ValueError:
-            command_prefix = [codex, "exec"]
-        if not command_prefix:
-            command_prefix = [codex, "exec"]
+        # Commander 只配置终端可执行文件路径；子 Agent 的启动参数由这里统一编排。
+        configured_terminal = os.environ.get("AGENTRELAY_COMMANDER_TERMINAL_PATH", "").strip()
+        command_prefix = [configured_terminal or codex, "exec"]
 
         def command_factory(agent):
             goal = agent.model_config.get("goal", "完成分配任务")
