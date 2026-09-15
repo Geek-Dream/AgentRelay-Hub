@@ -55,8 +55,30 @@ def provider_state_file(
 
     skill_root = codex_home / "skills" / "agent-relay"
     if provider_name in {"deepseek", "deepseek-web"}:
-        return skill_root / "agent_relay_login_state.json"
-    return skill_root / f"agent_relay_{provider_name}_login_state.json"
+        raw = skill_root / "agent_relay_login_state.json"
+    else:
+        raw = skill_root / f"agent_relay_{provider_name}_login_state.json"
+    encrypted = raw.with_suffix(raw.suffix + ".enc")
+    return encrypted if encrypted.exists() and not raw.exists() else raw
+
+
+def decrypt_provider_state(path: Path, codex_home: Path | None = None) -> Path:
+    """在临时目录解密浏览器状态，供当前进程使用，退出后尽量删除。"""
+    if path.suffix != ".enc":
+        return path
+    try:
+        from .config_manager import decrypt_secret_bytes
+    except ImportError:
+        from config_manager import decrypt_secret_bytes
+    descriptor, name = tempfile.mkstemp(prefix="agentrelay-state-", suffix=".json")
+    os.close(descriptor)
+    temporary = Path(name)
+    temporary.write_bytes(decrypt_secret_bytes(path.read_bytes(), codex_home))
+    try:
+        temporary.chmod(0o600)
+    except OSError:
+        pass
+    return temporary
 
 
 def session_bindings_file(

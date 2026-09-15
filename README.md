@@ -134,6 +134,11 @@ cd AgentRelay-Hub
 python3 install.py
 ```
 
+直接在终端运行 `python3 install.py` 会进入全中文安装菜单。菜单里的“初始化当前脚本”会安装
+Hook、Skill、Tracker、确认卡和离线规则；DeepSeek 登录、本地模型和 API 都可以跳过，跳过后仍可
+使用离线基础模式。菜单还可以单独开启 Commander、设置子 Agent 使用的终端和并发数，或在之后
+重新配置三类 Provider。
+
 安装器支持 `CODEX_HOME`；未设置时使用 `$HOME/.codex`。它会：
 
 - 安装 Hook 到 `$CODEX_HOME/hooks/`
@@ -143,6 +148,10 @@ python3 install.py
 - 保留用户已有文件
 - 备份并原子合并现有 `hooks.json`，不删除任何已有 Hook
 - 检查 Codex CLI、Python、虚拟环境、Playwright 和 Chromium
+
+Provider、Commander 和队列设置会保存到 `$CODEX_HOME/skills/agent-relay/config/` 下的加密文件，
+密钥也只在该目录保存并限制当前用户读取。API Key 和网页登录状态不会写进项目目录、日志或 Git；
+安装器也不会把它们打印出来。运行时会自动读取本地配置，显式环境变量优先。
 
 安装器不会向 Homebrew、系统 Python 或其他全局环境执行 `pip install`，因此不需要
 `--break-system-packages`，也不会触发 PEP 668 的 externally-managed-environment 限制。
@@ -168,11 +177,15 @@ $CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME ".c
 验证。登录状态会保存到：
 
 ```text
-$CODEX_HOME/skills/agent-relay/agent_relay_login_state.json
+$CODEX_HOME/skills/agent-relay/agent_relay_login_state.json.enc
 ```
 
 登录需要人工浏览器认证，因为 DeepSeek CAPTCHA 不能也不会被 AgentRelay 绕过。请勿将
 登录状态文件、Cookie 或浏览器数据提交到版本库。
+
+菜单中的“自定义网页模型”可以打开用户提供的 HTTPS 登录地址并把会话状态加密保存；但只有已经
+实现浏览器 Adapter 的网页 Provider 才能直接对话。千问、Kimi 和其他自定义网站目前会完成安全
+登录状态保存并提示适配器状态，不会伪造成已经可调用。
 
 > AgentRelay uses a user-provided authenticated browser session. It does not bypass CAPTCHA or automate credential input.
 
