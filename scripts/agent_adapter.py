@@ -24,7 +24,8 @@ class OpenAICompatibleAdapter(AgentAdapter):
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        req = Request(self.endpoint + "/chat/completions", data=data,
+        target = self.endpoint if self.endpoint.endswith("/chat/completions") else self.endpoint + "/chat/completions"
+        req = Request(target, data=data,
                       headers=headers, method="POST")
         with urlopen(req, timeout=self.timeout) as response:
             return json.loads(response.read().decode("utf-8"))
