@@ -2,7 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json, os, shutil, subprocess, uuid, hashlib
 import time
 from typing import Iterable
@@ -72,6 +72,12 @@ class CommanderAgent:
     process_id: int | None = None
     model_config: dict = field(default_factory=dict)
     context: object = field(default=None, repr=False)
+    # The primary role never changes.  An idle agent may run a separate
+    # assistance pass for another role, but it remains accountable for its
+    # original role and result.
+    assist_for: str | None = None
+    assist_history: list[dict] = field(default_factory=list)
+    assist_result: object = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +145,7 @@ class CommanderRuntime:
         self.root=Path(root); self.max_agents=max(1, int(max_agents)); self.agents={}; self._processes={}
         self.coordinator = coordinator
         self.notifications: list[dict] = []
+        self.assist_assignments: list[dict] = []
         self._provider_notice_count = 0
         self._child_notice_keys: set[tuple[str, str]] = set()
         self.child_tasks_directory = self.root / "child-tasks"
@@ -189,11 +196,99 @@ class CommanderRuntime:
         runner = CommanderProcess()
         self._process_runner = runner
         with ThreadPoolExecutor(max_workers=max(1, len(agents))) as pool:
-            futures = [pool.submit(self._run_process_with_provider, runner, agent, command_factory, timeout)
-                       for agent in agents]
-            for future in futures:
-                future.result()
+            futures = {
+                pool.submit(self._run_process_with_provider, runner, agent, command_factory, timeout): agent
+                for agent in agents
+            }
+            assigned_targets: set[str] = set()
+            while futures:
+                done, _ = wait(tuple(futures), timeout=0.1, return_when=FIRST_COMPLETED)
+                for future in done:
+                    future.result()
+                    futures.pop(future, None)
+                self._refresh_child_contexts(agents)
+                running_targets = {
+                    agent.agent_id for agent in futures.values()
+                    if agent.agent_id not in assigned_targets and self._needs_assistance(agent)
+                }
+                idle = [agent for agent in agents
+                        if agent.status == "SUCCESS" and not agent.assist_for
+                        and agent.agent_id not in {item.agent_id for item in futures.values()}]
+                for target in (agent for agent in agents if agent.agent_id in running_targets):
+                    if not idle:
+                        break
+                    source = idle.pop(0)
+                    self._create_assistance_assignment(source, target)
+                    assigned_targets.add(target.agent_id)
+                    futures[pool.submit(self._run_assistance_with_restore,
+                                        runner, source, command_factory, timeout)] = source
+        self._auto_assign_assistance(agents, command_factory, timeout, runner)
         return agents
+
+    def _refresh_child_contexts(self, agents) -> None:
+        for agent in agents:
+            persisted = self._load_child_context(agent)
+            if persisted is not None:
+                agent.context = persisted
+
+    @staticmethod
+    def _needs_assistance(agent) -> bool:
+        context = getattr(agent, "context", None)
+        return agent.status in {"WAITING", "FAILED"} or bool(
+            getattr(context, "need_escalation", False)
+        )
+
+    def _auto_assign_assistance(self, agents, command_factory, timeout, runner) -> None:
+        """Let a completed role help a difficult role without replacing it.
+
+        Assistance is deliberately a second pass.  The target keeps its own
+        task id, status, timer and final authority; the idle source keeps its
+        original role and result.  The source's extra output is stored in
+        ``assist_result`` and included in Commander summaries.
+        """
+        idle = [agent for agent in agents
+                if agent.status == "SUCCESS" and not agent.assist_for]
+        targets = [agent for agent in agents if self._needs_assistance(agent)]
+        for target in targets:
+            if not idle:
+                break
+            source = idle.pop(0)
+            self._create_assistance_assignment(source, target)
+            self._run_assistance_with_restore(runner, source, command_factory, timeout)
+
+    def _create_assistance_assignment(self, source, target) -> dict:
+        assignment = {
+            "source_agent_id": source.agent_id,
+            "source_role": source.role,
+            "target_agent_id": target.agent_id,
+            "target_role": target.role,
+            "target_task_id": getattr(getattr(target, "context", None), "task_id", ""),
+            "status": "ASSIGNED",
+            "reason": "目标 Agent 仍在处理、超时或已达到升级条件",
+        }
+        source.assist_for = target.agent_id
+        source.assist_history.append(dict(assignment))
+        source.model_config["assist_for"] = target.agent_id
+        source.model_config["assist_for_role"] = target.role
+        self.assist_assignments.append(assignment)
+        return assignment
+
+    def _run_assistance_with_restore(self, runner, source, command_factory, timeout):
+        assignment = source.assist_history[-1]
+        original_status, original_result = source.status, source.result
+        source.status = "ASSISTING"
+        try:
+            self._run_process_with_provider(runner, source, command_factory, timeout)
+            source.assist_result = source.result
+            assignment["status"] = "COMPLETED" if source.status == "SUCCESS" else "FAILED"
+        finally:
+            # Assistance is supplemental work and must not replace the source's
+            # original role, state, or primary report.
+            source.status = original_status
+            source.result = original_result
+            source.model_config.pop("assist_for", None)
+            source.model_config.pop("assist_for_role", None)
+        source.assist_history[-1].update(assignment)
 
     def _run_process_with_provider(self, runner, agent, command_factory, timeout):
         provider_id = agent.model_config.get("provider")
@@ -466,6 +561,7 @@ class CommanderRuntime:
                 "completed_roles": completed, "incomplete_roles": failed,
                 "changed_files": changed, "merge_status": (merge_result or {}).get("status", "pending_review"),
                 "conflicts": plan.get("conflicts", []),
+                "assistance_assignments": list(self.assist_assignments),
                 "message": (f"主审查官已汇总 {len(agents)} 个子 Agent：完成角色 {', '.join(completed) or '无'}；"
                             f"涉及文件 {', '.join(changed) or '无'}。" +
                             ("存在冲突，需要处理后再合并。" if plan.get("conflicts") else "等待合并确认卡批准。"))}

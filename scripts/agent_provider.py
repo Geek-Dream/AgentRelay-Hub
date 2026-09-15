@@ -5,6 +5,10 @@ from abc import ABC, abstractmethod
 from typing import Any
 from dataclasses import dataclass
 import json
+from contextlib import contextmanager
+import os
+import threading
+import time
 try:
     from .agent_adapter import AgentAdapter, DeepSeekAdapter, PromptTemplate
 except ImportError:
@@ -72,11 +76,60 @@ class LocalAgentProvider(AgentProvider):
 
 class LocalLLMProvider(AgentProvider):
     """Optional local model provider; rules remain the fallback."""
+    _slot_condition = threading.Condition(threading.Lock())
+    _slot_busy = False
+    _slot_waiting = False
+
     def __init__(self, adapter=None, fallback=None):
         try: from .agent_adapter import OpenAICompatibleAdapter, PromptTemplate
         except ImportError: from agent_adapter import OpenAICompatibleAdapter, PromptTemplate
         self.adapter = adapter or OpenAICompatibleAdapter(); self.fallback = fallback or LocalAgentProvider(); self.templates = PromptTemplate
+
+    @classmethod
+    @contextmanager
+    def _local_slot(cls):
+        """Allow one local-model call and at most one queued caller per process."""
+        try:
+            timeout = max(0.0, float(os.environ.get("AGENTRELAY_LOCAL_QUEUE_TIMEOUT", "30")))
+        except (TypeError, ValueError):
+            timeout = 30.0
+        granted = False
+        with cls._slot_condition:
+            if not cls._slot_busy:
+                cls._slot_busy = True
+                granted = True
+            elif not cls._slot_waiting:
+                cls._slot_waiting = True
+                deadline = time.monotonic() + timeout
+                while cls._slot_busy and time.monotonic() < deadline:
+                    cls._slot_condition.wait(timeout=max(0.01, deadline - time.monotonic()))
+                cls._slot_waiting = False
+                if not cls._slot_busy:
+                    cls._slot_busy = True
+                    granted = True
+        if not granted:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            with cls._slot_condition:
+                cls._slot_busy = False
+                cls._slot_condition.notify_all()
+
     def _call(self, template, context, fallback_method):
+        with self._local_slot() as acquired:
+            if not acquired:
+                local = getattr(self.fallback, fallback_method)(context)
+                return AgentResponse(
+                    local.success,
+                    local.content,
+                    local.structured_data,
+                    "Local LLM busy; only one waiting Agent is allowed",
+                )
+            return self._call_held(template, context, fallback_method)
+
+    def _call_held(self, template, context, fallback_method):
         try:
             prompt_request = context.user_request
             hits = getattr(context, "memory_hits", ()) or ()
