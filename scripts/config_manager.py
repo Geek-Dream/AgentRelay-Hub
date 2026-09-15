@@ -77,8 +77,9 @@ def default_config() -> dict[str, Any]:
         "commander": {
             "enabled": False,
             "terminal": "codex",
-            "command": "codex exec",
+            "terminal_path": "codex",
             "max_agents": 5,
+            "manual_disabled": False,
         },
         "web_providers": [],
         "local_providers": [],
@@ -154,6 +155,16 @@ def load_config(home: Path | None = None) -> dict[str, Any]:
         normalized for item in merged.get("web_providers", [])
         if (normalized := _normalize_web_provider(item)) is not None
     ]
+    commander = merged["commander"]
+    if not commander.get("terminal_path"):
+        commander["terminal_path"] = commander.get("terminal", "codex")
+    if "manual_disabled" not in commander:
+        commander["manual_disabled"] = False
+    # 新配置中只要存在网页或本地 Provider，Commander 默认可用；用户手动关闭后保持关闭。
+    if (merged["web_providers"] or merged["local_providers"]) and not commander.get("manual_disabled"):
+        commander["enabled"] = True
+    if not (merged["web_providers"] or merged["local_providers"]):
+        commander["enabled"] = False
     return merged
 
 
@@ -164,6 +175,17 @@ def save_config(value: Mapping[str, Any], home: Path | None = None) -> Path:
         item for raw in normalized.get("web_providers", [])
         if (item := _normalize_web_provider(raw)) is not None
     ]
+    commander = normalized.get("commander")
+    if isinstance(commander, dict):
+        commander["terminal_path"] = str(commander.get("terminal_path") or commander.get("terminal") or "codex")
+        commander["terminal"] = commander["terminal_path"]
+        commander["max_agents"] = max(1, min(5, int(commander.get("max_agents", 5) or 5)))
+        commander["manual_disabled"] = bool(commander.get("manual_disabled", False))
+        if normalized.get("web_providers") or normalized.get("local_providers"):
+            if not commander["manual_disabled"]:
+                commander["enabled"] = True
+        else:
+            commander["enabled"] = False
     payload = json.dumps(normalized, ensure_ascii=False, indent=2).encode("utf-8")
     path = config_path(home)
     _secure_write(path, cipher.encrypt(payload))
@@ -212,8 +234,9 @@ def apply_config_to_environment(home: Path | None = None) -> dict[str, Any]:
     commander = config.get("commander", {})
     if commander.get("enabled"):
         os.environ.setdefault("AGENTRELAY_COMMANDER_ENABLED", "1")
-        os.environ.setdefault("AGENTRELAY_COMMANDER_TERMINAL", str(commander.get("terminal", "codex")))
-        os.environ.setdefault("AGENTRELAY_COMMANDER_COMMAND", str(commander.get("command", "codex exec")))
+        terminal_path = str(commander.get("terminal_path") or commander.get("terminal", "codex"))
+        os.environ.setdefault("AGENTRELAY_COMMANDER_TERMINAL", terminal_path)
+        os.environ.setdefault("AGENTRELAY_COMMANDER_TERMINAL_PATH", terminal_path)
         os.environ.setdefault("AGENTRELAY_COMMANDER_MAX_AGENTS", str(commander.get("max_agents", 5)))
 
     web = _selected(config.get("web_providers"), str(config.get("default_provider", "")))
