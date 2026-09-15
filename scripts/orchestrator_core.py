@@ -861,19 +861,39 @@ class Orchestrator:
 
         def command_factory(agent):
             goal = agent.model_config.get("goal", "完成分配任务")
-            provider_id = agent.model_config.get("provider", "codex-self")
+            configured_provider = agent.model_config.get("provider")
+            if configured_provider in {"deepseek-web", "qianwen-web", "kimi-web", "local-llm"}:
+                default_provider = configured_provider
+            else:
+                default_provider = os.environ.get("AGENTRELAY_COMMANDER_DEFAULT_PROVIDER", "deepseek-web")
+            provider_id = agent.model_config.get("consult_provider", default_provider)
+            fallback_providers = tuple(agent.model_config.get("fallback_providers", ())) or tuple(
+                item.strip() for item in os.environ.get(
+                    "AGENTRELAY_COMMANDER_FALLBACK_PROVIDERS",
+                    "qianwen-web,kimi-web,local-llm",
+                ).split(",") if item.strip()
+            )
             coordinator_cli = str(Path(__file__).with_name("commander_provider_call.py").resolve())
-            prompt = (f"你是 Commander 的 {agent.role} 子 Agent。\n"
-                      f"职责：{goal}\n"
-                      f"指定 Provider：{provider_id}。如果该 Provider 是 web 或 local，"
-                      "你只能通过主 Agent/AgentRelay 的受控调用使用它；不要自行打开新的 Commander，"
-                      "不要调用任何 API Provider。\n"
-                      f"受控 Provider 入口（如确需咨询）：{coordinator_cli} --provider {provider_id} "
-                      f"--task-id {task_id} --role {agent.role} --coordinator {runtime_path}\n"
-                      f"用户任务：{request}\n\n"
-                      "你在隔离 workspace 中工作，只处理自己的职责。可以读取和修改该隔离目录，"
-                      "不要访问父 workspace，不要 git commit，不要执行 git reset/checkout，不要调用外部模型。"
-                      "完成后用简洁文字报告：完成内容、修改文件、验证结果、风险和建议。")
+            assist_note = (
+                f"当前主力角色仍是 {agent.model_config.get('assist_for_role')}；你现在只作为协助者，"
+                "请提供分析、验证或补充修改建议，不得接管该角色，也不要把自己的角色改成目标角色。\n"
+                if agent.model_config.get("assist_for") else ""
+            )
+            prompt = (
+                f"你是 Commander 的 {agent.role} 子 Agent。\n"
+                f"职责：{goal}\n"
+                f"{assist_note}"
+                f"指定 Provider：{provider_id}。如果该 Provider 是 web 或 local，"
+                "你只能通过主 Agent/AgentRelay 的受控调用使用它；不要自行打开新的 Commander，"
+                "不要调用任何 API Provider。\n"
+                f"受控 Provider 入口（如确需咨询）：{coordinator_cli} --provider {provider_id} "
+                + " ".join(f"--fallback-provider {item}" for item in fallback_providers) + " "
+                + f"--task-id {task_id} --role {agent.role} --coordinator {runtime_path}\n"
+                f"用户任务：{request}\n\n"
+                "你在隔离 workspace 中工作，只处理自己的职责。可以读取和修改该隔离目录，"
+                "不要访问父 workspace，不要 git commit，不要执行 git reset/checkout，不要调用外部模型。"
+                "完成后用简洁文字报告：完成内容、修改文件、验证结果、风险和建议。"
+            )
             model = agent.model_config.get("model")
             return [codex, "exec"] + (["-m", str(model)] if model else []) + ["--skip-git-repo-check", "--sandbox", "workspace-write",
                     "--approve-for-me", "--ephemeral", "--color", "never", prompt]

@@ -197,13 +197,17 @@ def log_error(message: str) -> None:
         pass
 
 
-def valid_hook_output(value: str) -> bool:
+def valid_hook_output(value: str, event_name: str | None = None) -> bool:
     if not value.strip():
         return False
     try:
         payload = json.loads(value)
     except json.JSONDecodeError:
         return False
+    if event_name == "Stop":
+        return (payload.get("decision") == "block"
+                and isinstance(payload.get("reason"), str)
+                and bool(payload.get("reason", "").strip()))
     output = payload.get("hookSpecificOutput")
     return (
         isinstance(output, dict)
@@ -221,6 +225,11 @@ def main() -> int:
         return 0
 
     try:
+        try:
+            hook_payload = json.loads(raw_payload)
+            event_name = str(hook_payload.get("hook_event_name") or hook_payload.get("event") or "")
+        except (json.JSONDecodeError, AttributeError):
+            event_name = ""
         try:
             payload = json.loads(raw_payload)
         except json.JSONDecodeError:
@@ -246,7 +255,7 @@ def main() -> int:
             f"{result.stderr.strip()}"
         )
     ingest_tracker_snapshot()
-    if valid_hook_output(result.stdout):
+    if valid_hook_output(result.stdout, event_name=event_name):
         if task_result is not None:
             output = json.loads(result.stdout)
             output["hookSpecificOutput"]["orchestratorTask"] = task_result
