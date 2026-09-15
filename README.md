@@ -20,7 +20,7 @@ Tracker 先按 Codex Session 隔离，再在每个 Session 内按问题隔离。
 
 ### Commander 与模型配置 🧠
 
-Commander 的默认 Worker 是当前已安装并已登录的 `codex` CLI，通过多个隔离的
+Commander 的默认 Worker 是当前配置路径指向的 `codex` CLI，通过多个隔离的
 `codex exec` 子进程协同工作，不要求 DeepSeek、本地 9B 或 GPT API。它会按任务动态规划
 1 到 5 个角色，例如前端样式、前端脚本、后端数据库、后端代码和 Git 审计；只需要一个角色
 时不会强行启动三个。每个角色使用独立 workspace，结果由主 Agent 审查，未经确认卡批准不会
@@ -40,6 +40,7 @@ PYTHONPATH=. python3 scripts/agentrelay_console.py commander task-1 \
 真实子 Agent 执行前，必须先通过 `task create` 生成确认卡，再执行
 `task approve task-1`；未批准时只能使用 `--offline-plan` 查看角色规划。
 
+线上网页模型或本地模型至少配置一个后，Commander 才会自动开启；用户可以在网页配置中心手动关闭。
 DeepSeek、本地模型和 GPT API 是可选的角色 Provider；配置后可以按角色覆盖当前 Codex，
 但没有这些 Provider 不会使 Commander 退化为空任务。
 
@@ -147,7 +148,7 @@ python3 install.py
 ```
 
 直接在终端运行 `python3 install.py` 会打开本机网页配置中心。页面分为总览、Commander、线上模型、
-本地模型、API 模型和安全配置几个区域，可以初始化环境、扫描本地服务、增删启停多个 Provider、设置默认
+本地模型、API 模型和安全配置几个区域，可以初始化环境、检查 Codex/Skill/Hook、扫描本地服务、增删启停多个 Provider、设置默认
 网页模型、测试接口，以及配置 DeepSeek 的混合/极速/专家会话名称和图片能力。配置完成后点击“完成并关闭”，
 本地服务会立即停止，不会常驻后台；需要纯终端入口时运行 `python3 install.py --menu`。
 
