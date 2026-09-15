@@ -822,6 +822,12 @@ class Orchestrator:
         except ImportError:
             from config_manager import apply_config_to_environment
         apply_config_to_environment()
+        try:
+            configured_max_agents = int(os.environ.get("AGENTRELAY_COMMANDER_MAX_AGENTS", max_agents))
+            if max_agents == 5:
+                max_agents = max(1, min(5, configured_max_agents))
+        except (TypeError, ValueError):
+            pass
         role_plan = self.plan_commander_roles(request, modules, max_agents=max_agents, roles=roles)
         if not role_plan:
             raise ValueError("Commander 至少需要一个角色")
