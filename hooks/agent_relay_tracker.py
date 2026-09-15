@@ -947,7 +947,7 @@ def calculate_weight(
     >= 5 分钟：
         weight = 2
 
-    >= 10 分钟：
+    >= 15 分钟：
         weight = 3
 
     注意：
@@ -964,7 +964,7 @@ def calculate_weight(
         effective_seconds or 0
     )
 
-    if effective_seconds >= 10 * 60:
+    if effective_seconds >= 15 * 60:
         return 3
 
     if effective_seconds >= 5 * 60:
