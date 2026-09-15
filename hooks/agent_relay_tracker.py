@@ -194,9 +194,9 @@ def get_problem_file(session_id, problem_id):
 
 MAX_WEIGHT = 3
 WEIGHT_TWO_SECONDS = 5 * 60
-# The historical warning ladder is 5m -> weight 2, 10m -> weight 3;
+# The historical warning ladder is 5m -> weight 2, 15m -> weight 3;
 # 15m is the independent escalation threshold.
-WEIGHT_THREE_SECONDS = 10 * 60
+WEIGHT_THREE_SECONDS = 15 * 60
 
 PAUSE_PROBLEM_PATTERNS = [
     r"先(?:不|别|不要)处理",
