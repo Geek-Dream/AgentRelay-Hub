@@ -907,6 +907,7 @@ try:
         resolve_codex_home,
         session_bindings_file,
         venv_python,
+        decrypt_provider_state,
     )
 except ImportError:
     from agent_relay_runtime import (
@@ -919,6 +920,7 @@ except ImportError:
         resolve_codex_home,
         session_bindings_file,
         venv_python,
+        decrypt_provider_state,
     )
 
 # ============================================================
@@ -2644,16 +2646,13 @@ def check_login(state_file: Path) -> bool:
         return False
 
     try:
-
-        with open(
-                state_file,
-                "r",
-                encoding="utf-8"
-        ) as file:
-
-            data = json.load(
-                file
-            )
+        temporary = decrypt_provider_state(state_file, CODEX_HOME)
+        try:
+            with open(temporary, "r", encoding="utf-8") as file:
+                data = json.load(file)
+        finally:
+            if temporary != state_file:
+                temporary.unlink(missing_ok=True)
 
         if (
                 "cookies" in data
@@ -2718,12 +2717,19 @@ def run_provider(
         question,
         mode,
         image_paths=None,
-        provider_name=DEFAULT_PROVIDER,
+        provider_name=None,
         timeout=300,
 ):
     """
     执行当前 Provider 的自动对话。
     """
+
+    try:
+        from .config_manager import apply_config_to_environment
+    except ImportError:
+        from config_manager import apply_config_to_environment
+    apply_config_to_environment()
+    provider_name = provider_name or os.environ.get("AGENT_RELAY_PROVIDER", DEFAULT_PROVIDER)
 
     from playwright.sync_api import (
         sync_playwright
@@ -2735,6 +2741,7 @@ def run_provider(
         adapter.name,
         CODEX_HOME,
     )
+    temporary_state_file = decrypt_provider_state(state_file, CODEX_HOME)
     binding_store = SessionBindingStore(
         SESSION_BINDINGS_FILE
     )
@@ -2750,7 +2757,7 @@ def run_provider(
             browser, context = (
                 create_browser_context(
                     p,
-                    state_file,
+                    temporary_state_file,
                 )
             )
 
@@ -2965,6 +2972,8 @@ def run_provider(
 
                 except Exception:
                     pass
+            if temporary_state_file != state_file:
+                temporary_state_file.unlink(missing_ok=True)
 
 
 # ============================================================
@@ -2972,6 +2981,11 @@ def run_provider(
 # ============================================================
 
 def main():
+    try:
+        from .config_manager import apply_config_to_environment
+    except ImportError:
+        from config_manager import apply_config_to_environment
+    apply_config_to_environment()
     parser = argparse.ArgumentParser(
         description="AgentRelay 在线专家模型中继"
     )
@@ -3010,7 +3024,7 @@ def main():
 
     parser.add_argument(
         "--provider",
-        default=DEFAULT_PROVIDER,
+        default=None,
         help=(
             "在线模型 Provider；也可通过 AGENT_RELAY_PROVIDER 设置。"
             "当前支持：deepseek"
@@ -3019,7 +3033,9 @@ def main():
 
     args = parser.parse_args()
     try:
-        provider_name = normalize_provider_name(args.provider)
+        provider_name = normalize_provider_name(args.provider or os.environ.get("AGENT_RELAY_PROVIDER", DEFAULT_PROVIDER))
+        if provider_name.endswith("-web") and provider_name[:-4] in ProviderRegistry().names:
+            provider_name = provider_name[:-4]
         provider_adapter = ProviderRegistry().create(provider_name)
     except ValueError as exc:
         parser.error(str(exc))

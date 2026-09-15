@@ -38,6 +38,8 @@ agent_relay_backup/
 .venv/
 venv/
 agentrelay-env/
+**/config/
+*.enc
 /tests/
 .DS_Store
 .idea/

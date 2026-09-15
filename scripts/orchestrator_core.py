@@ -15,6 +15,7 @@ import subprocess
 import time
 import json
 import os
+import shlex
 
 try:
     from .orchestrator_store import CheckpointStore, KnowledgeRecord, MemoryStore
@@ -816,6 +817,17 @@ class Orchestrator:
         prompt, and its own bounded process.  The original workspace is never
         modified by this method; merging remains a reviewed confirmation step.
         """
+        try:
+            from .config_manager import apply_config_to_environment
+        except ImportError:
+            from config_manager import apply_config_to_environment
+        apply_config_to_environment()
+        try:
+            configured_max_agents = int(os.environ.get("AGENTRELAY_COMMANDER_MAX_AGENTS", max_agents))
+            if max_agents == 5:
+                max_agents = max(1, min(5, configured_max_agents))
+        except (TypeError, ValueError):
+            pass
         role_plan = self.plan_commander_roles(request, modules, max_agents=max_agents, roles=roles)
         if not role_plan:
             raise ValueError("Commander 至少需要一个角色")
@@ -859,6 +871,14 @@ class Orchestrator:
             agent.context = child
             runtime._persist_child_context(agent)
 
+        configured_command = os.environ.get("AGENTRELAY_COMMANDER_COMMAND", "").strip()
+        try:
+            command_prefix = shlex.split(configured_command) if configured_command else [codex, "exec"]
+        except ValueError:
+            command_prefix = [codex, "exec"]
+        if not command_prefix:
+            command_prefix = [codex, "exec"]
+
         def command_factory(agent):
             goal = agent.model_config.get("goal", "完成分配任务")
             configured_provider = agent.model_config.get("provider")
@@ -895,7 +915,7 @@ class Orchestrator:
                 "完成后用简洁文字报告：完成内容、修改文件、验证结果、风险和建议。"
             )
             model = agent.model_config.get("model")
-            return [codex, "exec"] + (["-m", str(model)] if model else []) + ["--skip-git-repo-check", "--sandbox", "workspace-write",
+            return list(command_prefix) + (["-m", str(model)] if model else []) + ["--skip-git-repo-check", "--sandbox", "workspace-write",
                     "--approve-for-me", "--ephemeral", "--color", "never", prompt]
 
         runtime.run_processes(agents, command_factory, timeout=timeout)
@@ -1136,6 +1156,11 @@ class WorkflowEngine:
     def from_environment(cls, *, orchestrator: Orchestrator | None = None,
                          runtime_dir: str | Path | None = None) -> "WorkflowEngine":
         """Build optional providers from environment without making them required."""
+        try:
+            from .config_manager import apply_config_to_environment
+        except ImportError:
+            from config_manager import apply_config_to_environment
+        apply_config_to_environment()
         try:
             from .agent_adapter import DeepSeekAdapter, OpenAICompatibleAdapter
             from .agent_provider import DeepSeekProvider, LocalLLMProvider, OpenAIAPIProvider

@@ -622,6 +622,13 @@ class CommanderProcess:
         if not command or any(not isinstance(part, str) for part in command):
             raise ValueError("Commander command 必须是非空字符串数组")
         child_env = os.environ.copy()
+        # Commander children never call API Providers. Do not expose API keys
+        # to their inherited environment even though the controlled bridge
+        # also rejects API provider IDs.
+        for name in tuple(child_env):
+            if name.endswith("_API_KEY") or name in {"OPENAI_API_KEY", "ANTHROPIC_API_KEY"}:
+                child_env.pop(name, None)
+        child_env.pop("AGENTRELAY_API_PROVIDERS_JSON", None)
         child_env["AGENTRELAY_COMMANDER_CHILD"] = "1"
         child_env["AGENTRELAY_COMMANDER_DEPTH"] = "1"
         context = getattr(agent, "context", None)

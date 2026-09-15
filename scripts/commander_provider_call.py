@@ -68,6 +68,11 @@ def _request_provider(provider_id: str, prompt: str) -> str:
 
 def call(provider: str, prompt: str, task_id: str, role: str, coordinator: Path,
          fallback_providers=()) -> dict:
+    try:
+        from .config_manager import apply_config_to_environment
+    except ImportError:
+        from config_manager import apply_config_to_environment
+    apply_config_to_environment()
     pool = CommanderProviderCoordinator(coordinator, _profiles())
     candidates = []
     for item in (provider, *tuple(fallback_providers)):

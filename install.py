@@ -11,8 +11,16 @@ import subprocess
 import sys
 import tempfile
 import argparse
+import getpass
+import re
+import threading
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -60,6 +68,7 @@ SCRIPT_FILES = (
     "agent_orchestration.py",
     "orchestrator_task.py",
     "task_scheduler.py",
+    "config_manager.py",
 )
 CONFIG_FILES = ("model_registry.json",)
 REFERENCE_FILES = ("orchestrator-v1.md",)
@@ -363,6 +372,271 @@ def install_dependencies() -> None:
     )
 
 
+def _ask(prompt: str, default: str = "") -> str:
+    suffix = f" [{default}]" if default else ""
+    value = input(f"{prompt}{suffix}：").strip()
+    return value or default
+
+
+def _yes_no(prompt: str, default: bool = True) -> bool:
+    hint = "Y/n" if default else "y/N"
+    value = input(f"{prompt}（{hint}）：").strip().lower()
+    if not value:
+        return default
+    return value in {"y", "yes", "是", "确认", "好的", "可以"}
+
+
+def _valid_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _valid_provider_id(value: str) -> bool:
+    return bool(re.fullmatch(r"[a-z0-9][a-z0-9-]*", value or ""))
+
+
+def _probe_models(endpoint: str, api_key: str = "") -> tuple[bool, list[str], str]:
+    """测试 OpenAI-compatible 服务，不记录响应中的密钥或完整内容。"""
+    base = endpoint.rstrip("/")
+    if base.endswith("/chat/completions"):
+        base = base[: -len("/chat/completions")]
+    target = base + "/models"
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        with urlopen(Request(target, headers=headers), timeout=5) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        models = [str(item.get("id")) for item in data.get("data", [])
+                  if isinstance(item, dict) and item.get("id")]
+        return True, models, "连接成功"
+    except Exception as exc:
+        return False, [], f"连接失败：{type(exc).__name__}"
+
+
+def _probe_chat(endpoint: str, model: str, api_key: str = "") -> tuple[bool, str]:
+    """用极短请求验证聊天接口，不输出响应内容或密钥。"""
+    target = endpoint.rstrip("/")
+    if not target.endswith("/chat/completions"):
+        target += "/chat/completions"
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    payload = {"model": model, "messages": [{"role": "user", "content": "请只回复：测试成功"}], "max_tokens": 8}
+    try:
+        with urlopen(Request(target, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"), timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        return bool(answer), "聊天接口可用" if answer else "聊天接口未返回内容"
+    except Exception as exc:
+        return False, f"聊天测试失败：{type(exc).__name__}"
+
+
+def _scan_local_services() -> list[dict]:
+    services = [
+        ("Ollama", "http://127.0.0.1:11434/v1"),
+        ("LM Studio", "http://127.0.0.1:1234/v1"),
+        ("vLLM/llama.cpp", "http://127.0.0.1:8000/v1"),
+    ]
+    found = []
+    for name, endpoint in services:
+        ok, models, message = _probe_models(endpoint)
+        if ok:
+            found.append({"name": name, "endpoint": endpoint, "models": models, "message": message})
+    return found
+
+
+def _load_local_config():
+    try:
+        from scripts.config_manager import load_config, save_config
+    except ImportError as exc:
+        raise InstallError(f"无法加载本地配置模块：{exc}") from exc
+    return load_config(CODEX_HOME), save_config
+
+
+def _configure_web(config: dict) -> None:
+    print("\n线上模型配置（网页登录会话）")
+    print("可配置 DeepSeek、千问、Kimi 或其他网页模型。Cookie 只保存在本机，不会写入项目。")
+    providers = config.setdefault("web_providers", [])
+    while True:
+        print("\n1. DeepSeek  2. 千问  3. Kimi  4. 自定义网页模型  0. 返回")
+        choice = input("请选择：").strip()
+        if choice == "0":
+            return
+        defaults = {"1": ("deepseek-web", "DeepSeek", "https://chat.deepseek.com/"),
+                    "2": ("qianwen-web", "千问", "https://www.qianwen.com/"),
+                    "3": ("kimi-web", "Kimi", "https://www.kimi.com/")}
+        if choice in defaults:
+            provider_id, label, url = defaults[choice]
+        elif choice == "4":
+            label = _ask("模型显示名称")
+            provider_id = _ask("模型别名（只用英文、数字和短横线）", label.lower().replace(" ", "-"))
+            url = _ask("登录网址")
+            if not label or not _valid_provider_id(provider_id) or not _valid_url(url):
+                print("网址或名称无效，请重试。")
+                continue
+        else:
+            print("选项无效，请重试。")
+            continue
+        if provider_id != "deepseek-web":
+            print(f"{label} 的网页适配器尚未内置。可以先保存配置，后续接入适配器后使用。")
+        if not _yes_no(f"现在打开 {label} 登录页面", True):
+            continue
+        login_script = TARGET_SKILL / "scripts" / "agent_relay_login.py"
+        command = [str(VENV_PYTHON), str(login_script), "--provider", provider_id.removesuffix("-web")]
+        if provider_id != "deepseek-web":
+            command.extend(["--url", url, "--state-file",
+                            str(TARGET_SKILL / "config" / f"{provider_id}.storage-state.json")])
+        try:
+            login_result = subprocess.run(command, check=False)
+        except OSError as exc:
+            print(f"登录脚本启动失败：{exc}")
+            continue
+        if login_result.returncode != 0:
+            print("登录没有完成，本次不保存为可用 Provider。")
+            continue
+        entry = {"id": provider_id, "name": label, "url": url, "enabled": True,
+                 "state_file": str(TARGET_SKILL / "agent_relay_login_state.json.enc") if provider_id == "deepseek-web" else
+                 str(TARGET_SKILL / "config" / f"{provider_id}.storage-state.json.enc")}
+        providers[:] = [item for item in providers if not isinstance(item, dict) or item.get("id") != provider_id]
+        providers.append(entry)
+        config["default_provider"] = provider_id
+        print(f"已保存 {label} 配置。")
+
+
+def _configure_local(config: dict) -> None:
+    print("\n本地模型配置")
+    print("支持 Ollama、llama.cpp、vLLM、LM Studio 等 OpenAI 兼容接口；本地模型始终单并发。")
+    if not _yes_no("配置本地模型", True):
+        return
+    found = _scan_local_services()
+    if found:
+        print("检测到以下本地服务：")
+        for index, item in enumerate(found, 1):
+            models = "、".join(item["models"]) or "未返回模型名"
+            print(f"{index}. {item['name']}：{item['endpoint']}（{models}）")
+        selected = _ask("选择服务编号，或输入 0 手动填写", "1")
+        try:
+            selected_item = found[int(selected) - 1] if int(selected) > 0 else None
+        except (ValueError, IndexError):
+            selected_item = None
+        endpoint = selected_item["endpoint"] if selected_item else _ask("本地接口地址", "http://127.0.0.1:11434/v1")
+        default_model = (selected_item["models"] or ["llama3.2"])[0] if selected_item else "llama3.2"
+    else:
+        print("未检测到 Ollama、LM Studio 或 vLLM/llama.cpp。可以重新扫描或手动配置。")
+        print("1. 重新扫描  2. 手动填写  3. 上一步")
+        scan_choice = input("请选择：").strip()
+        if scan_choice == "1":
+            return _configure_local(config)
+        if scan_choice == "3":
+            return
+        endpoint = _ask("本地接口地址", "http://127.0.0.1:11434/v1")
+        default_model = "llama3.2"
+    model = _ask("模型名称", default_model)
+    alias = _ask("本地模型别名", model)
+    queue_timeout = _ask("最多等待多少秒（超过后改走线上或离线规则）", "30")
+    if not _valid_url(endpoint):
+        print("接口地址无效，已跳过。")
+        return
+    ok, models, message = _probe_models(endpoint)
+    print(f"本地服务测试：{message}。")
+    if not ok and not _yes_no("服务当前不可用，仍然保存配置", False):
+        return
+    if models and model not in models:
+        model = _ask("未发现该模型，请输入实际模型名", models[0])
+    local_entries = config.setdefault("local_providers", [])
+    if not isinstance(local_entries, list):
+        local_entries = []
+        config["local_providers"] = local_entries
+    local_entries[:] = [{"id": alias, "name": alias, "endpoint": endpoint,
+        "model": model, "enabled": True, "queue_timeout": int(queue_timeout or 30)}]
+    print("已保存本地模型配置。首次调用时会再次检查服务是否启动。")
+
+
+def _configure_api(config: dict) -> None:
+    print("\nAPI 模型配置")
+    print("API 密钥只加密保存在本机；Commander 子 Agent 不会调用 API Provider。")
+    if not _yes_no("配置 API 模型", True):
+        return
+    endpoint = _ask("API 地址", "https://api.openai.com/v1")
+    api_key = getpass.getpass("API Key（输入时不显示）：").strip()
+    model = _ask("模型名称", "gpt-5.5")
+    alias = _ask("模型别名", model)
+    print("请求类型：1. OpenAI 兼容聊天接口  2. 自定义兼容接口")
+    request_type = "openai-compatible" if input("请选择 [1]：").strip() != "2" else "custom-compatible"
+    if not _valid_url(endpoint) or not api_key or not model:
+        print("API 配置不完整，已跳过。")
+        return
+    ok, models, message = _probe_models(endpoint, api_key)
+    print(f"API 测试：{message}。")
+    if not ok and not _yes_no("API 当前不可用，仍然保存配置", False):
+        return
+    if models and model not in models:
+        model = _ask("接口返回的模型名与输入不同，请输入模型名", models[0])
+    api_entries = config.setdefault("api_providers", [])
+    if not isinstance(api_entries, list):
+        api_entries = []
+        config["api_providers"] = api_entries
+    api_entries[:] = [{"id": alias, "name": alias, "endpoint": endpoint,
+        "api_key": api_key, "model": model, "request_type": request_type, "enabled": True, "timeout": 60}]
+    if _yes_no("现在发送一次测试请求", False):
+        chat_ok, chat_message = _probe_chat(endpoint, model, api_key)
+        print(f"API 聊天测试：{chat_message}。")
+        if not chat_ok and not _yes_no("聊天测试失败，仍然保存配置", False):
+            return
+    print("已保存 API 模型配置。")
+
+
+def configure_models(config: dict) -> None:
+    while True:
+        print("\n模型配置：1. 线上模型  2. 本地模型  3. API 模型  0. 返回")
+        choice = input("请选择：").strip()
+        if choice == "0":
+            return
+        if choice == "1":
+            _configure_web(config)
+        elif choice == "2":
+            _configure_local(config)
+        elif choice == "3":
+            _configure_api(config)
+        else:
+            print("选项无效，请重试。")
+
+
+def configure_commander(config: dict) -> None:
+    print("\nCommander 高级功能")
+    print("开启后，主 Agent 可按任务动态启动 1-5 个隔离子 Agent，做前端、后端、数据库、审计等协同工作；")
+    print("每个子 Agent 独立计时和重试，结果先审查，必须经过确认卡才合并；子 Agent 不能递归启动 Commander。")
+    print("网页/本地模型是可选辅助；至少要有当前 Codex CLI 才能启动真正的子 Agent。")
+    enabled = _yes_no("开启 Commander", False)
+    config.setdefault("commander", {}).update({"enabled": enabled})
+    if not enabled:
+        return
+    terminal = _ask("使用的终端命令", "codex")
+    command = _ask("启动子 Agent 的命令", f"{terminal} exec")
+    try:
+        max_agents = max(1, min(5, int(_ask("最多同时启动几个子 Agent", "5"))))
+    except ValueError:
+        max_agents = 5
+    config["commander"].update({"terminal": terminal, "command": command, "max_agents": max_agents})
+
+
+def initialize_configuration() -> None:
+    config, save_config = _load_local_config()
+    print("\nAgentRelay 初始化向导")
+    print("1. 安装离线基础能力：Hook、Skill、Tracker、确认卡和本地规则。")
+    if _yes_no("现在配置默认 DeepSeek 网页模型", True):
+        _configure_web(config)
+    else:
+        print("已跳过 DeepSeek，之后可从主菜单重新配置。")
+    if _yes_no("现在配置本地模型", True):
+        _configure_local(config)
+    else:
+        print("已跳过本地模型，系统将使用离线规则。")
+    save_config(config, CODEX_HOME)
+    print("基础配置已加密保存。")
+
+
 def install_and_verify_chromium() -> None:
     """安装并确认 headed 登录所需的完整 Chromium 可执行文件。"""
 
@@ -409,6 +683,156 @@ def print_next_steps() -> None:
     print("  2. 重启 Codex，使其重新加载 hooks.json。")
 
 
+def run_chinese_menu() -> None:
+    """显示中文安装菜单；适合用户直接运行 install.py。"""
+    while True:
+        print("\n" + "=" * 56)
+        print("AgentRelay 安装与配置中心")
+        print("1. 初始化当前脚本（安装离线基础能力）")
+        print("2. 开启/关闭 Commander 高级功能")
+        print("3. 配置模型（线上 / 本地 / API）")
+        print("4. 查看当前配置状态")
+        print("5. 打开本地网页配置")
+        print("0. 退出")
+        choice = input("请选择：").strip()
+        if choice == "0":
+            print("已退出，配置仍保存在本机。")
+            return
+        if choice == "1":
+            initialize_configuration()
+        elif choice == "2":
+            config, save_config = _load_local_config()
+            configure_commander(config)
+            save_config(config, CODEX_HOME)
+            print("Commander 配置已加密保存。")
+        elif choice == "3":
+            config, save_config = _load_local_config()
+            configure_models(config)
+            save_config(config, CODEX_HOME)
+            print("模型配置已加密保存。")
+        elif choice == "4":
+            config, _ = _load_local_config()
+            print(json.dumps({
+                "运行模式": "Commander 高级模式" if config.get("commander", {}).get("enabled") else "离线基础模式",
+                "线上模型数量": len(config.get("web_providers", [])),
+                "本地模型数量": len(config.get("local_providers", [])),
+                "API 模型数量": len(config.get("api_providers", [])),
+                "配置文件": str(TARGET_SKILL / "config" / "agentrelay-config.json.enc"),
+            }, ensure_ascii=False, indent=2))
+        elif choice == "5":
+            run_web_configurator()
+        else:
+            print("选项无效，请输入菜单中的数字。")
+
+
+def run_web_configurator() -> None:
+    """启动一次性本地中文配置页，完成后由页面按钮关闭服务。"""
+    config, save_config = _load_local_config()
+    stopped = threading.Event()
+
+    def html_page(message: str = "") -> str:
+        commander = config.get("commander", {})
+        web_count = len(config.get("web_providers", []))
+        local_count = len(config.get("local_providers", []))
+        api_count = len(config.get("api_providers", []))
+        return f"""<!doctype html><html lang='zh-CN'><meta charset='utf-8'>
+<title>AgentRelay 配置</title><style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:820px;margin:32px auto;padding:0 20px;line-height:1.6;color:#222}}
+section{{border:1px solid #ddd;border-radius:8px;padding:18px;margin:16px 0}} label{{display:block;margin:8px 0}}
+input{{padding:7px;min-width:280px}} button{{padding:9px 16px;margin:6px 4px 6px 0;cursor:pointer}}
+.ok{{color:#087f23}} .hint{{color:#666;font-size:14px}}
+</style><h1>AgentRelay 安装与配置</h1>
+<p class='hint'>配置只保存在本机加密文件，不会上传 Git。网页完成后点击“完成并关闭”。</p>
+<p>当前：Commander={'已开启' if commander.get('enabled') else '未开启'}；线上 {web_count} 个；本地 {local_count} 个；API {api_count} 个。</p>
+<p class='ok'>{message}</p>
+<form method='post'><section><h2>Commander 高级功能</h2>
+<label><input type='checkbox' name='commander_enabled' {'checked' if commander.get('enabled') else ''}> 开启 Commander（1-5 个隔离子 Agent、独立计时、审查和合并确认卡）</label>
+<label>终端命令：<input name='terminal' value='{commander.get('terminal','codex')}'></label>
+<label>子 Agent 启动命令：<input name='command' value='{commander.get('command','codex exec')}'></label>
+<label>最大并发：<input name='max_agents' value='{commander.get('max_agents',5)}' type='number' min='1' max='5'></label>
+</section><section><h2>线上网页模型</h2>
+<p>DeepSeek、千问、Kimi 或自定义网页模型需要人工登录；Cookie 不会写入仓库。</p>
+<label>模型别名：<input name='web_id' placeholder='deepseek-web'></label>
+<label>显示名称：<input name='web_name' placeholder='DeepSeek'></label>
+<label>登录网址：<input name='web_url' placeholder='https://chat.deepseek.com/'></label>
+<button name='action' value='login_web'>打开网页登录并保存</button></section>
+<section><h2>本地模型</h2><p>支持 Ollama、LM Studio、vLLM、llama.cpp 的 OpenAI 兼容地址，始终单并发。</p>
+<label>接口地址：<input name='local_endpoint' placeholder='http://127.0.0.1:11434/v1'></label>
+<label>模型名称：<input name='local_model' placeholder='llama3.2'></label>
+<label>本地别名：<input name='local_alias' placeholder='我的本地模型'></label></section>
+<section><h2>API 模型</h2><p>API Key 只写入加密配置，Commander 子 Agent 不调用 API。</p>
+<label>API 地址：<input name='api_endpoint' placeholder='https://api.example/v1'></label>
+<label>API Key：<input name='api_key' type='password'></label>
+<label>模型名称：<input name='api_model' placeholder='模型名称'></label>
+<label>API 别名：<input name='api_alias' placeholder='我的 API 模型'></label></section>
+<button name='action' value='save'>保存配置</button><button name='action' value='done'>完成并关闭</button>
+</form></html>"""
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            return
+
+        def do_GET(self):
+            body = html_page().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            values = {key: item[0] for key, item in parse_qs(self.rfile.read(length).decode("utf-8")).items()}
+            action = values.get("action", "save")
+            config.setdefault("commander", {}).update({
+                "enabled": values.get("commander_enabled") == "on",
+                "terminal": values.get("terminal", "codex"),
+                "command": values.get("command", "codex exec"),
+                "max_agents": max(1, min(5, int(values.get("max_agents", "5") or 5))),
+            })
+            local_endpoint = values.get("local_endpoint", "").strip()
+            if local_endpoint and _valid_url(local_endpoint):
+                config["local_providers"] = [{"id": values.get("local_alias") or values.get("local_model") or "local-llm",
+                    "name": values.get("local_alias") or values.get("local_model") or "local-llm",
+                    "endpoint": local_endpoint, "model": values.get("local_model", ""), "enabled": True, "queue_timeout": 30}]
+            api_endpoint = values.get("api_endpoint", "").strip()
+            if api_endpoint and values.get("api_key") and values.get("api_model"):
+                config["api_providers"] = [{"id": values.get("api_alias") or values["api_model"],
+                    "name": values.get("api_alias") or values["api_model"], "endpoint": api_endpoint,
+                    "api_key": values["api_key"], "model": values["api_model"], "enabled": True, "timeout": 60}]
+            message = "配置已加密保存。"
+            if action == "login_web" and values.get("web_id") and _valid_provider_id(values["web_id"]):
+                provider_id = values["web_id"]
+                url = values.get("web_url", "")
+                if _valid_url(url):
+                    state_target = TARGET_SKILL / "config" / f"{provider_id}.storage-state.json"
+                    command = [str(VENV_PYTHON), str(TARGET_SKILL / "scripts" / "agent_relay_login.py"),
+                               "--provider", provider_id.removesuffix("-web"), "--url", url,
+                               "--state-file", str(state_target)]
+                    subprocess.run(command, check=False)
+                    config.setdefault("web_providers", []).append({"id": provider_id, "name": values.get("web_name", provider_id),
+                        "url": url, "enabled": True, "state_file": str(state_target.with_suffix(state_target.suffix + ".enc"))})
+                    message = f"{provider_id} 登录状态已保存。"
+            save_config(config, CODEX_HOME)
+            if action == "done":
+                stopped.set()
+            body = html_page(message).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    url = f"http://{server.server_address[0]}:{server.server_address[1]}"
+    print(f"正在打开本地配置页：{url}")
+    webbrowser.open(url)
+    while not stopped.wait(0.2):
+        server.handle_request()
+    server.server_close()
+    print("网页配置已完成，本地服务已关闭。")
+
+
 def write_daemon_service_config() -> Path | None:
     """Install a service descriptor only when explicitly requested."""
     if os.environ.get("AGENTRELAY_INSTALL_DAEMON") != "1":
@@ -441,9 +865,11 @@ def register_daemon_service(target: Path) -> None:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="安装 AgentRelay Codex Skill")
-    parser.add_argument("--install-daemon", action="store_true", help="生成 launchd/systemd daemon 配置")
-    parser.add_argument("--register-daemon", action="store_true", help="显式注册已生成的 daemon 服务")
+    parser = argparse.ArgumentParser(description="AgentRelay 中文安装与配置脚本")
+    parser.add_argument("--menu", action="store_true", help="进入中文安装与配置菜单")
+    parser.add_argument("--no-menu", action="store_true", help="只安装文件，不进入交互菜单")
+    parser.add_argument("--install-daemon", action="store_true", help="生成后台服务配置")
+    parser.add_argument("--register-daemon", action="store_true", help="注册已生成的后台服务")
     args = parser.parse_args(argv)
     print(f"AgentRelay 安装程序：{PROJECT_ROOT}")
     print(f"Codex 目录：{CODEX_HOME}")
@@ -458,6 +884,8 @@ def main(argv=None) -> int:
         install_and_verify_chromium()
         install_files()
         merge_hooks_json()
+        if not args.no_menu and (args.menu or (argv is None and sys.stdin.isatty())):
+            run_chinese_menu()
         if args.install_daemon or args.register_daemon:
             os.environ["AGENTRELAY_INSTALL_DAEMON"] = "1"
         service = write_daemon_service_config()
