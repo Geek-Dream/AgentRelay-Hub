@@ -1193,7 +1193,10 @@ class SiteAdapter:
 
         标题只用于首次发现或绑定失效后的恢复；正常调用直接使用持久化 href。
         """
-        keywords = self.mode_keywords.get(self.session_scope(mode), ())
+        # 安装器允许自定义会话标题；把当前 canonical 标题加入候选，兼容旧标题列表。
+        keywords = (self.canonical_session_title(mode),) + tuple(
+            self.mode_keywords.get(self.session_scope(mode), ())
+        )
         ranked = []
         for index, session in enumerate(sessions):
             normalized_title = " ".join(session.title.split()).casefold()
@@ -1544,7 +1547,25 @@ class DeepSeekAdapter(SiteAdapter):
         return parsed is not None and parsed.session_id == session.session_id
 
     def canonical_session_title(self, mode: str) -> str:
-        return "AgentRelay-DeepSeek"
+        # 标题由安装器网页配置；旧配置没有该字段时继续使用原默认值。
+        defaults = {
+            "default": "AgentRelay-DeepSeek",
+            "flash": "AgentRelay-DeepSeek-Flash",
+            "expert": "AgentRelay-DeepSeek-Expert",
+            "hybrid": "AgentRelay-DeepSeek",
+        }
+        try:
+            try:
+                from .config_manager import load_config
+            except ImportError:
+                from config_manager import load_config
+            config = load_config(CODEX_HOME)
+            entries = config.get("web_providers", [])
+            entry = next((item for item in entries if isinstance(item, dict) and item.get("id") == "deepseek-web"), None)
+            titles = ((entry or {}).get("conversation") or {}).get("titles", {})
+            return str(titles.get(mode) or titles.get("hybrid") or defaults.get(mode, defaults["default"]))
+        except Exception:
+            return defaults.get(mode, defaults["default"])
 
     def session_scope(self, mode: str) -> str:
         # DeepSeek's current model unifies instant, vision and expert requests.

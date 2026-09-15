@@ -134,10 +134,14 @@ cd AgentRelay-Hub
 python3 install.py
 ```
 
-直接在终端运行 `python3 install.py` 会进入全中文安装菜单。菜单里的“初始化当前脚本”会安装
-Hook、Skill、Tracker、确认卡和离线规则；DeepSeek 登录、本地模型和 API 都可以跳过，跳过后仍可
-使用离线基础模式。菜单还可以单独开启 Commander、设置子 Agent 使用的终端和并发数，或在之后
-重新配置三类 Provider。
+直接在终端运行 `python3 install.py` 会打开本机网页配置中心。页面分为总览、Commander、线上模型、
+本地模型、API 模型和安全配置几个区域，可以初始化环境、扫描本地服务、增删启停多个 Provider、设置默认
+网页模型、测试接口，以及配置 DeepSeek 的混合/极速/专家会话名称和图片能力。配置完成后点击“完成并关闭”，
+本地服务会立即停止，不会常驻后台；需要纯终端入口时运行 `python3 install.py --menu`。
+
+网页配置中心是手动 Provider 管理平台：已保存 Provider 会明确显示“可调用 Adapter”或“等待 Adapter”，
+不会因为填了网址就假装千问、Kimi 等网站已经接通。DeepSeek 当前是内置 Adapter，默认作为混合模型，支持极速、
+专家和图片；其他网页 Provider 仍需后续实现对应浏览器 Adapter。三类 Provider 都可以跳过，跳过后仍可使用离线基础模式。
 
 安装器支持 `CODEX_HOME`；未设置时使用 `$HOME/.codex`。它会：
 

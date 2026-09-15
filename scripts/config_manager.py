@@ -88,6 +88,46 @@ def default_config() -> dict[str, Any]:
     }
 
 
+def _normalize_web_provider(item: object) -> dict[str, Any] | None:
+    """补齐网页 Provider 的统一 schema，并兼容旧版 url 字段。"""
+    if not isinstance(item, dict):
+        return None
+    provider_id = str(item.get("id", "")).strip().lower()
+    if not provider_id:
+        return None
+    name = str(item.get("name") or provider_id)
+    base_url = str(item.get("base_url") or item.get("url") or "").strip()
+    conversation = item.get("conversation")
+    if not isinstance(conversation, dict):
+        conversation = {}
+    default_titles = {
+        "flash": "AgentRelay-DeepSeek-Flash",
+        "expert": "AgentRelay-DeepSeek-Expert",
+        "hybrid": "AgentRelay-DeepSeek",
+    }
+    titles = conversation.get("titles")
+    if not isinstance(titles, dict):
+        titles = {}
+    normalized = {
+        **item,
+        "id": provider_id,
+        "name": name,
+        "url": base_url,
+        "base_url": base_url,
+        "enabled": bool(item.get("enabled", True)),
+        "adapter": str(item.get("adapter") or ("deepseek" if provider_id == "deepseek-web" else "")),
+        "conversation": {
+            "supports_flash": bool(conversation.get("supports_flash", True)),
+            "supports_expert": bool(conversation.get("supports_expert", True)),
+            "supports_hybrid": bool(conversation.get("supports_hybrid", True)),
+            "supports_images": bool(conversation.get("supports_images", provider_id == "deepseek-web")),
+            "create_if_missing": bool(conversation.get("create_if_missing", True)),
+            "titles": {key: str(titles.get(key) or default_titles[key]) for key in default_titles},
+        },
+    }
+    return normalized
+
+
 def load_config(home: Path | None = None) -> dict[str, Any]:
     path = config_path(home)
     if not path.exists():
@@ -110,12 +150,21 @@ def load_config(home: Path | None = None) -> dict[str, Any]:
                 merged[section] = {**default_config()[section], **value_section}
         elif not isinstance(merged.get(section), list):
             merged[section] = []
+    merged["web_providers"] = [
+        normalized for item in merged.get("web_providers", [])
+        if (normalized := _normalize_web_provider(item)) is not None
+    ]
     return merged
 
 
 def save_config(value: Mapping[str, Any], home: Path | None = None) -> Path:
     cipher = _fernet(home, create=True)
-    payload = json.dumps(dict(value), ensure_ascii=False, indent=2).encode("utf-8")
+    normalized = dict(value)
+    normalized["web_providers"] = [
+        item for raw in normalized.get("web_providers", [])
+        if (item := _normalize_web_provider(raw)) is not None
+    ]
+    payload = json.dumps(normalized, ensure_ascii=False, indent=2).encode("utf-8")
     path = config_path(home)
     _secure_write(path, cipher.encrypt(payload))
     return path
