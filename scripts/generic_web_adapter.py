@@ -197,12 +197,19 @@ class GenericWebAdapter(SiteAdapter):
 
     _WALL_JS = """
     () => {
+        const visible = (el) => {
+            const r = el.getBoundingClientRect();
+            if (!r.width || !r.height) return false;
+            const style = getComputedStyle(el);
+            return style.visibility !== 'hidden' && style.display !== 'none';
+        };
         const ifr = [...document.querySelectorAll('iframe')].some(f =>
-            /punish|baxia|captcha|verify|x5sec/i.test(
+            visible(f) && /punish|baxia|captcha|verify|x5sec/i.test(
                 (f.src || '') + ' ' + (f.id || '') + ' ' + (f.getAttribute('class') || '')));
-        const cap = !!document.querySelector(
+        const cap = [...document.querySelectorAll(
             '[class*="captcha" i], [id*="baxia" i], [class*="verify-slider" i], ' +
-            '[class*="geetest" i], [class*="nc_iconfont" i], [class*="slidebtn" i]');
+            '[class*="geetest" i], [class*="nc_iconfont" i], [class*="slidebtn" i]'
+        )].some(el => el.tagName !== 'SCRIPT' && visible(el));
         const url = /punish|verify|captcha|x5sec/i.test(location.href);
         return ifr || cap || url;
     }
