@@ -1313,6 +1313,16 @@ class DeepSeekAdapter(SiteAdapter):
             "极速",
             "图片",
         ),
+        "flash": (
+            "AgentRelay-DeepSeek-Flash",
+            "极速",
+            "图片",
+        ),
+        "expert": (
+            "AgentRelay-DeepSeek-Expert",
+            "专家",
+            "思考",
+        ),
     }
 
     URL_KEYWORDS = (
@@ -1563,17 +1573,32 @@ class DeepSeekAdapter(SiteAdapter):
             entries = config.get("web_providers", [])
             entry = next((item for item in entries if isinstance(item, dict) and item.get("id") == "deepseek-web"), None)
             if entry is None:
-                # 旧安装没有网页配置时，继续复用历史统一会话标题；配置中心保存后才启用分模式标题。
-                return defaults["default"]
-            titles = ((entry or {}).get("conversation") or {}).get("titles", {})
+                # DeepSeek 的内置默认能力就是混合模式；未迁移的旧登录状态会在
+                # 配置加载时补成同样的 Provider 记录。
+                return defaults["expert" if mode == "expert" else "flash"]
+            conversation = (entry or {}).get("conversation") or {}
+            titles = conversation.get("titles", {})
+            if conversation.get("supports_hybrid"):
+                title_key = "expert" if mode == "expert" else "flash"
+                return str(titles.get(title_key) or defaults[title_key])
             return str(titles.get(mode) or titles.get("hybrid") or defaults.get(mode, defaults["default"]))
         except Exception:
             return defaults.get(mode, defaults["default"])
 
     def session_scope(self, mode: str) -> str:
-        # DeepSeek's current model unifies instant, vision and expert requests.
-        # Keep the request mode in output/history, but route every mode to one chat.
-        return "unified"
+        # 混合模式拥有极速和专家两个独立会话；旧版没有配置时维持统一会话兼容。
+        try:
+            try:
+                from .config_manager import load_config
+            except ImportError:
+                from config_manager import load_config
+            entries = load_config(CODEX_HOME).get("web_providers", [])
+            entry = next((item for item in entries if isinstance(item, dict) and item.get("id") == "deepseek-web"), None)
+            if ((entry or {}).get("conversation") or {}).get("supports_hybrid"):
+                return "expert" if mode == "expert" else "flash"
+        except Exception:
+            pass
+        return "expert" if mode == "expert" else "flash"
 
     def configure_mode(self, page, mode: str) -> None:
         # The current DeepSeek model handles instant, vision and expert prompts

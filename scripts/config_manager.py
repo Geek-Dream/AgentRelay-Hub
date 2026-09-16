@@ -128,9 +128,9 @@ def _normalize_web_provider(item: object) -> dict[str, Any] | None:
         "enabled": bool(item.get("enabled", True)),
         "adapter": str(item.get("adapter") or ("deepseek" if provider_id == "deepseek-web" else "")),
         "conversation": {
-            "supports_flash": bool(conversation.get("supports_flash", True)),
-            "supports_expert": bool(conversation.get("supports_expert", True)),
-            "supports_hybrid": bool(conversation.get("supports_hybrid", True)),
+            "supports_flash": bool(conversation.get("supports_flash", provider_id == "deepseek-web")),
+            "supports_expert": bool(conversation.get("supports_expert", provider_id == "deepseek-web")),
+            "supports_hybrid": bool(conversation.get("supports_hybrid", provider_id == "deepseek-web")),
             "supports_images": bool(conversation.get("supports_images", provider_id == "deepseek-web")),
             "create_if_missing": bool(conversation.get("create_if_missing", True)),
             "titles": {key: str(titles.get(key) or default_titles[key]) for key in default_titles},
