@@ -1158,6 +1158,11 @@ class SiteAdapter:
     mode_keywords = {}
     # 兜底适配器（GenericWebAdapter）置为 True；网站检测时永远最后尝试。
     fallback = False
+    # 有头运行浏览器（反风控更稳、验证弹窗可人工处理）。仅通用兜底置 True；
+    # 可用环境变量 AGENT_RELAY_WEB_HEADFUL=0/1 全局强制。
+    prefer_headful = False
+    # 对话成功后是否把新 Cookie 回写到登录状态文件。
+    refresh_state = False
 
     @property
     def name(self) -> str:
@@ -2747,14 +2752,15 @@ def check_login(state_file: Path) -> bool:
 
 def create_browser_context(
         playwright,
-        state_file: Path
+        state_file: Path,
+        headless: bool = True,
 ):
     """
     创建 Playwright Browser Context。
     """
 
     launch_options = {
-        "headless": True,
+        "headless": headless,
     }
 
     if BROWSER_PATH:
@@ -2818,6 +2824,16 @@ def run_provider(
     )
     binding_scope = adapter.session_scope(mode)
 
+    # 通用兜底默认有头（反风控、验证可人工处理）；环境变量可全局强制。
+    headless = not getattr(adapter, "prefer_headful", False)
+    headful_override = os.environ.get(
+        "AGENT_RELAY_WEB_HEADFUL", ""
+    ).strip().lower()
+    if headful_override in {"1", "true", "yes", "on"}:
+        headless = False
+    elif headful_override in {"0", "false", "no", "off"}:
+        headless = True
+
     with sync_playwright() as p:
 
         browser = None
@@ -2829,6 +2845,7 @@ def run_provider(
                 create_browser_context(
                     p,
                     temporary_state_file,
+                    headless=headless,
                 )
             )
 
@@ -3017,6 +3034,30 @@ def run_provider(
             # ------------------------------------------------
             # 返回结果（包含实际使用的图片列表）
             # ------------------------------------------------
+
+            # ------------------------------------------------
+            # 回写登录状态：把验证通过后的新 Cookie 存回加密状态文件，
+            # 后续运行可以复用（例如风控验证令牌）。
+            # ------------------------------------------------
+
+            if getattr(adapter, "refresh_state", False):
+                try:
+                    try:
+                        from .agent_relay_login import (
+                            save_storage_state,
+                        )
+                    except ImportError:
+                        from agent_relay_login import (
+                            save_storage_state,
+                        )
+                    save_storage_state(context, state_file)
+                    debug_log(
+                        f"Provider {adapter.name} 登录状态已回写"
+                    )
+                except Exception as exc:
+                    log_error(
+                        f"回写登录状态失败 provider={adapter.name}: {exc}"
+                    )
 
             return {
                 "provider": adapter.name,

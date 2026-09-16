@@ -71,6 +71,7 @@ SCRIPT_FILES = (
     "config_manager.py",
     "config_web.py",
     "generic_web_adapter.py",
+    "diagnose_web_provider.py",
 )
 CONFIG_FILES = ("model_registry.json",)
 REFERENCE_FILES = ("orchestrator-v1.md",)
