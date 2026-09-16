@@ -801,10 +801,13 @@ def run_web_configurator() -> None:
             if not _valid_url(url):
                 raise ValueError("网页地址必须是 HTTP(S) 地址")
             conversation = value.get("conversation") if isinstance(value.get("conversation"), dict) else {}
+            old = next((x for x in config.get(section, []) if isinstance(x, dict) and x.get("id") == provider_id), {})
             value = {"id": provider_id, "name": str(value.get("name") or provider_id),
                      "url": url, "base_url": url, "enabled": bool(value.get("enabled", True)),
                      "adapter": "deepseek" if provider_id == "deepseek-web" else "generic",
-                     "state_file": str(value.get("state_file", "")), "conversation": conversation}
+                     # 表单保存不带 state_file；必须保留旧值，否则登录状态指针会被清空
+                     "state_file": str(value.get("state_file") or old.get("state_file") or ""),
+                     "conversation": conversation}
         elif kind == "local":
             endpoint = str(value.get("endpoint", "")).strip()
             if not _valid_url(endpoint) or not value.get("model"):

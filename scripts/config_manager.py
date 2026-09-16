@@ -333,12 +333,26 @@ def apply_config_to_environment(home: Path | None = None) -> dict[str, Any]:
         if provider_id == "deepseek-web":
             os.environ.setdefault("AGENTRELAY_DEEPSEEK_ENABLED", "1")
             os.environ.setdefault("AGENTRELAY_DEEPSEEK_MODE", "playwright")
-            if web.get("state_file"):
-                os.environ.setdefault("AGENT_RELAY_LOGIN_STATE", str(web["state_file"]))
-        elif web.get("state_file"):
-            key = provider_id.upper().replace("-", "_")
-            os.environ.setdefault(f"AGENT_RELAY_{key}_LOGIN_STATE", str(web["state_file"]))
         os.environ.setdefault("AGENTRELAY_COMMANDER_DEFAULT_PROVIDER", provider_id)
+
+    # 每个已保存登录状态的网页 Provider 都要导出对应环境变量，
+    # 否则非默认 Provider（如千问）会回落到默认 Provider 的登录状态文件。
+    web_entries = config.get("web_providers")
+    for item in web_entries if isinstance(web_entries, list) else []:
+        if not (isinstance(item, dict) and item.get("state_file")):
+            continue
+        provider_id = str(item.get("id", "")).strip()
+        if not provider_id:
+            continue
+        state_file = str(item["state_file"])
+        keys = {
+            provider_id.upper().replace("-", "_"),
+            provider_id.removesuffix("-web").upper().replace("-", "_"),
+        }
+        for key in keys:
+            os.environ.setdefault(f"AGENT_RELAY_{key}_LOGIN_STATE", state_file)
+        if provider_id == "deepseek-web":
+            os.environ.setdefault("AGENT_RELAY_LOGIN_STATE", state_file)
 
     local = _first(config.get("local_providers"))
     if local and local.get("endpoint"):
