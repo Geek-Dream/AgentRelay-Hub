@@ -137,11 +137,12 @@ python3 install.py
 
 直接在终端运行 `python3 install.py` 会打开本机网页配置中心。页面分为总览、Commander、线上模型、
 本地模型、API 模型和安全配置几个区域，可以初始化环境、检查 Codex/Skill/Hook、扫描本地服务、增删启停多个 Provider、设置默认
-网页模型、测试接口，以及配置 DeepSeek 的混合/极速/专家会话名称和图片能力。配置完成后点击“完成并关闭”，
+网页模型、测试接口，以及配置网页模型的混合/极速/专家会话名称和图片能力。会话名会由别名自动生成，例如 `qianwen` 会生成
+`AgentRelay-Qianwen-Flash` 和 `AgentRelay-Qianwen-Expert`；混合模式只使用这两套会话。网页登录完成后，关闭登录的对话标签页即可自动加密保存 Cookie，配置页会显示“登录状态已保存”。本地扫描支持 Ollama、LM Studio、vLLM 和 llama.cpp。配置完成后点击“完成并关闭”，
 本地服务会立即停止，不会常驻后台；需要纯终端入口时运行 `python3 install.py --menu`。
 
-网页配置中心是手动 Provider 管理平台：已保存 Provider 会明确显示“可调用 Adapter”或“等待 Adapter”，
-不会因为填了网址就假装千问、Kimi 等网站已经接通。DeepSeek 当前是内置 Adapter，默认作为混合模型，支持极速、
+网页配置中心是手动 Provider 管理平台：已保存 Provider 会明确显示“已经可以自动对话”或“只保存了网页登录状态，暂时不能自动对话”，
+不会因为填了网址就假装千问、Kimi 等网站已经接通。DeepSeek 当前已内置自动操作规则，默认作为混合模型，支持极速、
 专家和图片；其他网页 Provider 仍需后续实现对应浏览器 Adapter。三类 Provider 都可以跳过，跳过后仍可使用离线基础模式。
 旧版只保存 DeepSeek 登录状态的安装会在首次打开配置中心或运行 Skill 时自动迁移到统一加密 Provider 配置；
 迁移成功后会删除旧明文状态文件，不需要重新登录。

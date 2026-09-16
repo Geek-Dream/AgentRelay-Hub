@@ -24,6 +24,26 @@ except ImportError:
 
 CODEX_HOME = resolve_codex_home()
 
+
+def save_storage_state(context, target: Path) -> Path:
+    """加密写入浏览器状态，供终端和网页登录流程共用。"""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    encrypted_path = target if target.suffix == ".enc" else target.with_suffix(target.suffix + ".enc")
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as temporary:
+        temporary_state = Path(temporary.name)
+    try:
+        context.storage_state(path=str(temporary_state))
+        try:
+            from .config_manager import encrypt_secret_bytes
+        except ImportError:
+            from config_manager import encrypt_secret_bytes
+        encrypted_path.write_bytes(encrypt_secret_bytes(temporary_state.read_bytes(), CODEX_HOME))
+        encrypted_path.chmod(0o600)
+        return encrypted_path
+    finally:
+        temporary_state.unlink(missing_ok=True)
+
+
 def login_provider(provider_name="deepseek"):
     """打开当前 Provider，并在用户手动认证后保存登录状态。"""
 
@@ -44,25 +64,18 @@ def login_provider(provider_name="deepseek"):
         print("AgentRelay 不会填写凭据，也不会尝试绕过验证码。")
         input("完成登录并进入聊天页面后，回到终端按 Enter 保存会话...")
 
-        state_file.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as temporary:
-            temporary_state = Path(temporary.name)
-        try:
-            context.storage_state(path=str(temporary_state))
-            try:
-                from .config_manager import encrypt_secret_bytes
-            except ImportError:
-                from config_manager import encrypt_secret_bytes
-            encrypted = encrypt_secret_bytes(temporary_state.read_bytes(), CODEX_HOME)
-            encrypted_path.write_bytes(encrypted)
-            encrypted_path.chmod(0o600)
-            print(f"\n登录状态已加密保存到 {encrypted_path}")
-        finally:
-            temporary_state.unlink(missing_ok=True)
+        saved = save_storage_state(context, encrypted_path)
+        print(f"\n登录状态已加密保存到 {saved}")
         browser.close()
 
 
-def login_custom_provider(provider_name: str, url: str, state_file: str | None = None):
+def login_custom_provider(
+    provider_name: str,
+    url: str,
+    state_file: str | None = None,
+    *,
+    save_on_close: bool = False,
+):
     """登录未内置适配器的网页 Provider，只保存 Playwright 会话状态。"""
     if urlparse(url).scheme not in {"http", "https"} or not urlparse(url).netloc:
         raise ValueError("登录网址必须是完整的 HTTP(S) 地址")
@@ -77,23 +90,19 @@ def login_custom_provider(provider_name: str, url: str, state_file: str | None =
         print(f"正在打开 {provider_name} 登录页面：{url}")
         page.goto(url)
         print("请在浏览器中手动登录并完成人机验证。")
-        input("完成登录后回到终端按 Enter 保存会话...")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as temporary:
-            temporary_state = Path(temporary.name)
-        try:
-            context.storage_state(path=str(temporary_state))
+        if save_on_close:
+            print("登录完成后关闭当前对话标签页，AgentRelay 会自动保存登录状态。")
             try:
-                from .config_manager import encrypt_secret_bytes
-            except ImportError:
-                from config_manager import encrypt_secret_bytes
-            encrypted_path = target if target.suffix == ".enc" else target.with_suffix(target.suffix + ".enc")
-            encrypted_path.write_bytes(encrypt_secret_bytes(temporary_state.read_bytes()))
-            encrypted_path.chmod(0o600)
+                page.wait_for_event("close", timeout=15 * 60 * 1000)
+            except Exception as exc:
+                raise RuntimeError("等待关闭登录页面超时或浏览器被中断") from exc
+        else:
+            input("完成登录后回到终端按 Enter 保存会话...")
+        try:
+            encrypted_path = save_storage_state(context, target)
             print(f"登录状态已加密隔离保存到：{encrypted_path}")
         finally:
-            temporary_state.unlink(missing_ok=True)
-        browser.close()
+            browser.close()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="登录 AgentRelay Provider")
@@ -104,8 +113,10 @@ if __name__ == "__main__":
     )
     parser.add_argument("--url", default="", help="自定义网页 Provider 登录网址")
     parser.add_argument("--state-file", default="", help="自定义登录状态文件路径")
+    parser.add_argument("--save-on-close", action="store_true", help="关闭登录标签页后自动保存，不等待终端输入")
     args = parser.parse_args()
     if args.url:
-        login_custom_provider(args.provider, args.url, args.state_file or None)
+        login_custom_provider(args.provider, args.url, args.state_file or None,
+                              save_on_close=args.save_on_close)
     else:
         login_provider(args.provider)

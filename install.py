@@ -69,6 +69,7 @@ SCRIPT_FILES = (
     "orchestrator_task.py",
     "task_scheduler.py",
     "config_manager.py",
+    "config_web.py",
 )
 CONFIG_FILES = ("model_registry.json",)
 REFERENCE_FILES = ("orchestrator-v1.md",)
@@ -436,8 +437,25 @@ def _scan_local_services() -> list[dict]:
     services = [
         ("Ollama", "http://127.0.0.1:11434/v1"),
         ("LM Studio", "http://127.0.0.1:1234/v1"),
-        ("vLLM/llama.cpp", "http://127.0.0.1:8000/v1"),
+        ("vLLM", "http://127.0.0.1:8000/v1"),
+        ("llama.cpp", "http://127.0.0.1:8080/v1"),
+        ("llama.cpp", "http://127.0.0.1:8081/v1"),
     ]
+    # llama.cpp 常由用户自定义端口。macOS/Linux 上补查本机正在监听的端口，
+    # 仍只访问 127.0.0.1 的 OpenAI-compatible /v1/models 接口。
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
+            capture_output=True, text=True, timeout=3, check=False,
+        )
+        ports = re.findall(r"(?:127\.0\.0\.1|\*|localhost):(\d+)\s*\(LISTEN\)", result.stdout)
+        known = {endpoint.rsplit(":", 1)[-1].split("/")[0] for _, endpoint in services}
+        for port in ports[:30]:
+            if port not in known:
+                services.append(("本机兼容服务", f"http://127.0.0.1:{port}/v1"))
+                known.add(port)
+    except (OSError, subprocess.SubprocessError):
+        pass
     found = []
     for name, endpoint in services:
         ok, models, message = _probe_models(endpoint)
@@ -790,7 +808,7 @@ def run_web_configurator() -> None:
             config["default_provider"] = next((item.get("id") for item in config.get("web_providers", []) if isinstance(item, dict) and item.get("enabled", True)), "")
         save_config(config, CODEX_HOME)
 
-    def html_page() -> str:
+    def legacy_html_page() -> str:
         state = json.dumps(public_config(), ensure_ascii=False).replace("</", "<\\/")
         return """<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'><title>AgentRelay 配置中心</title>
@@ -826,6 +844,13 @@ async function toggleProvider(kind,id){try{const d=await api('/api/providers/act
 async function testProvider(kind,id){try{const d=await api('/api/test',{method:'POST',body:JSON.stringify({kind,id})});toast(d.message)}catch(e){toast(e.message)}}async function testApiForm(){const endpoint=$('f-endpoint').value,model=$('f-model').value,key=$('f-key').value;try{const d=await api('/api/test',{method:'POST',body:JSON.stringify({kind:'api',endpoint,model,api_key:key})});toast(d.message)}catch(e){toast(e.message)}}
 async function scanLocal(){try{const d=await api('/api/scan-local');$('local-scan').textContent=d.found.length?'检测到：'+d.found.map(x=>x.name+'（'+(x.models.join('、')||'未返回模型')+'）').join('，'):'没有检测到本机服务';toast('扫描完成')}catch(e){toast(e.message)}}async function checkEnvironment(){try{const d=await api('/api/environment');const failed=d.checks.filter(x=>!x.ok);$('environment').innerHTML='<strong>环境检查是确认安装器、Codex CLI、Skill 和 Hook 是否能正常工作，不是检查 Provider 登录状态。</strong><br>'+d.checks.map(x=>`${x.ok?'✓':'!'} ${esc(x.name)}：${esc(x.detail)}${x.reason?'（'+esc(x.reason)+'）':''}`).join('<br>');toast(failed.length?'未找到：'+failed.map(x=>x.name+'，'+x.reason).join('；'):'环境检查通过')}catch(e){toast(e.message)}}async function initializeFiles(){try{const d=await api('/api/initialize',{method:'POST'});toast(d.message)}catch(e){toast(e.message)}}async function loginWeb(){const hybrid=$('f-hybrid').checked;const p={id:$('f-id').value,name:$('f-name').value,base_url:$('f-url').value,conversation:{supports_flash:$('f-flash').checked||hybrid,supports_expert:$('f-expert').checked||hybrid,supports_hybrid:hybrid,supports_images:$('f-images').checked,create_if_missing:true,titles:{flash:$('f-flash-title').value,expert:$('f-expert-title').value,hybrid:$('f-hybrid-title').value}}};try{const d=await api('/api/login',{method:'POST',body:JSON.stringify({provider:p})});state=d.config;render();toast(d.message)}catch(e){toast(e.message)}}async function closeApp(){try{await api('/api/close',{method:'POST'});document.body.innerHTML='<main class="shell"><div class="card"><h1>配置已完成</h1><p>本地服务已关闭，可以安全关闭这个页面。</p></div></main>'}catch(e){toast(e.message)}}render();</script></body></html>""".replace("__CONFIG__", state)
 
+    def html_page() -> str:
+        try:
+            from scripts.config_web import build_config_page
+        except ImportError as exc:
+            raise InstallError(f"无法加载网页配置中心：{exc}") from exc
+        return build_config_page(public_config())
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
             return
@@ -839,8 +864,14 @@ async function scanLocal(){try{const d=await api('/api/scan-local');$('local-sca
             body = payload.encode("utf-8") if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status);self.send_header("Content-Type",content_type);self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
         def do_GET(self):
-            if self.path == "/api/config": self._send({"config":public_config()});return
-            if self.path == "/": self._send(html_page(),content_type="text/html; charset=utf-8");return
+            from urllib.parse import parse_qs as parse_query, urlsplit
+            parsed = urlsplit(self.path)
+            if parsed.path == "/api/config": self._send({"config":public_config()});return
+            if parsed.path == "/api/login-status":
+                provider_id = parse_query(parsed.query).get("id", [""])[0]
+                item = next((x for x in config.get("web_providers", []) if isinstance(x, dict) and x.get("id") == provider_id), {})
+                self._send({"saved": bool(item.get("state_file") and Path(item["state_file"]).is_file())});return
+            if parsed.path == "/": self._send(html_page(),content_type="text/html; charset=utf-8");return
             self._send({"error":"未找到"},404)
         def do_DELETE(self):
             try:
@@ -884,14 +915,17 @@ async function scanLocal(){try{const d=await api('/api/scan-local');$('local-sca
                     kind=str(data.get("kind"));item=data
                     if data.get("id"): item=next(x for x in config.get(provider_kind(kind),[]) if isinstance(x,dict) and x.get("id")==data.get("id"))
                     if kind == "web":
-                        if not item.get("adapter"): self._send({"message":"配置已保存，但该网站还没有可调用 Adapter"});return
-                        ok=bool(item.get("state_file") and Path(item["state_file"]).exists());self._send({"message":"已找到登录状态" if ok else "未找到登录状态，请先网页登录"});return
+                        if not item.get("adapter"):
+                            self._send({"message":"网页登录配置已保存，但 AgentRelay 目前还不会自动操作这个网站的聊天页面。需要后续为该网站补充操作规则。"});return
+                        ok=bool(item.get("state_file") and Path(item["state_file"]).exists());self._send({"message":"已找到加密登录状态，DeepSeek 可以自动对话" if ok else "尚未保存登录状态，请点击“打开网页登录”"});return
                     ok,models,msg=_probe_models(item.get("endpoint",""),item.get("api_key","") if kind=="api" else "");self._send({"ok":ok,"models":models,"message":msg});return
                 if self.path == "/api/login":
                     p=data.get("provider") or {};provider_id=str(p.get("id","")).strip().lower();url=str(p.get("base_url") or "").strip()
                     if not _valid_provider_id(provider_id) or not _valid_url(url): raise ValueError("Provider 别名或网址无效")
-                    state_target=TARGET_SKILL/"config"/f"{provider_id}.storage-state.json";command=[str(VENV_PYTHON),str(TARGET_SKILL/"scripts"/"agent_relay_login.py"),"--provider",provider_id.removesuffix("-web"),"--url",url,"--state-file",str(state_target)]
-                    result=subprocess.run(command,check=False);entry={**p,"id":provider_id,"base_url":url,"url":url,"state_file":str(state_target.with_suffix(state_target.suffix+".enc")),"enabled":True};upsert_provider("web",entry);self._send({"config":public_config(),"message":"登录状态已保存" if result.returncode==0 else "登录未完成，已保留 Provider 配置"});return
+                    state_target=TARGET_SKILL/"config"/f"{provider_id}.storage-state.json";entry={**p,"id":provider_id,"base_url":url,"url":url,"state_file":str(state_target.with_suffix(state_target.suffix+".enc")),"enabled":True};upsert_provider("web",entry)
+                    command=[str(VENV_PYTHON),str(TARGET_SKILL/"scripts"/"agent_relay_login.py"),"--provider",provider_id.removesuffix("-web"),"--url",url,"--state-file",str(state_target),"--save-on-close"]
+                    subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    self._send({"config":public_config(),"message":"网页登录窗口已打开；登录完成后关闭对话标签页即可自动保存"});return
                 self._send({"error":"未找到"},404)
             except Exception as exc:self._send({"error":str(exc)},400)
 
