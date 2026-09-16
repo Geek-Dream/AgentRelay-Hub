@@ -457,8 +457,8 @@ class GenericWebAdapter(SiteAdapter):
         if not isinstance(titles, dict):
             titles = {}
         if conversation.get("supports_hybrid"):
-            key = "expert" if mode == "expert" else "flash"
-            return str(titles.get(key) or defaults[key])
+            # 混合模式 = 一套统一会话，同时处理极速和专家提问
+            return str(titles.get("hybrid") or defaults["hybrid"])
         return str(
             titles.get(mode)
             or titles.get("hybrid")
@@ -466,6 +466,8 @@ class GenericWebAdapter(SiteAdapter):
         )
 
     def session_scope(self, mode: str) -> str:
+        if self._conversation().get("supports_hybrid"):
+            return "hybrid"
         return "expert" if mode == "expert" else "flash"
 
     def configure_mode(self, page, mode: str) -> None:

@@ -1586,14 +1586,14 @@ class DeepSeekAdapter(SiteAdapter):
             conversation = (entry or {}).get("conversation") or {}
             titles = conversation.get("titles", {})
             if conversation.get("supports_hybrid"):
-                title_key = "expert" if mode == "expert" else "flash"
-                return str(titles.get(title_key) or defaults[title_key])
+                # 混合模式 = 一套统一会话，同时处理极速和专家提问
+                return str(titles.get("hybrid") or defaults["hybrid"])
             return str(titles.get(mode) or titles.get("hybrid") or defaults.get(mode, defaults["default"]))
         except Exception:
             return defaults.get(mode, defaults["default"])
 
     def session_scope(self, mode: str) -> str:
-        # 混合模式拥有极速和专家两个独立会话；旧版没有配置时维持统一会话兼容。
+        # 混合模式是一套统一会话，极速/专家提问都绑定到同一个 scope。
         try:
             try:
                 from .config_manager import load_config
@@ -1602,7 +1602,7 @@ class DeepSeekAdapter(SiteAdapter):
             entries = load_config(CODEX_HOME).get("web_providers", [])
             entry = next((item for item in entries if isinstance(item, dict) and item.get("id") == "deepseek-web"), None)
             if ((entry or {}).get("conversation") or {}).get("supports_hybrid"):
-                return "expert" if mode == "expert" else "flash"
+                return "hybrid"
         except Exception:
             pass
         return "expert" if mode == "expert" else "flash"
