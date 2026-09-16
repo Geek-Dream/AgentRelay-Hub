@@ -833,10 +833,36 @@ def run_web_configurator() -> None:
 
     def remove_provider(kind: str, provider_id: str) -> None:
         section = provider_kind(kind)
+        removed = [item for item in config.get(section, []) if isinstance(item, dict) and item.get("id") == provider_id]
         config[section] = [item for item in config.get(section, []) if not isinstance(item, dict) or item.get("id") != provider_id]
         if config.get("default_provider") == provider_id:
             config["default_provider"] = next((item.get("id") for item in config.get("web_providers", []) if isinstance(item, dict) and item.get("enabled", True)), "")
         save_config(config, CODEX_HOME)
+        # 手动删除条目时，它的登录状态文件和会话绑定也必须从磁盘消失
+        if kind == "web":
+            for item in removed:
+                state_file = str(item.get("state_file") or "")
+                if not state_file:
+                    continue
+                try:
+                    path = Path(state_file).expanduser()
+                    config_dir = (TARGET_SKILL / "config").resolve()
+                    if path.resolve().is_relative_to(config_dir) and path.exists():
+                        path.unlink()
+                except OSError:
+                    pass
+            try:
+                bindings_path = TARGET_SKILL / "agent_relay_session_bindings.json"
+                if bindings_path.is_file():
+                    data = json.loads(bindings_path.read_text(encoding="utf-8"))
+                    providers_data = data.get("providers")
+                    if isinstance(providers_data, dict):
+                        dropped = providers_data.pop(provider_id, None)
+                        dropped = providers_data.pop(provider_id.removesuffix("-web"), None) or dropped
+                        if dropped is not None:
+                            bindings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            except (OSError, json.JSONDecodeError):
+                pass
 
     def legacy_html_page() -> str:
         state = json.dumps(public_config(), ensure_ascii=False).replace("</", "<\\/")
