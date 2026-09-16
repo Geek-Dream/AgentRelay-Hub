@@ -964,11 +964,19 @@ async function scanLocal(){try{const d=await api('/api/scan-local');$('local-sca
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     url = f"http://{server.server_address[0]}:{server.server_address[1]}"
     print(f"正在打开本地配置页：{url}")
+    print("配置页运行中；在页面点击“完成并关闭”或按 Ctrl+C 结束。")
     webbrowser.open(url)
-    while not stopped.wait(0.2):
-        server.handle_request()
-    server.server_close()
-    print("网页配置已完成，本地服务已关闭。")
+    interrupted = False
+    try:
+        while not stopped.wait(0.2):
+            server.handle_request()
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\n已结束：本地服务已关闭，已保存的配置不受影响。")
+    finally:
+        server.server_close()
+    if not interrupted:
+        print("网页配置已完成，本地服务已关闭。")
 
 
 def write_daemon_service_config() -> Path | None:
@@ -1038,4 +1046,8 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\n已结束：已保存的配置不受影响。")
+        raise SystemExit(0)
