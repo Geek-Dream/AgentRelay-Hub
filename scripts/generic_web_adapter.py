@@ -56,6 +56,8 @@ class GenericWebAdapter(SiteAdapter):
     prefer_headful = True
     # 对话成功后把新 Cookie 回写到登录状态文件（验证通过的凭据可以复用）。
     refresh_state = True
+    # 支持人工代问模式：用户自己在浏览器输入问题，工具监听并提取回答。
+    supports_human_assisted = True
 
     # 输入框候选，按优先级
     INPUT_SELECTORS = (
@@ -961,6 +963,133 @@ class GenericWebAdapter(SiteAdapter):
 
         print(f"\n⚠️ 等待超过 {timeout} 秒，停止等待")
         return False
+
+    # ========================================================
+    # 人工代问模式：用户自己提问，后台监听并提取
+    # ========================================================
+
+    def _read_input_text(self, page) -> str:
+        try:
+            return str(page.evaluate(
+                """
+                () => {
+                    const el = document.querySelector('textarea') ||
+                               document.querySelector('[contenteditable="true"]');
+                    if (!el) return '';
+                    if (el.tagName === 'TEXTAREA') return el.value || '';
+                    return (el.innerText || '').trim();
+                }
+                """) or "").strip()
+        except Exception:
+            return ""
+
+    def _last_question_text(self, page) -> str:
+        try:
+            return str(page.evaluate(
+                """
+                () => {
+                    const els = [...document.querySelectorAll('[class*="question"]')]
+                        .filter(el => {
+                            const r = el.getBoundingClientRect();
+                            return r.width > 0 && r.height > 0 &&
+                                   !el.closest('aside, [class*="sidebar"], nav');
+                        });
+                    if (!els.length) return '';
+                    return (els[els.length - 1].innerText || '').trim().slice(0, 500);
+                }
+                """) or "").strip()
+        except Exception:
+            return ""
+
+    def _wait_content_stable(self, page, question, start, timeout) -> bool:
+        """生成结束后等内容稳定；期间若又开始生成则返回 False 让外层重新监听。"""
+        last_text = ""
+        stable = 0
+        while (time.time() - start) < timeout:
+            if self._status(page) == "generating":
+                return False
+            text = self._extract_answer_text(page, question)
+            normalized = self.normalize_text(text)
+            if normalized:
+                if text == last_text:
+                    stable += 1
+                    if stable >= 2:
+                        time.sleep(self.FINAL_RENDER_DELAY)
+                        return True
+                else:
+                    stable = 0
+                last_text = text
+            else:
+                stable = 0
+            time.sleep(2.0)
+        return False
+
+    def monitor_human_chat(self, page, timeout: int = 600) -> dict:
+        """人工代问：用户在浏览器里自行输入问题并发送，工具监听状态并取回答。
+
+        对人机验证友好：出现验证时提示用户手动完成并刷新页面，刷新后
+        继续监听（页面刷新不会中断监听循环）。
+        """
+        start = time.time()
+        last_input = ""
+        captured_question = ""
+        generating_since = None
+        wall_hinted = False
+        print(
+            "\n请在打开的浏览器窗口里自行输入问题并发送，我来监听回答。"
+            "\n出现人机验证时请手动完成并刷新页面，我会继续监听。"
+        )
+        while (time.time() - start) < timeout:
+            if self._has_wall(page):
+                page.wait_for_timeout(1500)
+                if self._has_wall(page):
+                    if not wall_hinted:
+                        print(
+                            "\n⚠️ 出现人机验证：请在浏览器里完成验证并刷新页面，"
+                            "然后重新提问，我会继续监听……"
+                        )
+                        wall_hinted = True
+                    page.wait_for_timeout(2000)
+                    continue
+            else:
+                wall_hinted = False
+
+            status = self._status(page)
+            current = self._read_input_text(page)
+            if current:
+                last_input = current
+
+            if status == "generating":
+                if generating_since is None:
+                    generating_since = time.time()
+                    captured_question = last_input
+                    hint = captured_question[:60]
+                    print(
+                        f"\n已检测到你发送问题"
+                        f"{f'：{hint}' if hint else ''}，等待回答完成…"
+                    )
+                time.sleep(0.3)
+                continue
+
+            if generating_since is not None:
+                question = captured_question or self._last_question_text(page)
+                print("回答已结束，等待内容稳定…")
+                if self._wait_content_stable(page, question, start, timeout):
+                    answer, full = self.extract_latest_answer(page, question)
+                    print("\n✅ 已提取回答")
+                    return {
+                        "question": question,
+                        "answer": answer,
+                        "full_content": full,
+                    }
+                # 稳定等待期间又开始生成（用户追问了），继续监听
+                generating_since = None
+                captured_question = ""
+            time.sleep(0.3)
+
+        raise RuntimeError(
+            f"监听超时（{timeout} 秒）：没有检测到完整的提问-回答过程"
+        )
 
     # ========================================================
     # 提取最新回复

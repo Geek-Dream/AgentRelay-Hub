@@ -2796,9 +2796,13 @@ def run_provider(
         image_paths=None,
         provider_name=None,
         timeout=300,
+        human_input=False,
 ):
     """
     执行当前 Provider 的自动对话。
+
+    human_input=True 时进入人工代问模式：用户自己在浏览器里输入问题，
+    工具只负责打开会话、监听状态并提取回答（适合强风控网站）。
     """
 
     try:
@@ -2919,6 +2923,46 @@ def run_provider(
                 else:
                     creating_new_session = True
                     adapter.prepare_new_session(page, mode)
+
+            # ------------------------------------------------
+            # 人工代问模式：不发送，交给用户输入，后台监听
+            # ------------------------------------------------
+
+            if human_input:
+                if not hasattr(adapter, "monitor_human_chat"):
+                    raise RuntimeError(
+                        f"Provider {adapter.name} 不支持人工代问模式"
+                    )
+                monitored = adapter.monitor_human_chat(
+                    page,
+                    timeout=max(timeout, 600),
+                )
+                if getattr(adapter, "refresh_state", False):
+                    try:
+                        try:
+                            from .agent_relay_login import (
+                                save_storage_state,
+                            )
+                        except ImportError:
+                            from agent_relay_login import (
+                                save_storage_state,
+                            )
+                        save_storage_state(context, state_file)
+                    except Exception as exc:
+                        log_error(
+                            f"回写登录状态失败 provider={adapter.name}: {exc}"
+                        )
+                target = binding_store.get(adapter.name, binding_scope)
+                return {
+                    "provider": adapter.name,
+                    "session_id": target.session_id if target else "",
+                    "session_name": (target.title or target.session_id) if target else "",
+                    "mode": mode,
+                    "question": monitored.get("question", ""),
+                    "answer": monitored.get("answer", ""),
+                    "full_content": monitored.get("full_content", ""),
+                    "images": [],
+                }
 
             # ------------------------------------------------
             # 发送问题
@@ -3146,6 +3190,15 @@ def main():
         )
     )
 
+    parser.add_argument(
+        "--monitor",
+        action="store_true",
+        help=(
+            "人工代问：打开浏览器后由用户自行输入问题，"
+            "工具只监听状态并提取回答（适合强风控网站）"
+        )
+    )
+
     args = parser.parse_args()
     try:
         # CLI 入口也必须先加载统一 Provider 配置，不能只依赖 run_provider()
@@ -3278,6 +3331,7 @@ def main():
             mode,
             image_paths=cli_images if cli_images else None,
             provider_name=provider_name,
+            human_input=args.monitor,
         )
 
         if not result:

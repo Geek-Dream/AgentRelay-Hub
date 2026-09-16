@@ -748,22 +748,54 @@ def run_chinese_menu() -> None:
             print("选项无效，请输入菜单中的数字。")
 
 
-def test_generic_web_provider(provider_id: str, question: str = "用一句话回答：1+1等于几？",
-                              timeout: int = 90) -> str:
-    """用通用兜底适配器真实试发一次，返回用户可读的验证结果。"""
+def web_provider_readiness(item: dict) -> str:
+    """Check saved web configuration without sending a synthetic chat."""
+    provider_id = str(item.get("id", "")).strip()
+    state_file = Path(str(item.get("state_file") or "")).expanduser()
+    if not state_file.is_file():
+        return "尚未保存登录状态，请点击“打开网页登录”"
+    if provider_id == "deepseek-web":
+        return "就绪检查通过：加密登录状态已保存，DeepSeek 专属适配器已接通"
+    return (
+        "就绪检查通过：配置和加密登录状态已保存。"
+        "本检查不会打开网页或发送测试题；真实任务会由通用网页适配器调用"
+    )
+
+
+def test_web_provider(item: dict, timeout: int = 600) -> str:
+    """网页 Provider 实测：DeepSeek 直接就绪检查；其他网站走人工代问。
+
+    人工代问：打开真实浏览器并跳转到已绑定会话，用户自己输入问题发送，
+    工具监听按钮状态并提取回答；出现人机验证时用户手动完成并刷新页面，
+    监听会继续。适合强风控网站（如千问）。
+    """
+    provider_id = str(item.get("id", "")).strip()
+    state_file = Path(str(item.get("state_file") or "")).expanduser()
+    if not state_file.is_file():
+        return "尚未保存登录状态，请点击“打开网页登录”"
+    if provider_id == "deepseek-web":
+        return "就绪检查通过：加密登录状态已保存，DeepSeek 专属适配器已接通"
     try:
         from scripts.agent_relay import run_provider
     except ImportError:
         from agent_relay import run_provider
     provider_name = provider_id.removesuffix("-web")
+    print(
+        f"\n人工代问测试（{provider_id}）：请在弹出的浏览器窗口里自行输入问题并发送；"
+        f"出现人机验证时手动完成并刷新页面，监听会继续。"
+    )
     try:
-        result = run_provider(question, "flash", provider_name=provider_name, timeout=timeout)
+        result = run_provider(
+            "", "flash", provider_name=provider_name,
+            timeout=timeout, human_input=True,
+        )
     except Exception as exc:
-        return f"通用适配器尝试失败：{exc}"
+        return f"人工代问失败：{exc}"
     answer = str((result or {}).get("answer", "")).strip()
+    question = str((result or {}).get("question", "")).strip()
     if answer and answer not in {"未获取到有效AI回复", "提取失败"}:
-        return f"通用适配器对话成功，收到回复：{answer[:120]}"
-    return "网页已打开但没有取到有效回复；该网站可能不适合通用适配器，或登录状态已失效"
+        return f"对话完成（你问：{question[:40] or '未捕获到问题文本'}），收到回复：{answer[:120]}"
+    return "已监听完一轮问答，但没有取到有效回复"
 
 
 def run_web_configurator() -> None:
@@ -971,12 +1003,7 @@ async function scanLocal(){try{const d=await api('/api/scan-local');$('local-sca
                     kind=str(data.get("kind"));item=data
                     if data.get("id"): item=next(x for x in config.get(provider_kind(kind),[]) if isinstance(x,dict) and x.get("id")==data.get("id"))
                     if kind == "web":
-                        state_ok=bool(item.get("state_file") and Path(item["state_file"]).exists())
-                        if not state_ok:
-                            self._send({"message":"尚未保存登录状态，请点击“打开网页登录”"});return
-                        if str(item.get("id",""))=="deepseek-web":
-                            self._send({"message":"已找到加密登录状态，DeepSeek 专属适配器可以自动对话"});return
-                        self._send({"message":test_generic_web_provider(str(item.get("id","")))});return
+                        self._send({"message":test_web_provider(item)});return
                     ok,models,msg=_probe_models(item.get("endpoint",""),item.get("api_key","") if kind=="api" else "");self._send({"ok":ok,"models":models,"message":msg});return
                 if self.path == "/api/login":
                     p=data.get("provider") or {};provider_id=str(p.get("id","")).strip().lower();url=str(p.get("base_url") or "").strip()
