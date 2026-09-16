@@ -93,7 +93,7 @@ class GenericWebAdapter(SiteAdapter):
         "markdown", "assistant", "ai-message", "ai_message", "aimsg",
         "bot-message", "bot_message", "model-message", "answer-content",
         "response-text", "msg-content", "reply-content", "message-content",
-        "answer-text", "chat-answer",
+        "answer-text", "chat-answer", "answer-card", "answer-text-card",
     )
 
     # 默认最长等待 5 分钟
@@ -798,10 +798,19 @@ class GenericWebAdapter(SiteAdapter):
     _GENERATING_JS = """
     (hints) => {
         const lower = hints.map(w => w.toLowerCase());
+        const vis = (el) => {
+            const r = el.getBoundingClientRect();
+            if (!r.width || !r.height) return false;
+            const s = getComputedStyle(el);
+            if (s.visibility === 'hidden' || s.display === 'none') return false;
+            return r.bottom > 0 && r.right > 0 &&
+                   r.top < window.innerHeight && r.left < window.innerWidth;
+        };
         const nodes = document.querySelectorAll(
             'button, [role="button"], [aria-label]'
         );
         for (const el of nodes) {
+            if (!vis(el)) continue;
             const label = (
                 (el.getAttribute('aria-label') || '') + ' ' +
                 (el.getAttribute('title') || '') + ' ' +
@@ -814,7 +823,7 @@ class GenericWebAdapter(SiteAdapter):
         const busy = document.querySelector(
             '[class*="generating"], [class*="loading"], [class*="typing"]'
         );
-        return !!busy;
+        return !!(busy && vis(busy));
     }
     """
 
@@ -888,6 +897,82 @@ class GenericWebAdapter(SiteAdapter):
     # 提取最新回复
     # ========================================================
 
+    # 结构兜底：不依赖任何 class，以问题文本为锚点找它之后的正文块
+    _STRUCTURAL_EXTRACT_JS = """
+    (questionNorm) => {
+        const bad = 'aside, nav, [role="navigation"], [class*="sidebar"], ' +
+            '[class*="sider"], header, footer, [class*="footer"]';
+        const skipSelf = 'textarea, [contenteditable="true"], button, input, select';
+        const noise = /内容由|AI生成|disclaimer|滑动查看|点击展开/i;
+        const modelPill = /^(Qwen|千问|GPT|Claude|Kimi|DeepSeek|文心|豆包|通义|混元|Gemini|元宝)/i;
+        const vis = (el) => {
+            const r = el.getBoundingClientRect();
+            if (!r.width || !r.height) return false;
+            const s = getComputedStyle(el);
+            return s.visibility !== 'hidden' && s.display !== 'none';
+        };
+        // 1) 锚定问题元素：取文本与问题一致的最深（最后出现）的元素
+        let qEl = null;
+        document.querySelectorAll('div, section, p, span, li').forEach(el => {
+            if (el.closest(bad) || el.querySelector(skipSelf)) return;
+            const t = (el.innerText || '').trim();
+            if (!t) return;
+            const norm = t.replace(/\\s+/g, ' ').trim();
+            if (norm === questionNorm ||
+                (questionNorm.length >= 8 &&
+                 norm.startsWith(questionNorm.slice(0, 30)) &&
+                 norm.length <= questionNorm.length + 8)) {
+                qEl = el;
+            }
+        });
+        if (!qEl) return '';
+        const inputEl = document.querySelector('[contenteditable="true"], textarea');
+        // 2) 从问题元素之后收集"叶子文本块"（可见、非侧栏、非控件）；
+        //    走到输入框即停——输入框之后都是页面 chrome
+        const blocks = [];
+        const seen = new Set();
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        let started = false;
+        let node;
+        while ((node = walker.nextNode())) {
+            if (!started) {
+                if (qEl.contains(node)) started = true;
+                continue;
+            }
+            if (inputEl && inputEl.contains(node)) break;
+            const el = node.parentElement;
+            if (!el || el.closest(bad) || el.closest(skipSelf)) continue;
+            if (el.querySelector && el.querySelector(skipSelf)) continue;
+            let leaf = el;
+            while (leaf.firstElementChild && (leaf.firstElementChild.innerText || '').trim()) {
+                leaf = leaf.firstElementChild;
+            }
+            if (seen.has(leaf)) continue;
+            seen.add(leaf);
+            if (!vis(leaf)) continue;
+            const text = (leaf.innerText || '').trim();
+            if (text.length < 1 || noise.test(text)) continue;
+            if (text.length <= 20 && modelPill.test(text)) continue;
+            blocks.push(text);
+            if (blocks.length > 300) break;
+        }
+        if (!blocks.length) return '';
+        // 3) 回答 = 最后一个内容块（聊天布局里回答位于问题之后、页脚之前）
+        return blocks[blocks.length - 1];
+    }
+    """
+
+    def _extract_structural(self, page, question) -> str:
+        question_normalized = self.normalize_text(question or "")
+        if not question_normalized:
+            return ""
+        try:
+            return str(page.evaluate(
+                self._STRUCTURAL_EXTRACT_JS, question_normalized) or ""
+            ).strip()
+        except Exception:
+            return ""
+
     def _extract_answer_text(self, page, question=None) -> str:
         hints = json.dumps(self.REPLY_CLASS_HINTS, ensure_ascii=False)
         try:
@@ -911,7 +996,7 @@ class GenericWebAdapter(SiteAdapter):
                 }
                 """, json.loads(hints))
         except Exception:
-            return ""
+            candidates = []
         question_normalized = self.normalize_text(question or "")
         best = ""
         for text in candidates or []:
@@ -923,7 +1008,10 @@ class GenericWebAdapter(SiteAdapter):
                 continue
             if len(normalized) >= len(self.normalize_text(best)):
                 best = str(text)
-        return best.strip()
+        if best:
+            return best.strip()
+        # class 特征全部未命中：退化为以问题为锚点的结构提取
+        return self._extract_structural(page, question)
 
     def extract_latest_answer(self, page, question):
         try:
