@@ -14,16 +14,17 @@ class DeepSeekRoutingTests(unittest.TestCase):
     def setUp(self):
         self.adapter = DeepSeekAdapter()
 
-    def test_hybrid_mode_uses_flash_and_expert_conversations(self):
-        self.assertEqual(self.adapter.session_scope("default"), "flash")
-        self.assertEqual(self.adapter.session_scope("expert"), "expert")
+    def test_hybrid_mode_uses_single_unified_conversation(self):
+        # 混合模式 = 一套统一会话，同时处理极速和专家提问
+        self.assertEqual(self.adapter.session_scope("default"), "hybrid")
+        self.assertEqual(self.adapter.session_scope("expert"), "hybrid")
         self.assertEqual(
             self.adapter.canonical_session_title("default"),
-            "AgentRelay-DeepSeek-Flash",
+            "AgentRelay-DeepSeek",
         )
         self.assertEqual(
             self.adapter.canonical_session_title("expert"),
-            "AgentRelay-DeepSeek-Expert",
+            "AgentRelay-DeepSeek",
         )
 
     def test_session_is_parsed_from_route_not_date_text(self):
@@ -45,19 +46,19 @@ class DeepSeekRoutingTests(unittest.TestCase):
             )
         )
 
-    def test_hybrid_discovery_routes_legacy_mode_titles_separately(self):
+    def test_hybrid_discovery_uses_unified_session(self):
         sessions = [
             SessionRef(
                 provider="deepseek",
-                session_id="image",
-                title="极速图片对话",
-                href="https://chat.deepseek.com/a/chat/s/image",
+                session_id="unified",
+                title="AgentRelay-DeepSeek",
+                href="https://chat.deepseek.com/a/chat/s/unified",
             ),
             SessionRef(
                 provider="deepseek",
-                session_id="expert",
-                title="专家思考模式对话",
-                href="https://chat.deepseek.com/a/chat/s/expert",
+                session_id="legacy",
+                title="AgentRelay-DeepSeek-Flash",
+                href="https://chat.deepseek.com/a/chat/s/legacy",
             ),
         ]
         default_target = self.adapter.find_target_session(
@@ -68,8 +69,8 @@ class DeepSeekRoutingTests(unittest.TestCase):
             sessions,
             mode="expert",
         )
-        self.assertEqual(default_target.session_id, "image")
-        self.assertEqual(expert_target.session_id, "expert")
+        self.assertEqual(default_target.session_id, "unified")
+        self.assertEqual(expert_target.session_id, "unified")
 
 
 if __name__ == "__main__":
