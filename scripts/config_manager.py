@@ -36,6 +36,16 @@ def key_path(home: Path | None = None) -> Path:
     return config_directory(home) / ".agentrelay-config.key"
 
 
+def legacy_deepseek_state_path(home: Path | None = None) -> Path:
+    """旧版本直接放在 Skill 根目录的 DeepSeek 浏览器状态。"""
+    return (home or codex_home()) / "skills" / "agent-relay" / "agent_relay_login_state.json"
+
+
+def unified_deepseek_state_path(home: Path | None = None) -> Path:
+    """统一 Provider 配置目录中的加密 DeepSeek 浏览器状态。"""
+    return config_directory(home) / "deepseek-web.storage-state.json.enc"
+
+
 def _secure_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -192,6 +202,68 @@ def save_config(value: Mapping[str, Any], home: Path | None = None) -> Path:
     return path
 
 
+def migrate_legacy_deepseek_config(home: Path | None = None) -> tuple[dict[str, Any], bool]:
+    """将旧版 DeepSeek 登录状态迁移进统一 Provider 配置。
+
+    旧版只保存根目录下的浏览器状态，因此网页配置中心无法识别它。迁移成功后
+    旧明文状态会删除；任何解密、加密或写入失败都会保留原文件。
+    """
+    root = home or codex_home()
+    config = load_config(root)
+    legacy_raw = legacy_deepseek_state_path(root)
+    legacy_encrypted = legacy_raw.with_suffix(legacy_raw.suffix + ".enc")
+    target = unified_deepseek_state_path(root)
+    changed = False
+
+    if not target.exists() and legacy_raw.is_file():
+        _secure_write(target, encrypt_secret_bytes(legacy_raw.read_bytes(), root))
+        # Only remove the plaintext after the encrypted replacement is durable.
+        legacy_raw.unlink()
+        changed = True
+    elif not target.exists() and legacy_encrypted.is_file():
+        # Re-encrypt instead of copying opaque ciphertext so the new location is
+        # always tied to the current unified configuration key.
+        decrypted = decrypt_secret_bytes(legacy_encrypted.read_bytes(), root)
+        _secure_write(target, encrypt_secret_bytes(decrypted, root))
+        legacy_encrypted.unlink()
+        changed = True
+
+    providers = config.setdefault("web_providers", [])
+    has_deepseek = any(
+        isinstance(item, dict) and item.get("id") == "deepseek-web"
+        for item in providers
+    )
+    if target.is_file() and not has_deepseek:
+        providers.append({
+            "id": "deepseek-web",
+            "name": "DeepSeek",
+            "url": "https://chat.deepseek.com/",
+            "base_url": "https://chat.deepseek.com/",
+            "enabled": True,
+            "adapter": "deepseek",
+            "state_file": str(target),
+            "conversation": {
+                "supports_flash": True,
+                "supports_expert": True,
+                "supports_hybrid": True,
+                "supports_images": True,
+                "create_if_missing": True,
+                "titles": {
+                    "flash": "AgentRelay-DeepSeek-Flash",
+                    "expert": "AgentRelay-DeepSeek-Expert",
+                    "hybrid": "AgentRelay-DeepSeek",
+                },
+            },
+        })
+        config["default_provider"] = "deepseek-web"
+        changed = True
+
+    if changed:
+        save_config(config, root)
+        config = load_config(root)
+    return config, changed
+
+
 def encrypt_secret_bytes(value: bytes, home: Path | None = None) -> bytes:
     return _fernet(home, create=True).encrypt(value)
 
@@ -230,7 +302,7 @@ def _selected(items: object, preferred: str = "") -> dict[str, Any] | None:
 
 def apply_config_to_environment(home: Path | None = None) -> dict[str, Any]:
     """把加密配置映射到当前进程，显式环境变量优先。"""
-    config = load_config(home)
+    config, _ = migrate_legacy_deepseek_config(home)
     commander = config.get("commander", {})
     if commander.get("enabled"):
         os.environ.setdefault("AGENTRELAY_COMMANDER_ENABLED", "1")

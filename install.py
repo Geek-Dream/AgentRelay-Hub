@@ -448,10 +448,13 @@ def _scan_local_services() -> list[dict]:
 
 def _load_local_config():
     try:
-        from scripts.config_manager import load_config, save_config
+        from scripts.config_manager import migrate_legacy_deepseek_config, save_config
     except ImportError as exc:
         raise InstallError(f"无法加载本地配置模块：{exc}") from exc
-    return load_config(CODEX_HOME), save_config
+    config, migrated = migrate_legacy_deepseek_config(CODEX_HOME)
+    if migrated:
+        print("[迁移] 已将旧版 DeepSeek 登录状态纳入统一加密 Provider 配置。")
+    return config, save_config
 
 
 def _configure_web(config: dict) -> None:
