@@ -873,7 +873,9 @@ class Orchestrator:
 
         # Commander 只配置终端可执行文件路径；子 Agent 的启动参数由这里统一编排。
         configured_terminal = os.environ.get("AGENTRELAY_COMMANDER_TERMINAL_PATH", "").strip()
-        command_prefix = [configured_terminal or codex, "exec"]
+        # API/CLI 显式传入的路径优先；网页配置只覆盖默认的 `codex`。
+        terminal = codex if codex != "codex" else (configured_terminal or codex)
+        command_prefix = [terminal, "exec"]
 
         def command_factory(agent):
             goal = agent.model_config.get("goal", "完成分配任务")

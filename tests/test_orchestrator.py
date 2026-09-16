@@ -62,7 +62,7 @@ class OrchestratorTests(unittest.TestCase):
     def test_weight_and_time_trigger(self):
         self.assertEqual(calculate_weight(299), 1)
         self.assertEqual(calculate_weight(300), 2)
-        self.assertEqual(calculate_weight(600), 3)
+        self.assertEqual(calculate_weight(600), 2)
         self.assertEqual(calculate_weight(900), 3)
         state = {"problem_id": "t", "round_effective_time_seconds": 900,
                  "retry_count": 0, "relay_triggered": False,

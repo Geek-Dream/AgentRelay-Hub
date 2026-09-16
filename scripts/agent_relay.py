@@ -3057,6 +3057,13 @@ def main():
 
     args = parser.parse_args()
     try:
+        # CLI 入口也必须先加载统一 Provider 配置，不能只依赖 run_provider()
+        # 内部调用时才会执行的环境映射。
+        try:
+            from .config_manager import apply_config_to_environment
+        except ImportError:
+            from config_manager import apply_config_to_environment
+        apply_config_to_environment()
         provider_name = normalize_provider_name(args.provider or os.environ.get("AGENT_RELAY_PROVIDER", DEFAULT_PROVIDER))
         if provider_name.endswith("-web") and provider_name[:-4] in ProviderRegistry().names:
             provider_name = provider_name[:-4]

@@ -143,6 +143,8 @@ python3 install.py
 网页配置中心是手动 Provider 管理平台：已保存 Provider 会明确显示“可调用 Adapter”或“等待 Adapter”，
 不会因为填了网址就假装千问、Kimi 等网站已经接通。DeepSeek 当前是内置 Adapter，默认作为混合模型，支持极速、
 专家和图片；其他网页 Provider 仍需后续实现对应浏览器 Adapter。三类 Provider 都可以跳过，跳过后仍可使用离线基础模式。
+旧版只保存 DeepSeek 登录状态的安装会在首次打开配置中心或运行 Skill 时自动迁移到统一加密 Provider 配置；
+迁移成功后会删除旧明文状态文件，不需要重新登录。
 
 安装器支持 `CODEX_HOME`；未设置时使用 `$HOME/.codex`。它会：
 
