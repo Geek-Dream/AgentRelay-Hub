@@ -99,6 +99,19 @@ def default_config() -> dict[str, Any]:
     }
 
 
+def provider_title_stem(provider_id: str) -> str:
+    """Return the human-readable CamelCase part of an automatic session title."""
+    aliases = {"deepseek": "DeepSeek", "qianwen": "Qianwen", "kimi": "Kimi"}
+    raw = provider_id.strip().lower().removesuffix("-web")
+    parts = [part for part in raw.replace("_", "-").split("-") if part]
+    return "".join(aliases.get(part, part[:1].upper() + part[1:]) for part in parts) or "Model"
+
+
+def default_conversation_titles(provider_id: str) -> dict[str, str]:
+    root = f"AgentRelay-{provider_title_stem(provider_id)}"
+    return {"flash": f"{root}-Flash", "expert": f"{root}-Expert", "hybrid": root}
+
+
 def _normalize_web_provider(item: object) -> dict[str, Any] | None:
     """补齐网页 Provider 的统一 schema，并兼容旧版 url 字段。"""
     if not isinstance(item, dict):
@@ -111,13 +124,15 @@ def _normalize_web_provider(item: object) -> dict[str, Any] | None:
     conversation = item.get("conversation")
     if not isinstance(conversation, dict):
         conversation = {}
-    default_titles = {
-        "flash": "AgentRelay-DeepSeek-Flash",
-        "expert": "AgentRelay-DeepSeek-Expert",
-        "hybrid": "AgentRelay-DeepSeek",
-    }
+    default_titles = default_conversation_titles(provider_id)
     titles = conversation.get("titles")
     if not isinstance(titles, dict):
+        titles = {}
+    old_deepseek_titles = default_conversation_titles("deepseek-web")
+    if provider_id != "deepseek-web" and all(
+        str(titles.get(key) or "") == value
+        for key, value in old_deepseek_titles.items()
+    ):
         titles = {}
     normalized = {
         **item,
