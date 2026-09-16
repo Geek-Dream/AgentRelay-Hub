@@ -813,7 +813,15 @@ class GenericWebAdapter(SiteAdapter):
             return r.bottom > 0 && r.right > 0 &&
                    r.top < window.innerHeight && r.left < window.innerWidth;
         };
-        // 1) 明确的组件签名：千问生成中是 10px 黑方块（■），空闲是 sendChat 图标
+        // 1) 千问按钮槽：同一个按钮在“发送消息 / 停止回答”之间切换
+        //    （快回复可能抓不到“停止回答”，回到“发送消息”即视为完成）
+        const slot = document.querySelector('[data-session-switch-target="send-query"]');
+        if (slot && vis(slot)) {
+            const label = (slot.getAttribute('aria-label') || '').trim();
+            if (/停止/.test(label)) return 'generating';
+            if (/发送/.test(label)) return 'send';
+        }
+        // 2) 组件签名：生成中是 10px 黑方块（■），空闲是 sendChat 图标
         const square = [...document.querySelectorAll('span[class*="bg-black-button"]')]
             .find(el => {
                 const r = el.getBoundingClientRect();
@@ -826,7 +834,7 @@ class GenericWebAdapter(SiteAdapter):
             const holder = use.closest('button, [role="button"]') || use.closest('svg') || use;
             if (vis(holder)) return 'send';
         }
-        // 2) 文本提示兜底
+        // 3) 文本提示兜底
         const nodes = document.querySelectorAll(
             'button, [role="button"], [aria-label]'
         );
@@ -841,7 +849,7 @@ class GenericWebAdapter(SiteAdapter):
             if (!label.trim()) continue;
             if (lower.some(w => label.includes(w))) return 'generating';
         }
-        // 3) loading 类兜底
+        // 4) loading 类兜底
         const busy = document.querySelector(
             '[class*="generating"], [class*="loading"], [class*="typing"]'
         );
