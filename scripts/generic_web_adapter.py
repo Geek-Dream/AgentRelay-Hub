@@ -11,7 +11,7 @@
     发送      Enter；数秒内没有生成迹象则补点发送按钮
     会话      路径型 /chat/xxx 链接 + SPA 的 [data-session-id] 条目
     等回复    生成控件消失 + 回复内容连续稳定（兼容秒回，不依赖按钮状态机）
-    取回复    最长的助手消息块（markdown/assistant/bot 等特征）
+    取回复    先按本次问题定位消息轮次，再读取该轮的助手回答
     风控      识别 baxia/滑块/验证码等拦截；有头模式暂停等人工验证，
               无头模式明确报错；成功后回写登录状态延长验证有效期
 
@@ -222,7 +222,13 @@ class GenericWebAdapter(SiteAdapter):
             return False
 
     def _ensure_no_wall(self, page, start_time: float) -> None:
-        """检测到风控墙时：有头模式等人工验证，无头模式明确报错。"""
+        """检测到风控墙时：有头模式等人工验证，无头模式明确报错。
+
+        带防抖：墙必须持续存在约 1.5 秒才认定，避免加载瞬态误报。
+        """
+        if not self._has_wall(page):
+            return
+        page.wait_for_timeout(1500)
         if not self._has_wall(page):
             return
         if self._headed:
@@ -795,7 +801,8 @@ class GenericWebAdapter(SiteAdapter):
     # 等待 AI 回复
     # ========================================================
 
-    _GENERATING_JS = """
+    # 组件签名 + 文本兜底的状态机：generating / send / unknown
+    _STATUS_JS = """
     (hints) => {
         const lower = hints.map(w => w.toLowerCase());
         const vis = (el) => {
@@ -806,6 +813,20 @@ class GenericWebAdapter(SiteAdapter):
             return r.bottom > 0 && r.right > 0 &&
                    r.top < window.innerHeight && r.left < window.innerWidth;
         };
+        // 1) 明确的组件签名：千问生成中是 10px 黑方块（■），空闲是 sendChat 图标
+        const square = [...document.querySelectorAll('span[class*="bg-black-button"]')]
+            .find(el => {
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.width <= 16 && r.height > 0 && r.height <= 16;
+            });
+        if (square) return 'generating';
+        for (const use of document.querySelectorAll('use')) {
+            const ref = use.getAttribute('xlink:href') || use.getAttribute('href') || '';
+            if (!/sendChat/i.test(ref)) continue;
+            const holder = use.closest('button, [role="button"]') || use.closest('svg') || use;
+            if (vis(holder)) return 'send';
+        }
+        // 2) 文本提示兜底
         const nodes = document.querySelectorAll(
             'button, [role="button"], [aria-label]'
         );
@@ -818,59 +839,108 @@ class GenericWebAdapter(SiteAdapter):
                 (el.innerText || '')
             ).toLowerCase();
             if (!label.trim()) continue;
-            if (lower.some(w => label.includes(w))) return true;
+            if (lower.some(w => label.includes(w))) return 'generating';
         }
+        // 3) loading 类兜底
         const busy = document.querySelector(
             '[class*="generating"], [class*="loading"], [class*="typing"]'
         );
-        return !!(busy && vis(busy));
+        return (busy && vis(busy)) ? 'generating' : 'unknown';
     }
     """
 
-    def _is_generating(self, page) -> bool:
+    def _status(self, page) -> str:
         hints = json.dumps(self.STOP_HINTS, ensure_ascii=False)
         try:
+            return str(page.evaluate(self._STATUS_JS, json.loads(hints)))
+        except Exception:
+            return "unknown"
+
+    def _is_generating(self, page) -> bool:
+        return self._status(page) == "generating"
+
+    def _click_send_icon(self, page) -> bool:
+        """点击组件签名的发送图标（如千问 qwpcicon-sendChat）。"""
+        try:
             return bool(page.evaluate(
-                self._GENERATING_JS, json.loads(hints)))
+                """
+                () => {
+                    for (const use of document.querySelectorAll('use')) {
+                        const ref = use.getAttribute('xlink:href') ||
+                                    use.getAttribute('href') || '';
+                        if (!/sendChat/i.test(ref)) continue;
+                        const btn = use.closest('button, [role="button"]') ||
+                                    use.closest('svg');
+                        if (!btn) continue;
+                        const r = btn.getBoundingClientRect();
+                        if (!r.width || !r.height) continue;
+                        btn.click();
+                        return true;
+                    }
+                    return false;
+                }
+                """))
         except Exception:
             return False
 
     def wait_for_response(self, page, question=None, timeout=None) -> bool:
-        """统一等待：生成控件消失 + 回复内容稳定，兼容秒回网站。
+        """状态机 + 内容稳定双重判定，极速模式友好。
 
-        不依赖"必须看到生成按钮"这一前提（很多网站秒回，或按钮无无障碍名称），
-        而是以"发送前快照 → 新内容出现 → 连续稳定"作为完成判定。
+        采样节奏：前 3 秒每 0.1 秒高频采样（极速回复秒回也能抓住），
+        之后每 3 秒慢采样等内容稳定；生成中（■）消失后再做最终确认。
         """
         if timeout is None:
             timeout = self.DEFAULT_TIMEOUT
         start = time.time()
         pre_text = self.normalize_text(getattr(self, "_pre_send_text", ""))
 
-        time.sleep(2.5)
-        self._ensure_no_wall(page, start)
+        # 阶段 0：3 秒高频采样，抓住极速回复与生成方块
+        saw_generating = False
+        retried_send = False
+        fast_deadline = start + 3.0
+        while time.time() < fast_deadline and (time.time() - start) < timeout:
+            self._ensure_no_wall(page, start)
+            if self._status(page) == "generating":
+                saw_generating = True
+                break
+            text = self._extract_answer_text(page, question)
+            if self.normalize_text(text) and self.normalize_text(text) != pre_text:
+                break
+            if not retried_send and (time.time() - start) > 1.5:
+                # Enter 可能没触发发送，补点一次发送图标
+                if self._click_send_icon(page):
+                    retried_send = True
+                    print("已补点发送图标，继续等待。")
+            time.sleep(0.1)
 
-        saw_generating = self._is_generating(page)
-        print("等待 AI 回复完成..." if saw_generating
-              else "未检测到生成控件，进入内容稳定检测。")
+        # 阶段 1：生成中 → 等待 ■ 消失（连续两次确认）
+        if saw_generating:
+            print("检测到生成中（■），等待完成…")
+            while (time.time() - start) < timeout:
+                self._ensure_no_wall(page, start)
+                if self._status(page) != "generating":
+                    time.sleep(0.3)
+                    if self._status(page) != "generating":
+                        break
+                time.sleep(0.3)
 
+        # 阶段 2：内容稳定检测（3 秒间隔，连续 2 轮一致）
+        print("等待内容稳定…")
         last_text = ""
         stable = 0
-        retried_send = False
         while (time.time() - start) < timeout:
             self._ensure_no_wall(page, start)
-
-            if self._is_generating(page):
+            if self._status(page) == "generating":
                 saw_generating = True
                 stable = 0
                 time.sleep(0.5)
                 continue
-
             text = self._extract_answer_text(page, question)
             normalized = self.normalize_text(text)
             if normalized and normalized != pre_text:
                 if text == last_text:
                     stable += 1
-                    if stable >= self.STABLE_ROUNDS:
+                    if stable >= 2:
                         time.sleep(self.FINAL_RENDER_DELAY)
                         print("\n✅ AI 回复已完成")
                         return True
@@ -879,16 +949,7 @@ class GenericWebAdapter(SiteAdapter):
                 last_text = text
             else:
                 stable = 0
-
-            if (not saw_generating and not retried_send
-                    and (time.time() - start) > self.GENERATION_START_GRACE):
-                box = self._find_input(page)
-                if box is not None and self._click_send_button(page, box):
-                    retried_send = True
-                    print("已补点发送按钮，继续等待。")
-                    time.sleep(1.5)
-                    continue
-            time.sleep(self.STABLE_INTERVAL)
+            time.sleep(3.0)
 
         print(f"\n⚠️ 等待超过 {timeout} 秒，停止等待")
         return False
@@ -973,7 +1034,72 @@ class GenericWebAdapter(SiteAdapter):
         except Exception:
             return ""
 
+    _QUESTION_ROUND_EXTRACT_JS = r"""
+    (questionNorm) => {
+        if (!questionNorm) return '';
+        const norm = value => (value || '').replace(/\s+/g, ' ').trim();
+        const visible = el => {
+            const rect = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            return !!rect.width && !!rect.height &&
+                style.visibility !== 'hidden' && style.display !== 'none';
+        };
+        const questionSelectors = [
+            '[class*="wrapper-question"]', '[class*="chat-question"]',
+            '[class*="user-message"]', '[class*="user_message"]',
+            '[data-role="user"]', '[data-message-author-role="user"]'
+        ].join(',');
+        const answerSelectors = [
+            '[class*="wrapper-answer"]', '[class*="chat-answer"]',
+            '[class*="answer-content"]', '[class*="assistant"]',
+            '[class*="bot-message"]', '[class*="model-message"]',
+            '[data-role="assistant"]', '[data-message-author-role="assistant"]'
+        ].join(',');
+        const questions = Array.from(document.querySelectorAll(questionSelectors));
+        let questionEl = null;
+        for (const el of questions) {
+            const text = norm(el.innerText);
+            if (text === questionNorm ||
+                (questionNorm.length >= 8 && text.includes(questionNorm))) {
+                questionEl = el;
+            }
+        }
+        if (!questionEl) return '';
+
+        // Walk upward only until the smallest container holding both the
+        // question and its answer is found. This avoids choosing a longer
+        // answer from an older conversation round.
+        let round = questionEl;
+        for (let depth = 0; round && round !== document.body && depth < 10;
+             depth++, round = round.parentElement) {
+            const answers = Array.from(round.querySelectorAll(answerSelectors))
+                .filter(el => visible(el) && !el.contains(questionEl));
+            if (!answers.length) continue;
+            for (let i = answers.length - 1; i >= 0; i--) {
+                const text = (answers[i].innerText || '').trim();
+                if (norm(text) && norm(text) !== questionNorm) return text;
+            }
+        }
+        return '';
+    }
+    """
+
+    def _extract_question_round(self, page, question) -> str:
+        """Return the answer paired with this question, including fast replies."""
+        question_normalized = self.normalize_text(question or "")
+        if not question_normalized:
+            return ""
+        try:
+            return str(page.evaluate(
+                self._QUESTION_ROUND_EXTRACT_JS, question_normalized
+            ) or "").strip()
+        except Exception:
+            return ""
+
     def _extract_answer_text(self, page, question=None) -> str:
+        paired = self._extract_question_round(page, question)
+        if paired:
+            return paired
         hints = json.dumps(self.REPLY_CLASS_HINTS, ensure_ascii=False)
         try:
             candidates = page.evaluate(
