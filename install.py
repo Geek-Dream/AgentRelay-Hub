@@ -70,6 +70,7 @@ SCRIPT_FILES = (
     "task_scheduler.py",
     "config_manager.py",
     "config_web.py",
+    "generic_web_adapter.py",
 )
 CONFIG_FILES = ("model_registry.json",)
 REFERENCE_FILES = ("orchestrator-v1.md",)
@@ -746,14 +747,39 @@ def run_chinese_menu() -> None:
             print("选项无效，请输入菜单中的数字。")
 
 
+def test_generic_web_provider(provider_id: str, question: str = "用一句话回答：1+1等于几？",
+                              timeout: int = 90) -> str:
+    """用通用兜底适配器真实试发一次，返回用户可读的验证结果。"""
+    try:
+        from scripts.agent_relay import run_provider
+    except ImportError:
+        from agent_relay import run_provider
+    provider_name = provider_id.removesuffix("-web")
+    try:
+        result = run_provider(question, "flash", provider_name=provider_name, timeout=timeout)
+    except Exception as exc:
+        return f"通用适配器尝试失败：{exc}"
+    answer = str((result or {}).get("answer", "")).strip()
+    if answer and answer not in {"未获取到有效AI回复", "提取失败"}:
+        return f"通用适配器对话成功，收到回复：{answer[:120]}"
+    return "网页已打开但没有取到有效回复；该网站可能不适合通用适配器，或登录状态已失效"
+
+
 def run_web_configurator() -> None:
     """启动一次性本地配置中心；所有状态只在本机短暂监听。"""
     config, save_config = _load_local_config()
     stopped = threading.Event()
 
+    def adapter_flag(provider_id: str) -> str:
+        # deepseek-web 有专属适配器；其余已保存登录的网站走通用兜底。
+        return "deepseek" if provider_id == "deepseek-web" else "generic"
+
     def public_config() -> dict:
         result = json.loads(json.dumps(config, ensure_ascii=False))
         result["config_path"] = str(TARGET_SKILL / "config" / "agentrelay-config.json.enc")
+        for item in result.get("web_providers", []):
+            if isinstance(item, dict) and item.get("id"):
+                item["adapter"] = adapter_flag(str(item["id"]))
         for item in result.get("api_providers", []):
             if isinstance(item, dict):
                 item["api_key_configured"] = bool(item.get("api_key"))
@@ -777,7 +803,7 @@ def run_web_configurator() -> None:
             conversation = value.get("conversation") if isinstance(value.get("conversation"), dict) else {}
             value = {"id": provider_id, "name": str(value.get("name") or provider_id),
                      "url": url, "base_url": url, "enabled": bool(value.get("enabled", True)),
-                     "adapter": "deepseek" if provider_id == "deepseek-web" else str(value.get("adapter", "")),
+                     "adapter": "deepseek" if provider_id == "deepseek-web" else "generic",
                      "state_file": str(value.get("state_file", "")), "conversation": conversation}
         elif kind == "local":
             endpoint = str(value.get("endpoint", "")).strip()
@@ -915,9 +941,12 @@ async function scanLocal(){try{const d=await api('/api/scan-local');$('local-sca
                     kind=str(data.get("kind"));item=data
                     if data.get("id"): item=next(x for x in config.get(provider_kind(kind),[]) if isinstance(x,dict) and x.get("id")==data.get("id"))
                     if kind == "web":
-                        if not item.get("adapter"):
-                            self._send({"message":"网页登录配置已保存，但 AgentRelay 目前还不会自动操作这个网站的聊天页面。需要后续为该网站补充操作规则。"});return
-                        ok=bool(item.get("state_file") and Path(item["state_file"]).exists());self._send({"message":"已找到加密登录状态，DeepSeek 可以自动对话" if ok else "尚未保存登录状态，请点击“打开网页登录”"});return
+                        state_ok=bool(item.get("state_file") and Path(item["state_file"]).exists())
+                        if not state_ok:
+                            self._send({"message":"尚未保存登录状态，请点击“打开网页登录”"});return
+                        if str(item.get("id",""))=="deepseek-web":
+                            self._send({"message":"已找到加密登录状态，DeepSeek 专属适配器可以自动对话"});return
+                        self._send({"message":test_generic_web_provider(str(item.get("id","")))});return
                     ok,models,msg=_probe_models(item.get("endpoint",""),item.get("api_key","") if kind=="api" else "");self._send({"ok":ok,"models":models,"message":msg});return
                 if self.path == "/api/login":
                     p=data.get("provider") or {};provider_id=str(p.get("id","")).strip().lower();url=str(p.get("base_url") or "").strip()

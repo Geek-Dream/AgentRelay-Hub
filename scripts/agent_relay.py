@@ -1156,6 +1156,8 @@ class SiteAdapter:
         base_url="https://invalid.example/",
     )
     mode_keywords = {}
+    # 兜底适配器（GenericWebAdapter）置为 True；网站检测时永远最后尝试。
+    fallback = False
 
     @property
     def name(self) -> str:
@@ -2587,6 +2589,13 @@ class ProviderRegistry:
     def __init__(self):
         self._factories = {}
         self.register(DeepSeekAdapter)
+        try:
+            from .generic_web_adapter import GenericWebAdapter
+        except ImportError:
+            from generic_web_adapter import GenericWebAdapter
+        self._generic_factory = GenericWebAdapter
+        # 占位注册（实例名为 "generic"）；create() 对未知 Provider 回落到它。
+        self.register(GenericWebAdapter)
 
     def register(self, factory) -> None:
         adapter = factory()
@@ -2603,15 +2612,22 @@ class ProviderRegistry:
     def create(self, provider: str) -> SiteAdapter:
         provider_name = normalize_provider_name(provider)
         factory = self._factories.get(provider_name)
-        if factory is None:
-            supported = ", ".join(self.names)
-            raise ValueError(
-                f"尚未实现 Provider：{provider_name}；当前支持：{supported}"
-            )
+        if factory is None or factory is self._generic_factory:
+            # 未实现专属适配器的 Provider（如千问、Kimi）走通用兜底。
+            return self.create_generic(provider_name)
         return factory()
 
+    def create_generic(self, provider: str | None = None):
+        return self._generic_factory(provider_name=provider)
+
     def create_all(self) -> List[SiteAdapter]:
-        return [self._factories[name]() for name in self.names]
+        # 兜底适配器由 SiteDetector 按 provider_name 单独实例化，
+        # 不参与全量检测，避免占位实例（没有网址）到处匹配。
+        return [
+            self._factories[name]()
+            for name in self.names
+            if self._factories[name] is not self._generic_factory
+        ]
 
 
 class SiteDetector:
@@ -2629,9 +2645,15 @@ class SiteDetector:
     即可。
     """
 
-    def __init__(self, registry=None):
+    def __init__(self, registry=None, provider_name=None):
         self.registry = registry or ProviderRegistry()
+        self.provider_name = provider_name
         self.adapters = self.registry.create_all()
+        # 通用兜底适配器需要知道当前 Provider 名与网址，最后尝试。
+        self.adapters.append(
+            self.registry.create_generic(provider_name)
+        )
+        self.adapters.sort(key=lambda adapter: adapter.fallback)
 
     def detect(
             self,
@@ -2824,7 +2846,10 @@ def run_provider(
             # 网站检测
             # ------------------------------------------------
 
-            detector = SiteDetector(registry)
+            detector = SiteDetector(
+                registry,
+                provider_name=provider_name,
+            )
 
             detected_adapter = (
                 detector.detect(
