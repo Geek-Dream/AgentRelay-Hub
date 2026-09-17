@@ -19,7 +19,9 @@ class OpenAICompatibleAdapter(AgentAdapter):
     def send(self, request):
         from urllib.request import Request, urlopen
         import json
-        payload = dict(request); payload.setdefault("model", self.model); payload.setdefault("temperature", 0.2)
+        # 不默认注入 temperature：部分上游只允许 temperature=1，
+        # 擅自带 0.2 会被拒绝（503）。需要温控的调用方自己在 request 里传。
+        payload = dict(request); payload.setdefault("model", self.model)
         data = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.api_key:

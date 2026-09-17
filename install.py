@@ -799,12 +799,36 @@ def test_web_provider(item: dict, timeout: int = 600) -> str:
 
 
 def test_api_provider(item: dict) -> str:
-    """API 模型实测：chat 格式直连探测；responses/anthropic 走内置路由转换后实测。"""
+    """API 模型实测：chat 格式直连探测 + 真实短对话；responses/anthropic 走内置路由转换后实测。"""
     fmt = str(item.get("format") or "chat")
     if fmt == "chat":
         ok, models, msg = _probe_models(str(item.get("endpoint") or ""),
                                         str(item.get("api_key") or ""))
-        return msg
+        if not ok:
+            return msg
+        # 再发一条 1 token 的真实消息，验证对话接口本身可用
+        try:
+            import urllib.request
+            endpoint = str(item.get("endpoint") or "").rstrip("/")
+            if not endpoint.endswith("/chat/completions"):
+                endpoint += "/chat/completions"
+            payload = {"model": str(item.get("model") or ""),
+                       "max_tokens": 1,
+                       "messages": [{"role": "user", "content": "hi"}]}
+            req = urllib.request.Request(
+                endpoint,
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers={"Content-Type": "application/json",
+                         "Authorization":
+                             f"Bearer {str(item.get('api_key') or '')}"},
+                method="POST")
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            content = str((data.get("choices") or [{}])[0]
+                          .get("message", {}).get("content") or "")
+            return f"接口可用：{msg}；实测对话返回 {len(content)} 字符"
+        except Exception as exc:
+            return f"模型列表可用，但对话接口调用失败：{exc}"
     try:
         from scripts.api_format_router import ensure_router
     except ImportError:
