@@ -20,7 +20,7 @@ except ImportError:
 
 
 def _profiles() -> list[ProviderProfile]:
-    return [
+    profiles = [
         ProviderProfile("deepseek-web", "web", login_command="agent_relay_login.py --provider deepseek",
                         proxy_hint=os.environ.get("AGENTRELAY_DEEPSEEK_PROXY", "")),
         ProviderProfile("qianwen-web", "web", login_command="agent_relay_login.py --provider qianwen",
@@ -30,6 +30,51 @@ def _profiles() -> list[ProviderProfile]:
         ProviderProfile("local-llm", "local"),
         ProviderProfile("gpt-api", "api"),
     ]
+    try:
+        try:
+            from .config_manager import load_config
+        except ImportError:
+            from config_manager import load_config
+        configured = load_config().get("web_providers", [])
+    except Exception:
+        configured = []
+    known = {item.provider_id for item in profiles}
+    for item in configured if isinstance(configured, list) else []:
+        provider_id = str(item.get("id", "")).strip() if isinstance(item, dict) else ""
+        if not provider_id or provider_id in known:
+            continue
+        provider_name = provider_id.removesuffix("-web")
+        profiles.append(ProviderProfile(
+            provider_id,
+            "web",
+            enabled=bool(item.get("enabled", True)),
+            login_command=f"agent_relay_login.py --provider {provider_name}",
+            proxy_hint=os.environ.get(
+                f"AGENTRELAY_{provider_name.upper().replace('-', '_')}_PROXY", ""
+            ),
+        ))
+        known.add(provider_id)
+    return profiles
+
+
+def _configured_web_provider(provider_id: str) -> str | None:
+    """Resolve either `qianwen` or `qianwen-web` to its runtime name."""
+    try:
+        try:
+            from .config_manager import load_config
+        except ImportError:
+            from config_manager import load_config
+        entries = load_config().get("web_providers", [])
+    except Exception:
+        entries = []
+    requested = provider_id.removesuffix("-web")
+    for item in entries if isinstance(entries, list) else []:
+        if not isinstance(item, dict) or not item.get("enabled", True):
+            continue
+        configured_id = str(item.get("id", "")).strip()
+        if configured_id and configured_id.removesuffix("-web") == requested:
+            return configured_id.removesuffix("-web")
+    return "deepseek" if requested == "deepseek" else None
 
 
 def _request_provider(provider_id: str, prompt: str) -> str:
@@ -49,9 +94,11 @@ def _request_provider(provider_id: str, prompt: str) -> str:
         )
         raw = adapter.send({"messages": [{"role": "user", "content": prompt}]})
         return str(raw.get("choices", [{}])[0].get("message", {}).get("content", ""))
-    if provider_id.endswith("-web"):
-        if provider_id != "deepseek-web":
-            raise RuntimeError(f"网页 Provider 尚未安装适配器: {provider_id}")
+    web_provider = _configured_web_provider(provider_id)
+    if web_provider:
+        # 后台调用：默认无头运行，不在用户面前弹出浏览器窗口；
+        # 调试时可设 AGENT_RELAY_WEB_HEADFUL=1 强制有头
+        os.environ.setdefault("AGENT_RELAY_WEB_HEADFUL", "0")
         try:
             from .agent_relay import run_provider
         except ImportError:
@@ -59,8 +106,8 @@ def _request_provider(provider_id: str, prompt: str) -> str:
         raw = run_provider(
             prompt,
             "expert",
-            provider_name="deepseek",
-            timeout=int(os.environ.get("AGENTRELAY_DEEPSEEK_TIMEOUT", "120")),
+            provider_name=web_provider,
+            timeout=int(os.environ.get("AGENTRELAY_WEB_TIMEOUT", "120")),
         )
         return str(raw.get("answer", "") if isinstance(raw, dict) else raw)
     raise RuntimeError("COMMANDER_CHILD_API_DENIED")

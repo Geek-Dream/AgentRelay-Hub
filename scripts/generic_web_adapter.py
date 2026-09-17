@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import time
 from typing import List, Optional
@@ -778,14 +779,32 @@ class GenericWebAdapter(SiteAdapter):
             self._upload_images(page, image_paths)
             page.wait_for_timeout(800)
 
-        if self._input_tag(text_input) == "textarea":
-            text_input.fill(question)
-        else:
-            # contenteditable / role=textbox 无法用 fill，用键盘插入
-            page.keyboard.insert_text(question)
-        page.wait_for_timeout(300)
+        self._type_like_human(page, text_input, question)
         text_input.press("Enter")
         print(f"已发送: {question}")
+
+    # 拟人发送节奏：点击输入框后先停顿 1-3 秒（思考时间）；
+    # 短问题逐字敲（随机间隔 20-120ms），长问题整段粘贴后停留 1-3 秒；
+    # 回车前再随机停顿 0.8-2 秒。降低网站风控对自动化输入的识别。
+    def _type_like_human(self, page, text_input, question: str) -> None:
+        page.wait_for_timeout(random.randint(1000, 3000))
+        if self._input_tag(text_input) == "textarea":
+            if len(question) <= 60:
+                for ch in question:
+                    text_input.type(ch)
+                    page.wait_for_timeout(random.randint(20, 120))
+            else:
+                text_input.fill(question)
+                page.wait_for_timeout(random.randint(1000, 3000))
+        else:
+            if len(question) <= 60:
+                for ch in question:
+                    page.keyboard.type(ch)
+                    page.wait_for_timeout(random.randint(20, 120))
+            else:
+                page.keyboard.insert_text(question)
+                page.wait_for_timeout(random.randint(1000, 3000))
+        page.wait_for_timeout(random.randint(800, 2000))
 
     def _upload_images(self, page, image_paths):
         # 部分网站需要先点开附件按钮才挂载 input[type=file]

@@ -3020,38 +3020,61 @@ def run_provider(
                 for p in final_images:
                     print(f"   - {p}")
 
-            adapter.send_message(
-                page,
-                question,
-                image_path=final_images if final_images else None
-            )
-
-            if creating_new_session:
-                deadline = time.monotonic() + 15
-                target = adapter.current_session(
+            try:
+                adapter.send_message(
                     page,
-                    adapter.canonical_session_title(mode),
+                    question,
+                    image_path=final_images if final_images else None
                 )
-                while target is None and time.monotonic() < deadline:
-                    page.wait_for_timeout(200)
+
+                if creating_new_session:
+                    deadline = time.monotonic() + 15
                     target = adapter.current_session(
                         page,
                         adapter.canonical_session_title(mode),
                     )
-                if target is None:
-                    raise RuntimeError("发送后未获得新会话 URL")
+                    while target is None and time.monotonic() < deadline:
+                        page.wait_for_timeout(200)
+                        target = adapter.current_session(
+                            page,
+                            adapter.canonical_session_title(mode),
+                        )
+                    if target is None:
+                        raise RuntimeError("发送后未获得新会话 URL")
 
-            # ------------------------------------------------
-            # 等待 AI 回复
-            # ------------------------------------------------
+                # ------------------------------------------------
+                # 等待 AI 回复
+                # ------------------------------------------------
 
-            success = (
-                adapter.wait_for_response(
-                    page,
-                    question=question,
-                    timeout=timeout,
+                success = (
+                    adapter.wait_for_response(
+                        page,
+                        question=question,
+                        timeout=timeout,
+                    )
                 )
-            )
+            finally:
+                # 无论成功、风控拦截还是出错，都回写登录状态
+                # （含用户手动完成验证后的放行凭证）
+                if getattr(adapter, "refresh_state", False):
+                    try:
+                        try:
+                            from .agent_relay_login import (
+                                save_storage_state,
+                            )
+                        except ImportError:
+                            from agent_relay_login import (
+                                save_storage_state,
+                            )
+                        save_storage_state(context, state_file)
+                        debug_log(
+                            f"Provider {adapter.name} 登录状态已回写"
+                        )
+                    except Exception as exc:
+                        log_error(
+                            f"回写登录状态失败 "
+                            f"provider={adapter.name}: {exc}"
+                        )
 
             if not success:
                 print(
@@ -3092,31 +3115,8 @@ def run_provider(
 
             # ------------------------------------------------
             # 返回结果（包含实际使用的图片列表）
+            # （登录状态回写已在上面的 finally 中完成）
             # ------------------------------------------------
-
-            # ------------------------------------------------
-            # 回写登录状态：把验证通过后的新 Cookie 存回加密状态文件，
-            # 后续运行可以复用（例如风控验证令牌）。
-            # ------------------------------------------------
-
-            if getattr(adapter, "refresh_state", False):
-                try:
-                    try:
-                        from .agent_relay_login import (
-                            save_storage_state,
-                        )
-                    except ImportError:
-                        from agent_relay_login import (
-                            save_storage_state,
-                        )
-                    save_storage_state(context, state_file)
-                    debug_log(
-                        f"Provider {adapter.name} 登录状态已回写"
-                    )
-                except Exception as exc:
-                    log_error(
-                        f"回写登录状态失败 provider={adapter.name}: {exc}"
-                    )
 
             return {
                 "provider": adapter.name,
@@ -3340,6 +3340,12 @@ def main():
 
         # 收集命令行 --image 参数
         cli_images = list(args.image) if args.image else []
+
+        if not args.monitor:
+            # 后台自动调用：默认无头运行，不在用户面前弹出浏览器窗口；
+            # 需要人工代问（--monitor）或调试时保持有头，
+            # 也可用 AGENT_RELAY_WEB_HEADFUL=1 强制有头
+            os.environ.setdefault("AGENT_RELAY_WEB_HEADFUL", "0")
 
         result = run_provider(
             question,
