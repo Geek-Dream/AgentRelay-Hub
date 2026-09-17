@@ -864,14 +864,18 @@ class GenericWebAdapter(SiteAdapter):
             return r.bottom > 0 && r.right > 0 &&
                    r.top < window.innerHeight && r.left < window.innerWidth;
         };
-        // 1) 千问按钮槽：同一个按钮在“发送消息 / 停止回答”之间切换
-        //    （快回复可能抓不到“停止回答”，回到“发送消息”即视为完成）
-        const slot = document.querySelector('[data-session-switch-target="send-query"]');
-        if (slot && vis(slot)) {
+        // 1) 千问按钮槽：扫描全部槽位（页面可能有多个输入区，如极速/专家，
+        //    第一个槽未必是用户正在用的）。任一说“停止”即生成中；
+        //    没有停止但有“发送”即空闲。
+        const slots = [...document.querySelectorAll('[data-session-switch-target="send-query"]')];
+        let slotSend = false;
+        for (const slot of slots) {
+            if (!vis(slot)) continue;
             const label = (slot.getAttribute('aria-label') || '').trim();
             if (/停止/.test(label)) return 'generating';
-            if (/发送/.test(label)) return 'send';
+            if (/发送/.test(label)) slotSend = true;
         }
+        if (slotSend) return 'send';
         // 2) 组件签名：生成中是 10px 黑方块（■），空闲是 sendChat 图标
         const square = [...document.querySelectorAll('span[class*="bg-black-button"]')]
             .find(el => {
@@ -1082,6 +1086,49 @@ class GenericWebAdapter(SiteAdapter):
     def _is_qianwen(self) -> bool:
         return "qianwen" in self._host_of(str(self.base_url or ""))
 
+    # 千问发送按钮槽（定死组件）：aria-label 在“发送消息/停止回答”间切换。
+    # 页面有多个输入区（极速/专家），扫描全部可见槽位，任一说停止即生成中。
+    _QW_STATUS_JS = """
+    () => {
+        const slots = [...document.querySelectorAll(
+            '[data-session-switch-target="send-query"]')];
+        const vis = el => {
+            const r = el.getBoundingClientRect();
+            if (!r.width || !r.height) return false;
+            const s = getComputedStyle(el);
+            return s.visibility !== 'hidden' && s.display !== 'none' &&
+                   parseFloat(s.opacity) !== 0;
+        };
+        let sawSend = false;
+        for (const b of slots) {
+            if (!vis(b)) continue;
+            const label = (b.getAttribute('aria-label') || '').trim();
+            if (label.includes('停止')) return 'generating';
+            if (label.includes('发送')) sawSend = true;
+        }
+        return sawSend ? 'send' : 'unknown';
+    }
+    """
+
+    def _qw_status(self, page) -> str:
+        try:
+            return str(page.evaluate(self._QW_STATUS_JS) or "unknown")
+        except Exception:
+            return "unknown"
+
+    def _qw_question_count(self, page) -> int:
+        try:
+            return int(page.evaluate(
+                """
+                () => [...document.querySelectorAll('.question-text-card')]
+                    .filter(el => {
+                        const r = el.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0;
+                    }).length
+                """) or 0)
+        except Exception:
+            return 0
+
     _QW_MARKDOWN_JS = """
     () => {
         const blocks = [...document.querySelectorAll(
@@ -1137,8 +1184,9 @@ class GenericWebAdapter(SiteAdapter):
         last_text = ""
         stable = 0
         qianwen = self._is_qianwen()
+        status_fn = self._qw_status if qianwen else self._status
         while (time.time() - start) < timeout:
-            if self._status(page) == "generating":
+            if status_fn(page) == "generating":
                 return False
             if qianwen:
                 block = self._qianwen_markdown(page)
@@ -1165,6 +1213,107 @@ class GenericWebAdapter(SiteAdapter):
             time.sleep(2.0)
         return False
 
+    def _monitor_qianwen(self, page, timeout: int = 600) -> dict:
+        """千问专用人工代问监听（按钮状态写死检测）。
+
+        - 唯一状态源：发送按钮槽 [data-session-switch-target="send-query"]
+          的 aria-label（发送消息 / 停止回答），扫描全部可见槽位。
+        - 触发：问题卡片（.question-text-card）数量增加，或按钮进入“停止回答”。
+        - 触发后 3 秒内 0.1 秒高频采样抓极速回复，之后 0.3 秒慢采样。
+        - 完成：按钮回到“发送消息”（连读两次确认），再等正文稳定后提取。
+        - 兜底：触发 10 秒都没观察到“停止回答”（秒回没抓到），只要按钮
+          已是“发送消息”，直接取最新一条回答；若按钮不是“发送消息”
+          说明还在输出，继续等。
+        """
+        start = time.time()
+        baseline = self._qw_question_count(page)
+        triggered_at = None
+        question = ""
+        saw_generating = False
+        wall_hinted = False
+        slot_warned = False
+        print(
+            "\n请在打开的浏览器窗口里自行输入问题并发送，我来监听回答。"
+            "\n出现人机验证时请手动完成并刷新页面，我会继续监听。"
+        )
+        while (time.time() - start) < timeout:
+            if self._has_wall(page):
+                page.wait_for_timeout(1500)
+                if self._has_wall(page):
+                    if not wall_hinted:
+                        print(
+                            "\n⚠️ 出现人机验证：请在浏览器里完成验证并刷新页面，"
+                            "然后重新提问，我会继续监听……"
+                        )
+                        details = self._wall_details(page)
+                        if details:
+                            print("   检测依据：" + " | ".join(details))
+                        wall_hinted = True
+                    page.wait_for_timeout(2000)
+                    continue
+            else:
+                wall_hinted = False
+
+            status = self._qw_status(page)
+            count = self._qw_question_count(page)
+            if (status == "unknown" and triggered_at is None
+                    and not slot_warned):
+                slot_warned = True
+                print("…等待千问对话页面就绪（未找到发送按钮）。")
+
+            # 问题卡片数量增加 = 用户真的发送了（卡片上屏即发送成功）
+            if count > baseline:
+                latest = self._last_question_text(page)
+                if latest:
+                    question = latest
+                if triggered_at is None:
+                    triggered_at = time.time()
+                    print(
+                        f"\n已检测到你发送问题：{question[:60]}，"
+                        "等待回答完成…"
+                    )
+
+            if status == "generating":
+                saw_generating = True
+                if triggered_at is None:
+                    triggered_at = time.time()
+                    print(
+                        f"\n已检测到你发送问题"
+                        f"{f'：{question[:60]}' if question else ''}，"
+                        "等待回答完成…"
+                    )
+                time.sleep(0.1)
+                continue
+
+            if triggered_at is not None and status == "send":
+                elapsed = time.time() - triggered_at
+                # 观察到过生成中 → 按钮回来即完成；没观察到 → 10 秒兜底
+                if saw_generating or elapsed >= 10.0:
+                    page.wait_for_timeout(200)
+                    if self._qw_status(page) == "send":
+                        print("回答已结束，等待内容稳定…")
+                        if self._wait_content_stable(
+                                page, question, start, timeout):
+                            answer, full = self.extract_latest_answer(
+                                page, question)
+                            print("\n✅ 已提取回答")
+                            return {
+                                "question": question,
+                                "answer": answer,
+                                "full_content": full,
+                            }
+                        # 稳定等待期间又开始生成（用户追问了），继续监听
+                        saw_generating = False
+
+            # 采样节奏：触发后 3 秒内 0.1s 高频（抓极速回复），其余 0.3s
+            fast = (triggered_at is not None
+                    and (time.time() - triggered_at) < 3.0)
+            time.sleep(0.1 if fast else 0.3)
+
+        raise RuntimeError(
+            f"监听超时（{timeout} 秒）：没有检测到完整的提问-回答过程"
+        )
+
     def monitor_human_chat(self, page, timeout: int = 600) -> dict:
         """人工代问：用户在浏览器里自行输入问题并发送，工具监听状态并取回答。
 
@@ -1174,7 +1323,10 @@ class GenericWebAdapter(SiteAdapter):
         武装条件：状态为生成中，且输入框里有真实文字或页面已有问题卡片。
         页面刷新/加载中的"生成中"是噪声（输入为空、没有问题卡片），不会
         误触发；千问下占位符文本（"向千问提问"）也被视为空输入。
+        千问走专用按钮检测逻辑（_monitor_qianwen）。
         """
+        if self._is_qianwen():
+            return self._monitor_qianwen(page, timeout)
         start = time.time()
         last_question = ""
         armed = False
