@@ -2933,25 +2933,40 @@ def run_provider(
                     raise RuntimeError(
                         f"Provider {adapter.name} 不支持人工代问模式"
                     )
-                monitored = adapter.monitor_human_chat(
-                    page,
-                    timeout=max(timeout, 600),
-                )
-                if getattr(adapter, "refresh_state", False):
-                    try:
+                # 无论监听成功、超时还是出错，都把当前 Cookie（含用户
+                # 手动通过人机验证后的放行凭证）存回登录状态文件，
+                # 避免下次运行又从头被风控拦截。
+                monitored = None
+                monitor_error = None
+                try:
+                    monitored = adapter.monitor_human_chat(
+                        page,
+                        timeout=max(timeout, 600),
+                    )
+                except Exception as exc:
+                    monitor_error = exc
+                finally:
+                    if getattr(adapter, "refresh_state", False):
                         try:
-                            from .agent_relay_login import (
-                                save_storage_state,
+                            try:
+                                from .agent_relay_login import (
+                                    save_storage_state,
+                                )
+                            except ImportError:
+                                from agent_relay_login import (
+                                    save_storage_state,
+                                )
+                            save_storage_state(context, state_file)
+                            debug_log(
+                                f"Provider {adapter.name} 登录状态已回写"
                             )
-                        except ImportError:
-                            from agent_relay_login import (
-                                save_storage_state,
+                        except Exception as exc:
+                            log_error(
+                                f"回写登录状态失败 "
+                                f"provider={adapter.name}: {exc}"
                             )
-                        save_storage_state(context, state_file)
-                    except Exception as exc:
-                        log_error(
-                            f"回写登录状态失败 provider={adapter.name}: {exc}"
-                        )
+                if monitor_error is not None:
+                    raise monitor_error
                 target = binding_store.get(adapter.name, binding_scope)
                 return {
                     "provider": adapter.name,

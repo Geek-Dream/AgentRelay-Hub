@@ -199,21 +199,62 @@ class GenericWebAdapter(SiteAdapter):
 
     _WALL_JS = """
     () => {
-        const visible = (el) => {
+        // 墙必须是"显眼"的：足够大、不透明、在视口内。
+        // 阿里系页面常驻隐藏的风控 SDK（1x1 iframe、opacity:0 的容器），
+        // 不能据此判定为人机验证。
+        const prominent = (el) => {
             const r = el.getBoundingClientRect();
-            if (!r.width || !r.height) return false;
-            const style = getComputedStyle(el);
-            return style.visibility !== 'hidden' && style.display !== 'none';
+            if (r.width < 80 || r.height < 60) return false;
+            const s = getComputedStyle(el);
+            if (s.visibility === 'hidden' || s.display === 'none') return false;
+            if (parseFloat(s.opacity) === 0) return false;
+            if (el.closest('[aria-hidden="true"]')) return false;
+            return r.bottom > 0 && r.right > 0 &&
+                   r.top < window.innerHeight && r.left < window.innerWidth;
         };
         const ifr = [...document.querySelectorAll('iframe')].some(f =>
-            visible(f) && /punish|baxia|captcha|verify|x5sec/i.test(
+            prominent(f) && /punish|baxia|captcha|verify|x5sec/i.test(
                 (f.src || '') + ' ' + (f.id || '') + ' ' + (f.getAttribute('class') || '')));
         const cap = [...document.querySelectorAll(
             '[class*="captcha" i], [id*="baxia" i], [class*="verify-slider" i], ' +
-            '[class*="geetest" i], [class*="nc_iconfont" i], [class*="slidebtn" i]'
-        )].some(el => el.tagName !== 'SCRIPT' && visible(el));
+            '[class*="geetest" i], [class*="nc_iconfont" i], [class*="slidebtn" i], ' +
+            '[id*="nocaptcha" i]'
+        )].some(el => el.tagName !== 'SCRIPT' && prominent(el));
         const url = /punish|verify|captcha|x5sec/i.test(location.href);
         return ifr || cap || url;
+    }
+    """
+
+    _WALL_DETAIL_JS = """
+    () => {
+        const out = [];
+        const desc = (el) => {
+            const r = el.getBoundingClientRect();
+            const s = getComputedStyle(el);
+            return `${el.tagName} id="${el.id || ''}" ` +
+                `class="${(el.getAttribute('class') || '').slice(0, 60)}" ` +
+                `src="${(el.src || '').slice(0, 80)}" ` +
+                `size=${Math.round(r.width)}x${Math.round(r.height)} ` +
+                `opacity=${s.opacity} display=${s.display}`;
+        };
+        document.querySelectorAll('iframe').forEach(f => {
+            if (/punish|baxia|captcha|verify|x5sec/i.test(
+                (f.src || '') + ' ' + (f.id || '') + ' ' +
+                (f.getAttribute('class') || ''))) {
+                out.push(desc(f));
+            }
+        });
+        document.querySelectorAll(
+            '[class*="captcha" i], [id*="baxia" i], [class*="verify-slider" i], ' +
+            '[class*="geetest" i], [class*="nc_iconfont" i], [class*="slidebtn" i], ' +
+            '[id*="nocaptcha" i]'
+        ).forEach(el => {
+            if (el.tagName !== 'SCRIPT' && out.length < 5) out.push(desc(el));
+        });
+        if (/punish|verify|captcha|x5sec/i.test(location.href)) {
+            out.push(`url=${location.href.slice(0, 120)}`);
+        }
+        return out;
     }
     """
 
@@ -222,6 +263,14 @@ class GenericWebAdapter(SiteAdapter):
             return bool(page.evaluate(self._WALL_JS))
         except Exception:
             return False
+
+    def _wall_details(self, page) -> list:
+        """返回命中的可疑元素描述，用于误报排查。"""
+        try:
+            result = page.evaluate(self._WALL_DETAIL_JS)
+            return [str(x) for x in (result or [])][:6]
+        except Exception:
+            return []
 
     def _ensure_no_wall(self, page, start_time: float) -> None:
         """检测到风控墙时：有头模式等人工验证，无头模式明确报错。
@@ -1143,6 +1192,9 @@ class GenericWebAdapter(SiteAdapter):
                             "\n⚠️ 出现人机验证：请在浏览器里完成验证并刷新页面，"
                             "然后重新提问，我会继续监听……"
                         )
+                        details = self._wall_details(page)
+                        if details:
+                            print("   检测依据：" + " | ".join(details))
                         wall_hinted = True
                     page.wait_for_timeout(2000)
                     continue
