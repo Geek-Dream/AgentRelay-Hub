@@ -1315,6 +1315,21 @@ class GenericWebAdapter(SiteAdapter):
                                 page, question, start, timeout):
                             answer, full = self.extract_latest_answer(
                                 page, question)
+                            # 命中异常回复模板（风控拒答）：提示用户刷新重问
+                            try:
+                                from .agent_relay import is_abnormal_reply
+                            except ImportError:
+                                from agent_relay import is_abnormal_reply
+                            if is_abnormal_reply(answer):
+                                print(
+                                    "\n⚠️ 疑似风控拒答（异常回复）："
+                                    "请刷新页面后重新提问，我会继续监听……"
+                                )
+                                baseline = self._qw_question_count(page)
+                                triggered_at = None
+                                question = ""
+                                saw_generating = False
+                                continue
                             print("\n✅ 已提取回答")
                             return {
                                 "question": question,
