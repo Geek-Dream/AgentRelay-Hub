@@ -20,13 +20,15 @@ AgentRelay 候选求援状态追踪器
 - failed_tool_call_count != retry_count
 """
 
+import difflib
+import hashlib
 import json
 import os
 import re
 import sys
 import time
 import traceback
-import hashlib
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -53,6 +55,14 @@ HISTORY_DIR = TRACKER_DIR / "history"
 SESSIONS_DIR = TRACKER_DIR / "sessions"
 PROBLEMS_DIR = TRACKER_DIR / "problems"
 LOGS_DIR = TRACKER_DIR / "logs"
+
+# 权重分级动作：1=继续处理，2=先查本地归档，3=才进入调用支援模型的判断。
+ARCHIVE_REMINDER_WEIGHT = 2
+ARCHIVE_SCRIPT = CODEX_DIR / "skills" / "agent-relay" / "scripts" / "agent_relay_archive.py"
+# 只做保守的本地模糊匹配。匹配后最高只把起始权重抬到 2，绝不直接用 3
+# 触发支援模型；模型仍需先查归档并自行核对。
+ARCHIVE_MATCH_THRESHOLD = 0.68
+ARCHIVE_RECORDS_FILENAME = "已完成任务.jsonl"
 
 CURRENT_FILE = TRACKER_DIR / "current.json"
 EVENTS_FILE = TRACKER_DIR / "events.jsonl"
@@ -358,6 +368,14 @@ def default_state(session_id=None, agent_id=None):
         # weight == 3 不直接触发 AgentRelay。
         "weight": 0,
 
+        # 当前问题命中本地归档时记录的匹配信息。该信息只用于解释
+        # 为什么从 weight=2 起算，不代表归档结论已经适用于当前环境。
+        "archive_match": None,
+
+        # 复发问题的权重下限。普通问题为 1；归档命中后为 2。
+        # 时间增长到 15 分钟后仍会正常升到 weight=3。
+        "weight_floor": 1,
+
         # 当前问题是否已经进入 AgentRelay 外援协作。
         # 该值只抑制 Hook 重复发送“首次求援”候选提醒，
         # 不禁止 Agent 在同一问题内携带新结果继续追问。
@@ -375,6 +393,11 @@ def default_state(session_id=None, agent_id=None):
 
         # 触发通知只属于这个问题，避免旧状态污染新问题。
         "relay_signal_problem_id": None,
+
+        # weight 达到 2 时是否已经提醒过 Agent 先查本地归档。
+        # 只提醒一次，避免每个工具调用都重复刷屏。
+        "archive_signal_emitted": False,
+        "archive_signal_problem_id": None,
 
         # AgentRelay 首次进入外援协作的原因。
         "relay_trigger_reason": None,
@@ -1027,8 +1050,9 @@ def accrue_active_time(state, ended_at=None):
         float(state.get("effective_time_seconds", 0) or 0)
         + duration
     )
-    state["weight"] = calculate_weight(
-        state["effective_time_seconds"]
+    update_weight_from_time(
+        state,
+        state["effective_time_seconds"],
     )
     return duration
 
@@ -1277,6 +1301,276 @@ def calculate_weight(
     return 1
 
 
+def update_weight_from_time(state, effective_seconds=None):
+    """按有效时间刷新权重，同时保留复发问题的权重下限。"""
+
+    if effective_seconds is None:
+        effective_seconds = state.get(
+            "round_effective_time_seconds",
+            state.get("effective_time_seconds", 0),
+        )
+
+    floor = int(
+        state.get("weight_floor", 1)
+        or 1
+    )
+    floor = max(1, min(MAX_WEIGHT, floor))
+    state["weight"] = max(
+        calculate_weight(effective_seconds),
+        floor,
+    )
+    return state["weight"]
+
+
+def _sanitize_archive_project(project):
+    """与本地归档脚本保持相同的项目名安全规则。"""
+
+    cleaned = re.sub(
+        r"[^0-9A-Za-z\u4e00-\u9fff._-]+",
+        "-",
+        str(project or "").strip(),
+    )
+    cleaned = cleaned.strip(".-")
+    return cleaned or "default"
+
+
+def infer_archive_project(workspace=None):
+    """推断当前项目名，优先使用显式环境变量。"""
+
+    explicit = os.environ.get("AGENTRELAY_PROJECT")
+    if explicit:
+        return _sanitize_archive_project(explicit)
+
+    candidate = Path(workspace or os.getcwd()).expanduser()
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        resolved = candidate
+
+    marker = resolved
+    while marker != marker.parent and not (marker / ".git").exists():
+        marker = marker.parent
+
+    if (marker / ".git").exists():
+        return _sanitize_archive_project(marker.name)
+    return _sanitize_archive_project(resolved.name)
+
+
+def archive_root_path():
+    """返回安装后 Skill 目录内的本地归档根目录。"""
+
+    return (
+        Path(ARCHIVE_SCRIPT)
+        .expanduser()
+        .resolve()
+        .parent.parent
+        / "归档"
+    )
+
+
+def load_archive_project_records(project):
+    """读取当前项目的归档 JSONL；任何读取错误都按无归档处理。"""
+
+    path = (
+        archive_root_path()
+        / _sanitize_archive_project(project)
+        / ARCHIVE_RECORDS_FILENAME
+    )
+
+    if not path.is_file():
+        return []
+
+    records = []
+    try:
+        lines = path.read_text(
+            encoding="utf-8",
+        ).splitlines()
+    except OSError:
+        return []
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and value.get("title"):
+            records.append(value)
+
+    return records
+
+
+def _compact_archive_text(value):
+    text = unicodedata.normalize(
+        "NFKC",
+        normalize_text(value),
+    ).casefold()
+    return re.sub(
+        r"[\W_]+",
+        "",
+        text,
+        flags=re.UNICODE,
+    )
+
+
+def _archive_tokens(value):
+    return set(
+        re.findall(
+            r"[a-z0-9_+#.-]{2,}|[\u4e00-\u9fff]{2,}",
+            unicodedata.normalize(
+                "NFKC",
+                normalize_text(value),
+            ).casefold(),
+        )
+    )
+
+
+def _dice_similarity(left, right):
+    if not left or not right:
+        return 0.0
+    if len(left) < 2 or len(right) < 2:
+        return 1.0 if left == right else 0.0
+
+    left_grams = {
+        left[index:index + 2]
+        for index in range(len(left) - 1)
+    }
+    right_grams = {
+        right[index:index + 2]
+        for index in range(len(right) - 1)
+    }
+    if not left_grams or not right_grams:
+        return 0.0
+    return (
+        2.0
+        * len(left_grams & right_grams)
+        / (len(left_grams) + len(right_grams))
+    )
+
+
+def _containment_similarity(left, right):
+    """字符串包含时给一个稳定的高分，但短字段包含要降权。"""
+
+    if not left or not right:
+        return 0.0
+    if left not in right and right not in left:
+        return 0.0
+
+    shorter = min(len(left), len(right))
+    longer = max(len(left), len(right))
+    if shorter < 4 or longer == 0:
+        return 0.0
+
+    coverage = shorter / longer
+    if coverage < 0.35:
+        return 0.0
+    return min(1.0, 0.72 + 0.28 * coverage)
+
+
+def archive_record_match_score(query, record):
+    """计算新问题与原归档记录的保守相似度。"""
+
+    query_compact = _compact_archive_text(query)
+    if len(query_compact) < 4:
+        return 0.0
+
+    query_tokens = _archive_tokens(query)
+    fields = (
+        (record.get("title"), 1.0),
+        (record.get("request"), 0.96),
+        (record.get("summary"), 0.90),
+        (" ".join(record.get("tags") or []), 0.84),
+        (" ".join(record.get("changed_files") or []), 0.78),
+    )
+
+    best_score = 0.0
+
+    for value, multiplier in fields:
+        candidate_compact = _compact_archive_text(value)
+        if not candidate_compact:
+            continue
+
+        ratio = difflib.SequenceMatcher(
+            None,
+            query_compact,
+            candidate_compact,
+            autojunk=False,
+        ).ratio()
+        ratio = max(
+            ratio,
+            _containment_similarity(
+                query_compact,
+                candidate_compact,
+            ),
+            _dice_similarity(
+                query_compact,
+                candidate_compact,
+            ),
+        )
+
+        candidate_tokens = _archive_tokens(value)
+        shared_tokens = query_tokens & candidate_tokens
+        if shared_tokens and (
+            len(shared_tokens) >= 2
+            or any(len(token) >= 4 for token in shared_tokens)
+        ):
+            token_coverage = (
+                len(shared_tokens)
+                / min(len(query_tokens), len(candidate_tokens))
+            )
+            ratio = max(
+                ratio,
+                token_coverage,
+            )
+
+        best_score = max(
+            best_score,
+            min(1.0, ratio * multiplier),
+        )
+
+    return best_score
+
+
+def find_archive_recurrence(prompt, workspace=None):
+    """在当前项目归档里寻找保守的复发匹配。
+
+    命中只设置 weight=2，作用是把流程推进到“先查归档”，不会设置
+    weight=3，也不会直接触发在线支援模型。
+    """
+
+    query = normalize_text(prompt)
+    if len(_compact_archive_text(query)) < 4:
+        return None
+
+    project = infer_archive_project(workspace)
+    best_record = None
+    best_score = 0.0
+
+    for record in load_archive_project_records(project):
+        score = archive_record_match_score(
+            query,
+            record,
+        )
+        if score > best_score:
+            best_record = record
+            best_score = score
+
+    if best_record is None or best_score < ARCHIVE_MATCH_THRESHOLD:
+        return None
+
+    return {
+        "record_id": str(best_record.get("record_id") or ""),
+        "project": project,
+        "title": str(best_record.get("title") or ""),
+        "status": str(best_record.get("status") or ""),
+        "summary": str(best_record.get("summary") or "")[:300],
+        "score": round(best_score, 3),
+        "matched_at": iso_now(),
+    }
+
+
 # ============================================================
 # AgentRelay 触发条件
 # ============================================================
@@ -1427,10 +1721,104 @@ def get_trigger_conditions(state):
 # AgentRelay 候选提醒输出
 # ============================================================
 
+def wants_archive_lookup(state, conditions):
+    """
+    权重到 2 时提醒 Agent 先查本地归档。
+
+    权重分级动作：
+
+        weight 1 -> 正常处理
+        weight 2 -> 先查本地归档
+        weight 3 -> 才进入“是否调用支援模型”的判断
+
+    每个问题只提醒一次，避免每次工具调用都刷屏。
+    """
+
+    weight = int(
+        conditions.get(
+            "weight",
+            0,
+        )
+        or 0
+    )
+
+    if weight < ARCHIVE_REMINDER_WEIGHT:
+        return False
+
+    if conditions.get("already_triggered"):
+        return False
+
+    problem_id = state.get("problem_id")
+
+    if not problem_id:
+        return False
+
+    return not (
+        state.get("archive_signal_emitted")
+        and state.get("archive_signal_problem_id") == problem_id
+    )
+
+
+def archive_reminder_text(state):
+    """权重到 2 时提示 Agent 查询本机归档。"""
+
+    problem_context = normalize_text(
+        state.get("last_prompt")
+    )
+
+    if len(problem_context) > 300:
+        problem_context = (
+            problem_context[:297]
+            + "..."
+        )
+
+    match = (
+        state.get("archive_match")
+        if isinstance(state.get("archive_match"), dict)
+        else {}
+    )
+    if match:
+        match_text = (
+            "归档复发预匹配: "
+            f"{match.get('status') or '已归档'} · "
+            f"{match.get('title') or '未命名记录'}"
+            f"（项目: {match.get('project') or 'unknown'}，"
+            f"相似度: {match.get('score', 0)}）。"
+        )
+        reason_text = (
+            "Tracker 认为这可能是同一问题的复发，因此起始权重已是 2。"
+            "请先运行 search 核对该记录是否真的适用于当前环境；"
+            "匹配结果不是结论，不能直接照抄。"
+        )
+    else:
+        match_text = ""
+        reason_text = (
+            "权重已经到 2，说明这个问题已经处理了一段时间："
+            "先查一次本机归档，看以前是否解决过同类问题。"
+        )
+
+    return (
+        "本地归档提醒（不是命令）。"
+        f"当前权重: {state.get('weight')}。"
+        f"{match_text}"
+        f"当前问题: {problem_context or '未记录用户问题摘要'}。"
+        f"{reason_text}"
+        f'查询命令: python3 "{ARCHIVE_SCRIPT}" search "关键词"；'
+        f'不确定项目名时先运行 python3 "{ARCHIVE_SCRIPT}" projects。'
+        "命中时优先复用归档里已验证的结论，并在本次环境重新验证；"
+        "没有命中再继续自行排查。归档只保存结论，不替 Agent 做决定，"
+        "也不改变需求卡、确认卡和验证规则；weight=2 不会触发在线支援模型。"
+    )
+
+
 def emit_relay_trigger(state, hook_event_name="PostToolUse"):
     """
-    当当前问题达到计数门槛或出现直接行动句式候选时，
     向 Agent 输出候选提醒。
+
+    两类提醒：
+
+    1. 权重到 2：先查本地归档
+    2. 达到求援门槛或出现直接行动句式候选：考虑调用支援模型
 
     注意：
     - 这里只负责提醒 Agent 做语义审核
@@ -1441,7 +1829,16 @@ def emit_relay_trigger(state, hook_event_name="PostToolUse"):
 
     conditions = get_trigger_conditions(state)
 
-    if not conditions.get("should_trigger"):
+    relay_due = bool(
+        conditions.get("should_trigger")
+    )
+
+    archive_due = wants_archive_lookup(
+        state,
+        conditions,
+    )
+
+    if not relay_due and not archive_due:
         return False
 
     problem_context = normalize_text(
@@ -1454,19 +1851,29 @@ def emit_relay_trigger(state, hook_event_name="PostToolUse"):
             + "..."
         )
 
-    additional_context = (
-        "AgentRelay 候选求援提醒（不是调用命令）。"
-        f"候选原因: {conditions.get('reason')}。"
-        f"retry_count: {conditions.get('retry_count')}。"
-        "effective_time_seconds: "
-        f"{int(conditions.get('effective_time_seconds', 0))}。"
-        f"当前问题: {problem_context or '未记录用户问题摘要'}。"
-        "模型判断优先级最高：必须先核对问题仍未解决、提醒与当前问题匹配、"
-        "当前不是单纯等待，并判断外援是否确实值得调用。只有模型审核通过后"
-        "才可根据 AgentRelay Skill 调用；审核不通过就忽略本提醒并继续正常处理。"
-        "Hook 不会调用 agent_relay.py；用户消息候选只来自保守的直接行动句式预筛选，"
-        "单独出现 DeepSeek 或 AgentRelay 字样不能触发。"
-    )
+    notices = []
+
+    if archive_due:
+        notices.append(
+            archive_reminder_text(state)
+        )
+
+    if relay_due:
+        notices.append(
+            "AgentRelay 候选求援提醒（不是调用命令）。"
+            f"候选原因: {conditions.get('reason')}。"
+            f"retry_count: {conditions.get('retry_count')}。"
+            "effective_time_seconds: "
+            f"{int(conditions.get('effective_time_seconds', 0))}。"
+            f"当前问题: {problem_context or '未记录用户问题摘要'}。"
+            "模型判断优先级最高：必须先核对问题仍未解决、提醒与当前问题匹配、"
+            "当前不是单纯等待，并判断外援是否确实值得调用。只有模型审核通过后"
+            "才可根据 AgentRelay Skill 调用；审核不通过就忽略本提醒并继续正常处理。"
+            "Hook 不会调用 agent_relay.py；用户消息候选只来自保守的直接行动句式预筛选，"
+            "单独出现 DeepSeek 或 AgentRelay 字样不能触发。"
+        )
+
+    additional_context = "\n".join(notices)
 
     if hook_event_name == "Stop":
         output = {
@@ -1484,11 +1891,18 @@ def emit_relay_trigger(state, hook_event_name="PostToolUse"):
     print(json.dumps(output, ensure_ascii=False), flush=True)
 
     # 显式行动候选是一次性消息，不消耗当前问题未来的计数门槛提醒。
-    if not conditions.get("explicit_candidate"):
+    if relay_due and not conditions.get("explicit_candidate"):
         state["relay_signal_emitted"] = True
         state["relay_signal_problem_id"] = state.get(
             "problem_id"
         )
+
+    if archive_due:
+        state["archive_signal_emitted"] = True
+        state["archive_signal_problem_id"] = state.get(
+            "problem_id"
+        )
+
     state["explicit_relay_candidate"] = False
 
     write_state(state, session_id=state.get("session_id"))
@@ -1554,6 +1968,9 @@ def create_new_problem(
         effective_time = 0
         weight = 1
         relay_triggered = false
+
+    如果当前项目归档里保守命中同一问题，则只把起始权重抬到 2，
+    让 Hook 先提醒 Agent 查询归档；不会直接抬到 3 或调用支援模型。
     """
 
     problem_id = (
@@ -1567,7 +1984,6 @@ def create_new_problem(
 
     state["problem_active"] = True
     state["problem_status"] = "active"
-    state["weight"] = 1
 
     state["problem_id"] = (
         problem_id
@@ -1579,6 +1995,15 @@ def create_new_problem(
     state["updated_at"] = iso_now()
 
     normalized_prompt = normalize_text(prompt)
+    archive_match = find_archive_recurrence(
+        normalized_prompt,
+    )
+    if archive_match:
+        state["archive_match"] = archive_match
+        state["weight_floor"] = ARCHIVE_REMINDER_WEIGHT
+
+    update_weight_from_time(state, 0)
+
     state["initial_prompt"] = normalized_prompt
     state["last_prompt"] = normalized_prompt
     state["problem_prompts"] = (
@@ -1597,9 +2022,9 @@ def create_new_problem(
         "problem_new",
         {
             "problem_id": problem_id,
-            "prompt": normalize_text(
-                prompt
-            ),
+            "prompt": normalized_prompt,
+            "weight": state.get("weight", 1),
+            "archive_match": archive_match,
         },
     )
 
@@ -1954,7 +2379,10 @@ def confirm_relay_success(reason=None, session_id=None, task_id=None):
         state["round_effective_time_seconds"] = 0.0
         state["effective_time_seconds"] = 0.0
         state["retry_count"] = 0
-        state["weight"] = 1
+        # 专家调用完成即开启新轮次；归档提醒已经完成，不再保留复发
+        # 权重下限。归档匹配元数据仍保留，便于审计。
+        state["weight_floor"] = 1
+        update_weight_from_time(state, 0)
         state["relay_signal_emitted"] = False
         state["relay_signal_problem_id"] = None
         state["relay_collaboration_active"] = True
@@ -2390,10 +2818,16 @@ def handle_post_tool_use(
         # Weight
         # ====================================================
 
-        state["weight"] = calculate_weight(float(
-            state.get("round_effective_time_seconds",
-                      state.get("effective_time_seconds", 0)) or 0
-        ))
+        update_weight_from_time(
+            state,
+            float(
+                state.get(
+                    "round_effective_time_seconds",
+                    state.get("effective_time_seconds", 0),
+                )
+                or 0
+            ),
+        )
 
         # ====================================================
         # 工具失败统计
