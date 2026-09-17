@@ -2797,6 +2797,22 @@ def create_browser_context(
 # 主业务
 # ============================================================
 
+# 异常回复模板：命中说明网站风控降级/拒答，不是真实回答，
+# 自动路径会刷新页面重新询问
+ABNORMAL_REPLY_MAX_ATTEMPTS = 3
+ABNORMAL_REPLY_PATTERNS = (
+    r"我无法回答这个问题",
+    r"我们换一个话题聊聊",
+)
+
+
+def is_abnormal_reply(text: str) -> bool:
+    normalized = " ".join(str(text or "").split())
+    return any(
+        re.search(p, normalized) for p in ABNORMAL_REPLY_PATTERNS
+    )
+
+
 def run_provider(
         question,
         mode,
@@ -3027,82 +3043,102 @@ def run_provider(
                 for p in final_images:
                     print(f"   - {p}")
 
-            try:
-                adapter.send_message(
-                    page,
-                    question,
-                    image_path=final_images if final_images else None
-                )
-
-                if creating_new_session:
-                    deadline = time.monotonic() + 15
-                    target = adapter.current_session(
+            for attempt in range(1, ABNORMAL_REPLY_MAX_ATTEMPTS + 1):
+                try:
+                    adapter.send_message(
                         page,
-                        adapter.canonical_session_title(mode),
+                        question,
+                        image_path=final_images if final_images else None
                     )
-                    while target is None and time.monotonic() < deadline:
-                        page.wait_for_timeout(200)
+
+                    if creating_new_session:
+                        deadline = time.monotonic() + 15
                         target = adapter.current_session(
                             page,
                             adapter.canonical_session_title(mode),
                         )
-                    if target is None:
-                        raise RuntimeError("发送后未获得新会话 URL")
+                        while target is None and time.monotonic() < deadline:
+                            page.wait_for_timeout(200)
+                            target = adapter.current_session(
+                                page,
+                                adapter.canonical_session_title(mode),
+                            )
+                        if target is None:
+                            raise RuntimeError("发送后未获得新会话 URL")
 
-                # ------------------------------------------------
-                # 等待 AI 回复
-                # ------------------------------------------------
+                    # ------------------------------------------------
+                    # 等待 AI 回复
+                    # ------------------------------------------------
 
-                success = (
-                    adapter.wait_for_response(
-                        page,
-                        question=question,
-                        timeout=timeout,
+                    success = (
+                        adapter.wait_for_response(
+                            page,
+                            question=question,
+                            timeout=timeout,
+                        )
                     )
-                )
-            finally:
-                # 无论成功、风控拦截还是出错，都回写登录状态
-                # （含用户手动完成验证后的放行凭证）
-                if getattr(adapter, "refresh_state", False):
-                    try:
+
+                    if not success:
+                        print(
+                            "\n❌ AI 回复等待失败或超时"
+                        )
+
+                        # 即使超时，也尝试获取当前已经生成的内容
+                        print(
+                            "⚠️ 尝试获取当前已经生成的内容..."
+                        )
+
+                    # ------------------------------------------------
+                    # 提取回复
+                    # ------------------------------------------------
+
+                    answer, full_content = (
+                        adapter.extract_latest_answer(
+                            page,
+                            question
+                        )
+                    )
+
+                    # 命中异常回复模板（如千问风控拒答）时：
+                    # 刷新页面重新询问
+                    if success and is_abnormal_reply(answer):
+                        if attempt < ABNORMAL_REPLY_MAX_ATTEMPTS:
+                            print(
+                                "\n⚠️ 检测到异常回复（疑似风控拒答），"
+                                "刷新页面后重新询问…"
+                            )
+                            try:
+                                page.reload(wait_until="domcontentloaded")
+                                page.wait_for_timeout(3000)
+                            except Exception as exc:
+                                print(f"⚠️ 刷新页面失败：{exc}")
+                            continue
+                        print(
+                            "\n⚠️ 多次尝试仍返回异常回复，放弃重试"
+                        )
+                    break
+                finally:
+                    # 无论成功、风控拦截还是出错，都回写登录状态
+                    # （含用户手动完成验证后的放行凭证）
+                    if getattr(adapter, "refresh_state", False):
                         try:
-                            from .agent_relay_login import (
-                                save_storage_state,
+                            try:
+                                from .agent_relay_login import (
+                                    save_storage_state,
+                                )
+                            except ImportError:
+                                from agent_relay_login import (
+                                    save_storage_state,
+                                )
+                            save_storage_state(context, state_file)
+                            debug_log(
+                                f"Provider {adapter.name} 登录状态已回写"
                             )
-                        except ImportError:
-                            from agent_relay_login import (
-                                save_storage_state,
+                        except Exception as exc:
+                            log_error(
+                                f"回写登录状态失败 "
+                                f"provider={adapter.name}: {exc}"
                             )
-                        save_storage_state(context, state_file)
-                        debug_log(
-                            f"Provider {adapter.name} 登录状态已回写"
-                        )
-                    except Exception as exc:
-                        log_error(
-                            f"回写登录状态失败 "
-                            f"provider={adapter.name}: {exc}"
-                        )
-
-            if not success:
-                print(
-                    "\n❌ AI 回复等待失败或超时"
-                )
-
-                # 即使超时，也尝试获取当前已经生成的内容
-                print(
-                    "⚠️ 尝试获取当前已经生成的内容..."
-                )
-
-            # ------------------------------------------------
-            # 提取回复
-            # ------------------------------------------------
-
-            answer, full_content = (
-                adapter.extract_latest_answer(
-                    page,
-                    question
-                )
-            )
 
             if creating_new_session:
                 canonical_title = adapter.canonical_session_title(mode)
