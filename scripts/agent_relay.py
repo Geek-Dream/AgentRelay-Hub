@@ -896,6 +896,13 @@ from pathlib import Path
 from typing import List, Optional
 from urllib.parse import urljoin, urlparse
 
+# 以脚本方式直接运行（python agent_relay.py ...）时，本文件同时是
+# __main__ 和模块 "agent_relay"。这里把两者统一，避免 generic_web_adapter
+# 里 from agent_relay import SiteAdapter 再导入出第二份类定义，
+# 导致 ProviderRegistry 的 isinstance 校验失败。
+if __name__ == "__main__":
+    sys.modules.setdefault("agent_relay", sys.modules["__main__"])
+
 try:
     from .agent_relay_runtime import (
         ProviderSpec,
