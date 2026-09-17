@@ -3199,9 +3199,9 @@ def run_provider(
 
 def main():
     try:
-        from .config_manager import apply_config_to_environment
+        from .config_manager import apply_config_to_environment, resolve_conversation_mode
     except ImportError:
-        from config_manager import apply_config_to_environment
+        from config_manager import apply_config_to_environment, resolve_conversation_mode
     apply_config_to_environment()
     parser = argparse.ArgumentParser(
         description="AgentRelay 在线专家模型中继"
@@ -3219,13 +3219,25 @@ def main():
         "--mode",
         choices=[
             "1",
-            "2"
+            "2",
+            "flash",
+            "expert",
+            "hybrid"
         ],
         default=None,
         help=(
-            "模式："
-            "1=极速/图片（默认），"
-            "2=专家/思考"
+            "对话模式：1/flash=极速，2/expert=专家，hybrid=混合。"
+            "不传时按本机配置自动决定：默认极速，同一问题第二次且不带图片时升级专家"
+        )
+    )
+
+    parser.add_argument(
+        "--attempt",
+        type=int,
+        default=1,
+        help=(
+            "当前问题第几次尝试，默认 1。"
+            "传 2 且本次不带图片时，会把默认的极速自动升级为专家"
         )
     )
 
@@ -3335,36 +3347,27 @@ def main():
         return
 
     # ========================================================
-    # 获取模式
+    # 获取模式：先看本次显式指定，再按本机已配置的模式自动决定
     # ========================================================
 
-    if args.mode is not None:
+    attached_images = list(args.image) if args.image else []
+    for _image_index in range(1, 6):
+        if os.environ.get(f"AGENT_RELAY_IMAGE_{_image_index}"):
+            attached_images.append(os.environ[f"AGENT_RELAY_IMAGE_{_image_index}"])
 
-        mode_choice = args.mode
-
-    elif (
-            provider_adapter.session_scope("default")
-            == provider_adapter.session_scope("expert")
-    ):
-        mode_choice = "1"
-        print(
-            f"\n{provider_adapter.name} 使用统一会话，"
-            "无需选择极速/图片/专家模式。"
-        )
-
-    else:
-
-        mode_choice = input(
-            "\n选择模式 "
-            "[1=极速/图片(默认), "
-            "2=专家/思考]: "
-        ).strip()
-
+    resolved_mode, mode_note = resolve_conversation_mode(
+        provider_id=provider_adapter.name,
+        requested=args.mode,
+        has_images=bool(attached_images),
+        attempt=getattr(args, "attempt", 1) or 1,
+    )
     mode = (
         "expert"
-        if mode_choice == "2"
+        if resolved_mode == "expert"
         else "default"
     )
+    if mode_note:
+        print(f"\n[模式] {mode_note}")
 
     print(
         "\n当前模式："

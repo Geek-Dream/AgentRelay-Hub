@@ -90,6 +90,31 @@ python3 scripts/agentrelay_console.py commander-merge task-1 \
 “启用审查官模式”，未批准前不会启动子 Agent。CLI 默认使用文本确认；`--json` 输出可供支持
 勾选项/自定义输入的宿主界面渲染，普通终端仍安全回退为默认确认卡。
 
+这三档怎么分不由固定表格决定：用户指派工作后，由当前任务的审查官（主 Agent，进入 Commander
+后是主审查官）根据真实范围判断——要动几个文件几个模块、是否跨前端后端数据库消息队列、是否
+要装依赖迁移数据重启服务、失败好不好回滚。判断权在审查官，不在用户有没有说“重构”这类字眼；
+拿不准时按低一档处理并说明理由。需要启用 Commander 时默认仍先征求用户确认。
+
+任务完成后会写入本地归档，归档永远和 Skill 放在同一个文件夹：
+
+```text
+<skill>/归档/<项目名>/已完成任务.jsonl
+<skill>/归档/<项目名>/归档.md
+```
+
+例如项目叫 `de` 就是 `<skill>/归档/de/`。模型判断任务已完成并通过验证时自己回写；用户说
+“归档”“记录一下”时也会回写并标记为用户要求。未完成、已回滚、被取消的任务按对应状态记录，
+不会写成“已完成”。归档只保存在 Skill 目录内，不写进用户项目仓库，也不保存 Cookie、密钥、
+登录状态或原始对话。命令：
+
+```bash
+python3 scripts/agent_relay_archive.py add --title "MQ 换 Kafka" --project de \
+  --summary "生产者消费者切到 Kafka，测试通过" --file src/MqSender.java
+python3 scripts/agent_relay_archive.py list --project de
+python3 scripts/agent_relay_archive.py search Kafka --project de
+python3 scripts/agent_relay_archive.py projects
+```
+
 ## 架构 🏗️
 
 ```text
@@ -123,10 +148,22 @@ AgentRelay 的 Hook、Tracker、触发状态和 Skill 是模型无关的。DeepS
 可用的首个 Provider 适配器；后续可以增加千问、OpenAI、Grok 或其他在线模型，而不改变
 AgentRelay 的核心触发链路。
 
-DeepSeek 当前把极速、图片和专家能力统一到同一会话。AgentRelay 会优先使用持久化的
-`session_id/href`；首次运行或绑定失效时扫描左侧对话栏，兼容旧的“极速/图片/专家/思考”
-标题。仍未找到时，发送本次真实问题创建新会话，将其重命名为 `AgentRelay-DeepSeek` 并绑定。
-`-m 1`、图片请求和 `-m 2` 因此都会复用同一个 DeepSeek 会话。
+对话模式由用户在配置中心按网站真实能力勾选，不是按品牌名写死的：
+
+```text
+混合模式     极速和专家合并成一套会话，只有一个识图开关（DeepSeek 网页就是这种）
+极速 + 专家  两套独立会话
+识图能力     每个模式单独勾选，例如 kimi 可能只有极速能发图片、专家不能
+```
+
+默认路由规则：同时启用极速和专家时默认走极速；同一个问题的第二次尝试且本次不带图片时自动
+升级专家；用户说“问专家模式”走专家，说“快速问一下”走极速。指定模式不支持图片时脚本会自动
+换到支持图片的模式，并打印 `[模式]` 回退说明，Agent 必须如实转述。`-m 1`、`-m 2`、
+`-m flash|expert|hybrid` 和 `--attempt 2` 都可以显式指定。只配置混合模式的网站（例如没有
+极速/专家区分的 GPT 网页）不勾识图就不能发图片。
+
+AgentRelay 会优先使用持久化的 `session_id/href`；首次运行或绑定失效时扫描左侧对话栏，兼容
+旧的“极速/图片/专家/思考”标题。仍未找到时发送本次真实问题创建新会话，并按配置重命名后绑定。
 
 通用 Provider Adapter 仍保留独立的会话作用域和能力接口。未来接入千问等网站时，只需新增
 对应 Adapter、Provider 配置及侧栏链接解析规则；不需要修改主调用流程。
