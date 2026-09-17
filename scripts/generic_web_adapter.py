@@ -827,7 +827,13 @@ class GenericWebAdapter(SiteAdapter):
         const square = [...document.querySelectorAll('span[class*="bg-black-button"]')]
             .find(el => {
                 const r = el.getBoundingClientRect();
-                return r.width > 0 && r.width <= 16 && r.height > 0 && r.height <= 16;
+                if (!(r.width > 0 && r.width <= 16 && r.height > 0 && r.height <= 16)) {
+                    return false;
+                }
+                // 隐藏的停止按钮副本（opacity:0 占位）不能算生成中
+                const s = getComputedStyle(el);
+                return s.visibility !== 'hidden' && s.display !== 'none' &&
+                       s.opacity !== '0';
             });
         if (square) return 'generating';
         for (const use of document.querySelectorAll('use')) {
@@ -977,7 +983,13 @@ class GenericWebAdapter(SiteAdapter):
                                document.querySelector('[contenteditable="true"]');
                     if (!el) return '';
                     if (el.tagName === 'TEXTAREA') return el.value || '';
-                    return (el.innerText || '').trim();
+                    const text = (el.innerText || '').trim();
+                    // 有些网站把占位符渲染成真实文本（如千问输入框），
+                    // 与占位文案一致时视为空输入
+                    const ph = (el.getAttribute('data-placeholder') ||
+                                el.getAttribute('aria-placeholder') || '').trim();
+                    if (ph && text === ph) return '';
+                    return text;
                 }
                 """) or "").strip()
         except Exception:
@@ -988,6 +1000,19 @@ class GenericWebAdapter(SiteAdapter):
             return str(page.evaluate(
                 """
                 () => {
+                    const vis = el => {
+                        const r = el.getBoundingClientRect();
+                        return r.width > 0 && r.height > 0;
+                    };
+                    // 千问等网站的问题正文卡片，文本最干净（不含操作图标）
+                    const cards = [...document.querySelectorAll(
+                        '.question-text-card, [class*="question-text"]'
+                    )].filter(el => vis(el) &&
+                                   !el.closest('aside, [class*="sidebar"], nav'));
+                    if (cards.length) {
+                        return (cards[cards.length - 1].innerText || '')
+                            .trim().slice(0, 500);
+                    }
                     const els = [...document.querySelectorAll('[class*="question"]')]
                         .filter(el => {
                             const r = el.getBoundingClientRect();
@@ -1001,14 +1026,81 @@ class GenericWebAdapter(SiteAdapter):
         except Exception:
             return ""
 
+    # ========================================================
+    # 千问专用：回答正文在 #qk-markdown-react，带完成标记 class
+    # ========================================================
+
+    def _is_qianwen(self) -> bool:
+        return "qianwen" in self._host_of(str(self.base_url or ""))
+
+    _QW_MARKDOWN_JS = """
+    () => {
+        const blocks = [...document.querySelectorAll(
+            '#qk-markdown-react, .qk-markdown-react')]
+            .filter(el => {
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+            });
+        if (!blocks.length) return {text: '', complete: false};
+        const el = blocks[blocks.length - 1];
+        const clone = el.cloneNode(true);
+        // 反馈工具栏（复制/点赞等）不属于正文
+        clone.querySelectorAll('[data-answer-feedback-toolbar]')
+            .forEach(n => n.remove());
+        // 末尾"要不要接着聊聊…"追问段：最后一个 hr 之后的内容全部去掉
+        const hrs = [...clone.querySelectorAll('hr')];
+        if (hrs.length) {
+            const lastHr = hrs[hrs.length - 1];
+            const tail = [];
+            let n = lastHr.nextSibling;
+            while (n) { tail.push(n); n = n.nextSibling; }
+            tail.forEach(x => x.remove());
+            lastHr.remove();
+        }
+        return {
+            text: (clone.innerText || '').trim(),
+            complete: el.className.includes('qk-markdown-complete'),
+        };
+    }
+    """
+
+    def _qianwen_markdown(self, page) -> dict:
+        try:
+            result = page.evaluate(self._QW_MARKDOWN_JS)
+            if isinstance(result, dict):
+                return {
+                    "text": str(result.get("text") or ""),
+                    "complete": bool(result.get("complete")),
+                }
+        except Exception:
+            pass
+        return {"text": "", "complete": False}
+
+    def _extract_qianwen_answer(self, page) -> str:
+        return self._qianwen_markdown(page)["text"]
+
     def _wait_content_stable(self, page, question, start, timeout) -> bool:
-        """生成结束后等内容稳定；期间若又开始生成则返回 False 让外层重新监听。"""
+        """生成结束后等内容稳定；期间若又开始生成则返回 False 让外层重新监听。
+
+        千问答复带 qk-markdown-complete 完成标记：正文块存在但未完成时
+        视为仍在生成，防止把流式输出误判为已结束。
+        """
         last_text = ""
         stable = 0
+        qianwen = self._is_qianwen()
         while (time.time() - start) < timeout:
             if self._status(page) == "generating":
                 return False
-            text = self._extract_answer_text(page, question)
+            if qianwen:
+                block = self._qianwen_markdown(page)
+                if block["text"] and not block["complete"]:
+                    stable = 0
+                    last_text = ""
+                    time.sleep(0.5)
+                    continue
+                text = block["text"]
+            else:
+                text = self._extract_answer_text(page, question)
             normalized = self.normalize_text(text)
             if normalized:
                 if text == last_text:
@@ -1029,11 +1121,14 @@ class GenericWebAdapter(SiteAdapter):
 
         对人机验证友好：出现验证时提示用户手动完成并刷新页面，刷新后
         继续监听（页面刷新不会中断监听循环）。
+
+        武装条件：状态为生成中，且输入框里有真实文字或页面已有问题卡片。
+        页面刷新/加载中的"生成中"是噪声（输入为空、没有问题卡片），不会
+        误触发；千问下占位符文本（"向千问提问"）也被视为空输入。
         """
         start = time.time()
-        last_input = ""
-        captured_question = ""
-        generating_since = None
+        last_question = ""
+        armed = False
         wall_hinted = False
         print(
             "\n请在打开的浏览器窗口里自行输入问题并发送，我来监听回答。"
@@ -1055,36 +1150,47 @@ class GenericWebAdapter(SiteAdapter):
                 wall_hinted = False
 
             status = self._status(page)
-            current = self._read_input_text(page)
-            if current:
-                last_input = current
 
-            if status == "generating":
-                if generating_since is None:
-                    generating_since = time.time()
-                    captured_question = last_input
-                    hint = captured_question[:60]
-                    print(
-                        f"\n已检测到你发送问题"
-                        f"{f'：{hint}' if hint else ''}，等待回答完成…"
-                    )
+            if not armed:
+                current = self._read_input_text(page)
+                if status != "generating":
+                    time.sleep(0.3)
+                    continue
+                # 生成中：区分"用户真的发送了"和"页面刷新/加载噪声"
+                question = ""
+                if current:
+                    question = current
+                else:
+                    # 输入已清空但问题卡片已渲染（用户发送后或刷新续答）
+                    question = self._last_question_text(page)
+                if not question:
+                    time.sleep(0.3)
+                    continue
+                armed = True
+                last_question = question
+                print(
+                    f"\n已检测到你发送问题：{last_question[:60]}，"
+                    "等待回答完成…"
+                )
                 time.sleep(0.3)
                 continue
 
-            if generating_since is not None:
-                question = captured_question or self._last_question_text(page)
-                print("回答已结束，等待内容稳定…")
-                if self._wait_content_stable(page, question, start, timeout):
-                    answer, full = self.extract_latest_answer(page, question)
-                    print("\n✅ 已提取回答")
-                    return {
-                        "question": question,
-                        "answer": answer,
-                        "full_content": full,
-                    }
-                # 稳定等待期间又开始生成（用户追问了），继续监听
-                generating_since = None
-                captured_question = ""
+            # 已武装：等待回答完成
+            if status == "generating":
+                time.sleep(0.3)
+                continue
+
+            print("回答已结束，等待内容稳定…")
+            if self._wait_content_stable(page, last_question, start, timeout):
+                answer, full = self.extract_latest_answer(page, last_question)
+                print("\n✅ 已提取回答")
+                return {
+                    "question": last_question,
+                    "answer": answer,
+                    "full_content": full,
+                }
+            # 稳定等待期间又开始生成（用户追问了），回到监听
+            armed = False
             time.sleep(0.3)
 
         raise RuntimeError(
@@ -1234,6 +1340,11 @@ class GenericWebAdapter(SiteAdapter):
             return ""
 
     def _extract_answer_text(self, page, question=None) -> str:
+        # 千问：回答正文固定在 #qk-markdown-react，优先走专用提取
+        if self._is_qianwen():
+            qw = self._extract_qianwen_answer(page)
+            if qw:
+                return qw
         paired = self._extract_question_round(page, question)
         if paired:
             return paired
