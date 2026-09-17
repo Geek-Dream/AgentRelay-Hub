@@ -94,6 +94,7 @@ def default_config() -> dict[str, Any]:
         "web_providers": [],
         "local_providers": [],
         "api_providers": [],
+        "api_router": {"port": 15731},
         "default_provider": "deepseek-web",
         "fallback_providers": [],
     }
@@ -369,9 +370,12 @@ def apply_config_to_environment(home: Path | None = None) -> dict[str, Any]:
     custom_api = []
     for item in config.get("api_providers", []) if isinstance(config.get("api_providers"), list) else []:
         if isinstance(item, dict) and item.get("id") and item.get("endpoint") and item.get("api_key"):
-            custom_api.append({key: item[key] for key in ("id", "endpoint", "api_key", "model", "timeout") if key in item})
+            custom_api.append({key: item[key] for key in ("id", "endpoint", "api_key", "model", "timeout", "format") if key in item})
     if custom_api:
         os.environ.setdefault("AGENTRELAY_API_PROVIDERS_JSON", json.dumps(custom_api, ensure_ascii=False))
+    api_router = config.get("api_router") if isinstance(config.get("api_router"), dict) else {}
+    if api_router.get("port"):
+        os.environ.setdefault("AGENTRELAY_API_ROUTER_PORT", str(int(api_router["port"])))
     fallbacks = config.get("fallback_providers")
     if isinstance(fallbacks, list):
         os.environ.setdefault("AGENTRELAY_COMMANDER_FALLBACK_PROVIDERS", ",".join(map(str, fallbacks)))

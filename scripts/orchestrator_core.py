@@ -1198,6 +1198,7 @@ class WorkflowEngine:
             custom_apis = json.loads(os.environ.get("AGENTRELAY_API_PROVIDERS_JSON", "[]"))
         except json.JSONDecodeError:
             custom_apis = []
+        custom_items = []
         for item in custom_apis if isinstance(custom_apis, list) else []:
             if not isinstance(item, dict):
                 continue
@@ -1206,9 +1207,36 @@ class WorkflowEngine:
             api_key = str(item.get("api_key") or os.environ.get(str(item.get("api_key_env") or ""), "")).strip()
             if not provider_id or not endpoint or not api_key:
                 continue
-            providers[provider_id] = OpenAIAPIProvider(adapter=OpenAICompatibleAdapter(
-                endpoint, api_key=api_key, model=str(item.get("model") or ""),
-                timeout=int(item.get("timeout", 60))))
+            custom_items.append((provider_id, endpoint, api_key, item))
+
+        # 上游原生格式不是 chat 的供应商（responses / anthropic）走内置
+        # 协议路由做双向转换；chat 格式直连上游，不起路由
+        routed = [entry for entry in custom_items
+                  if str(entry[3].get("format") or "chat") != "chat"]
+        router_url = None
+        if routed:
+            try:
+                from .api_format_router import ensure_router
+            except ImportError:
+                from api_format_router import ensure_router
+            router_url = ensure_router([
+                {"id": pid, "endpoint": ep, "api_key": key,
+                 "model": str(it.get("model") or pid),
+                 "format": str(it.get("format") or "chat"),
+                 "timeout": int(it.get("timeout") or 300)}
+                for pid, ep, key, it in routed
+            ])
+
+        for provider_id, endpoint, api_key, item in custom_items:
+            if router_url and str(item.get("format") or "chat") != "chat":
+                # 路由按 model（= provider_id）选择上游并注入密钥
+                providers[provider_id] = OpenAIAPIProvider(adapter=OpenAICompatibleAdapter(
+                    router_url, api_key="", model=provider_id,
+                    timeout=int(item.get("timeout", 60))))
+            else:
+                providers[provider_id] = OpenAIAPIProvider(adapter=OpenAICompatibleAdapter(
+                    endpoint, api_key=api_key, model=str(item.get("model") or ""),
+                    timeout=int(item.get("timeout", 60))))
         return cls(orchestrator=orchestrator, runtime_dir=runtime_dir,
                    provider_options=providers, enable_local_model=bool(local_endpoint))
 
