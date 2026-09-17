@@ -113,6 +113,67 @@ def default_conversation_titles(provider_id: str) -> dict[str, str]:
     return {"flash": f"{root}-Flash", "expert": f"{root}-Expert", "hybrid": root}
 
 
+CONVERSATION_MODES = ("flash", "expert", "hybrid")
+
+
+def normalize_conversation(provider_id: str, conversation: object) -> dict[str, Any]:
+    """统一会话能力 schema。
+
+    `modes` 决定启用了哪些对话模式；`images` 是**每个模式独立**的识图能力。
+    混合模式表示把极速和专家合并成一套会话，因此它会取代单独勾选的极速/专家。
+    旧版只有 `supports_*` 布尔字段，这里负责迁移，不改动用户的自定义会话名。
+    """
+    raw = conversation if isinstance(conversation, dict) else {}
+    default_titles = default_conversation_titles(provider_id)
+    titles = raw.get("titles")
+    if not isinstance(titles, dict):
+        titles = {}
+    # 早期版本把 DeepSeek 的默认命名写进了所有网页 Provider，这里修掉。
+    old_deepseek_titles = default_conversation_titles("deepseek-web")
+    if provider_id != "deepseek-web" and all(
+        str(titles.get(key) or "") == value for key, value in old_deepseek_titles.items()
+    ):
+        titles = {}
+
+    is_builtin_deepseek = provider_id == "deepseek-web"
+    legacy_hybrid = bool(raw.get("supports_hybrid", is_builtin_deepseek))
+    legacy_flash = bool(raw.get("supports_flash", is_builtin_deepseek))
+    legacy_expert = bool(raw.get("supports_expert", is_builtin_deepseek))
+    legacy_images = bool(raw.get("supports_images", is_builtin_deepseek))
+
+    raw_modes = raw.get("modes")
+    if isinstance(raw_modes, (list, tuple)) and raw_modes:
+        wanted = {str(item).strip().lower() for item in raw_modes}
+        modes = [mode for mode in CONVERSATION_MODES if mode in wanted]
+    elif legacy_hybrid:
+        # 混合模式本身就等于极速 + 专家，不再重复列出单独模式。
+        modes = ["hybrid"]
+    else:
+        modes = [mode for mode, enabled in (("flash", legacy_flash), ("expert", legacy_expert)) if enabled]
+    if not modes:
+        modes = ["hybrid"]
+
+    raw_images = raw.get("images")
+    images: dict[str, bool] = {}
+    for mode in modes:
+        if isinstance(raw_images, dict):
+            images[mode] = bool(raw_images.get(mode, False))
+        else:
+            images[mode] = legacy_images
+
+    return {
+        "modes": modes,
+        "images": images,
+        "create_if_missing": bool(raw.get("create_if_missing", True)),
+        "titles": {key: str(titles.get(key) or default_titles[key]) for key in default_titles},
+        # 派生字段：旧读取方仍然能工作。
+        "supports_flash": "flash" in modes,
+        "supports_expert": "expert" in modes,
+        "supports_hybrid": "hybrid" in modes,
+        "supports_images": any(images.values()),
+    }
+
+
 def _normalize_web_provider(item: object) -> dict[str, Any] | None:
     """补齐网页 Provider 的统一 schema，并兼容旧版 url 字段。"""
     if not isinstance(item, dict):
@@ -122,19 +183,6 @@ def _normalize_web_provider(item: object) -> dict[str, Any] | None:
         return None
     name = str(item.get("name") or provider_id)
     base_url = str(item.get("base_url") or item.get("url") or "").strip()
-    conversation = item.get("conversation")
-    if not isinstance(conversation, dict):
-        conversation = {}
-    default_titles = default_conversation_titles(provider_id)
-    titles = conversation.get("titles")
-    if not isinstance(titles, dict):
-        titles = {}
-    old_deepseek_titles = default_conversation_titles("deepseek-web")
-    if provider_id != "deepseek-web" and all(
-        str(titles.get(key) or "") == value
-        for key, value in old_deepseek_titles.items()
-    ):
-        titles = {}
     normalized = {
         **item,
         "id": provider_id,
@@ -143,14 +191,7 @@ def _normalize_web_provider(item: object) -> dict[str, Any] | None:
         "base_url": base_url,
         "enabled": bool(item.get("enabled", True)),
         "adapter": str(item.get("adapter") or ("deepseek" if provider_id == "deepseek-web" else "")),
-        "conversation": {
-            "supports_flash": bool(conversation.get("supports_flash", provider_id == "deepseek-web")),
-            "supports_expert": bool(conversation.get("supports_expert", provider_id == "deepseek-web")),
-            "supports_hybrid": bool(conversation.get("supports_hybrid", provider_id == "deepseek-web")),
-            "supports_images": bool(conversation.get("supports_images", provider_id == "deepseek-web")),
-            "create_if_missing": bool(conversation.get("create_if_missing", True)),
-            "titles": {key: str(titles.get(key) or default_titles[key]) for key in default_titles},
-        },
+        "conversation": normalize_conversation(provider_id, item.get("conversation")),
     }
     return normalized
 
@@ -192,6 +233,83 @@ def load_config(home: Path | None = None) -> dict[str, Any]:
     if not (merged["web_providers"] or merged["local_providers"]):
         commander["enabled"] = False
     return merged
+
+
+MODE_ALIASES = {"1": "flash", "2": "expert", "flash": "flash", "expert": "expert",
+                "hybrid": "hybrid", "default": None, "": None}
+
+
+def find_web_provider(config: Mapping[str, Any], provider_id: str) -> dict[str, Any] | None:
+    """按 id 找网页 Provider，兼容 `deepseek` 与 `deepseek-web` 两种写法。"""
+    wanted = {str(provider_id or "").strip().lower()}
+    wanted |= {f"{item}-web" for item in list(wanted) if item and not item.endswith("-web")}
+    wanted |= {item.removesuffix("-web") for item in list(wanted) if item.endswith("-web")}
+    for item in config.get("web_providers", []) or []:
+        if not isinstance(item, dict):
+            continue
+        candidate = str(item.get("id") or "").strip().lower()
+        if candidate in wanted:
+            return item
+    return None
+
+
+def resolve_conversation_mode(
+    *,
+    provider_id: str = "deepseek-web",
+    requested: str | None = None,
+    has_images: bool = False,
+    attempt: int = 1,
+    home: Path | None = None,
+) -> tuple[str, str]:
+    """按配置决定本次该走极速、专家还是混合模式。
+
+    默认规则（按用户定稿）：
+
+    - 同时启用了极速和专家时，默认走极速；
+    - 同一个问题第二次尝试、且这次不带图片时，升级到专家；
+    - 用户明确要求“问专家”走专家，“快速问一下”走极速；
+    - 混合模式把极速和专家合并成一套会话，只保留识图开关；
+    - 识图能力按模式分别判断，指定模式不支持图片时自动换到支持图片的模式。
+
+    返回 ``(mode, 说明)``；说明用于让 Agent 知道是否发生了回退。
+    """
+    config = load_config(home)
+    entry = find_web_provider(config, provider_id) or {}
+    conversation = normalize_conversation(provider_id, entry.get("conversation"))
+    modes = conversation["modes"]
+    images = conversation["images"]
+    note = ""
+
+    normalized_request = MODE_ALIASES.get(str(requested).strip().lower(), str(requested).strip().lower()) \
+        if requested is not None else None
+    candidate: str | None = None
+    if normalized_request in modes:
+        candidate = normalized_request
+    elif normalized_request in CONVERSATION_MODES:
+        note = f"配置里没有启用 {normalized_request} 模式，已改用可用模式。"
+
+    if candidate is None:
+        if "flash" in modes:
+            candidate = "flash"
+        elif "hybrid" in modes:
+            candidate = "hybrid"
+        else:
+            candidate = modes[0]
+        # 第二次尝试且不带图片：默认极速升级到专家。
+        if (not has_images and int(attempt or 1) >= 2 and candidate == "flash"
+                and "expert" in modes):
+            candidate = "expert"
+            note = "同一问题第二次尝试，已升级到专家模式。"
+
+    if has_images and not images.get(candidate, False):
+        fallback = next((mode for mode in ("flash", "hybrid", "expert")
+                         if mode in modes and images.get(mode, False)), None)
+        if fallback:
+            note = (note + " " if note else "") + f"{candidate} 模式不支持图片，已改用 {fallback} 模式。"
+            candidate = fallback
+        else:
+            note = (note + " " if note else "") + "当前没有任何已启用模式支持图片，本次不能转发图片。"
+    return candidate, note.strip()
 
 
 def save_config(value: Mapping[str, Any], home: Path | None = None) -> Path:

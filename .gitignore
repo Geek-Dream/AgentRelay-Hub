@@ -41,6 +41,8 @@ agentrelay-env/
 **/config/
 *.enc
 /tests/
+归档/
+/skills/agent-relay/归档/
 .DS_Store
 .idea/
 .vscode/
