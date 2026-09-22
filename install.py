@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import argparse
+import base64
 import getpass
 import re
 import threading
@@ -554,6 +555,41 @@ def _guess_vision_support(model: str) -> bool:
     return any(marker in name for marker in markers)
 
 
+# 1x1 像素的 PNG，用于真实探测本地模型是否真的接受图片输入。
+_VISION_PROBE_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+
+def _probe_vision(endpoint: str, model: str, api_key: str = "") -> tuple[bool, str]:
+    """发一张 1x1 小图实测模型是否接受图片输入，不输出响应内容。"""
+    target = endpoint.rstrip("/")
+    if not target.endswith("/chat/completions"):
+        target += "/chat/completions"
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "图里有几个圆？只回答数字"},
+            {"type": "image_url", "image_url": {
+                "url": f"data:image/png;base64,{_VISION_PROBE_PNG_BASE64}"}},
+        ]}],
+        "max_tokens": 8,
+    }
+    try:
+        with urlopen(Request(target, data=json.dumps(payload).encode("utf-8"),
+                             headers=headers, method="POST"), timeout=45) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        answer = (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "")
+        if isinstance(answer, list):
+            answer = "".join(str(part.get("text", "")) for part in answer if isinstance(part, dict))
+        return bool(str(answer).strip()), "识图探测成功" if answer else "识图探测未返回内容"
+    except Exception as exc:  # noqa: BLE001 - 探测失败只影响能力标记
+        return False, f"识图探测失败：{type(exc).__name__}"
+
+
 def _configure_local(config: dict) -> None:
     print("\n本地模型配置")
     print("支持 Ollama、llama.cpp、vLLM、LM Studio 等 OpenAI 兼容接口；本地模型始终单并发。")
@@ -585,9 +621,6 @@ def _configure_local(config: dict) -> None:
     model = _ask("模型名称", default_model)
     alias = _ask("本地模型别名", model)
     queue_timeout = _ask("最多等待多少秒（超过后改走线上或离线规则）", "30")
-    vision_guess = _guess_vision_support(model)
-    vision_hint = "模型名看起来像多模态" if vision_guess else "模型名看不出多模态能力"
-    vision = _yes_no(f"该模型是否支持图片识别（{vision_hint}，agent-image 只会用支持识图的本地模型）", vision_guess)
     if not _valid_url(endpoint):
         print("接口地址无效，已跳过。")
         return
@@ -597,6 +630,17 @@ def _configure_local(config: dict) -> None:
         return
     if models and model not in models:
         model = _ask("未发现该模型，请输入实际模型名", models[0])
+    if ok:
+        # 服务可达时实测是否接受图片输入，结果直接决定 vision 标记。
+        vision, vision_message = _probe_vision(endpoint, model)
+        print(f"{vision_message}：{'支持' if vision else '不支持'}图片识别（agent-image 只会调用标记为支持识图的本地模型）。")
+        if not vision and _guess_vision_support(model) and _yes_no("模型名像是多模态，仍标记为支持识图", False):
+            vision = True
+    else:
+        # 服务不可达时退回模型名猜测，并向用户确认。
+        vision_guess = _guess_vision_support(model)
+        vision_hint = "模型名看起来像多模态" if vision_guess else "模型名看不出多模态能力"
+        vision = _yes_no(f"该模型是否支持图片识别（{vision_hint}）", vision_guess)
     local_entries = config.setdefault("local_providers", [])
     if not isinstance(local_entries, list):
         local_entries = []

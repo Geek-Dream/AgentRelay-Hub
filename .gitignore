@@ -43,6 +43,7 @@ agentrelay-env/
 /tests/
 归档/
 /skills/agent-relay/归档/
+/skills/agent-image/cache/
 .DS_Store
 .idea/
 .vscode/
