@@ -115,6 +115,16 @@ def default_conversation_titles(provider_id: str) -> dict[str, str]:
 
 CONVERSATION_MODES = ("flash", "expert", "hybrid")
 
+# 这些站点的网页版识图限时限量（例如 GPT 免费识图按次限量），默认不当作
+# 支持图片；用户后续在配置中心显式勾选后才会启用。
+KNOWN_NO_IMAGE_DEFAULTS = ("gpt", "openai", "chatgpt")
+
+
+def _known_image_disabled_by_default(provider_id: str) -> bool:
+    raw = provider_id.strip().lower().removesuffix("-web")
+    parts = raw.replace("_", "-").split("-")
+    return any(token in parts or token in raw for token in KNOWN_NO_IMAGE_DEFAULTS)
+
 
 def normalize_conversation(provider_id: str, conversation: object) -> dict[str, Any]:
     """统一会话能力 schema。
@@ -160,6 +170,12 @@ def normalize_conversation(provider_id: str, conversation: object) -> dict[str, 
             images[mode] = bool(raw_images.get(mode, False))
         else:
             images[mode] = legacy_images
+
+    # GPT 网页版的识图能力限时限量，默认按不支持处理：只有用户在配置里
+    # 显式按模式勾选过图片能力（raw 里带 images 字典）时才尊重该设置，
+    # 旧的 supports_images 迁移标记对这类站点不生效。
+    if not isinstance(raw_images, dict) and _known_image_disabled_by_default(provider_id):
+        images = {mode: False for mode in modes}
 
     return {
         "modes": modes,

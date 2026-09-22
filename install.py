@@ -29,6 +29,7 @@ CODEX_HOME = Path(
 ).expanduser()
 TARGET_HOOKS = CODEX_HOME / "hooks"
 TARGET_SKILL = CODEX_HOME / "skills" / "agent-relay"
+TARGET_IMAGE_SKILL = CODEX_HOME / "skills" / "agent-image"
 HOOKS_JSON = CODEX_HOME / "hooks.json"
 VENV_DIR = CODEX_HOME / "agentrelay-env"
 VENV_PYTHON = (
@@ -44,6 +45,8 @@ HOOK_FILES = (
     "agent_relay_tracker.py",
 )
 SKILL_FILES = ("SKILL.md",)
+IMAGE_SKILL_FILES = ("SKILL.md",)
+IMAGE_SCRIPT_FILES = ("agent_image.py",)
 SCRIPT_FILES = (
     "agent_relay.py",
     "agent_relay_login.py",
@@ -158,6 +161,18 @@ def install_files() -> None:
         install_managed_file(
             PROJECT_ROOT / "skills" / "agent-relay" / "references" / filename,
             TARGET_SKILL / "references" / filename,
+        )
+
+    for filename in IMAGE_SKILL_FILES:
+        install_managed_file(
+            PROJECT_ROOT / "skills" / "agent-image" / filename,
+            TARGET_IMAGE_SKILL / filename,
+        )
+
+    for filename in IMAGE_SCRIPT_FILES:
+        install_managed_file(
+            PROJECT_ROOT / "scripts" / filename,
+            TARGET_IMAGE_SKILL / "scripts" / filename,
         )
 
 
@@ -528,6 +543,17 @@ def _configure_web(config: dict) -> None:
         print(f"已保存 {label} 配置。")
 
 
+def _guess_vision_support(model: str) -> bool:
+    """按模型名保守猜测是否支持图片输入；不确定时返回 False。"""
+    name = (model or "").lower()
+    markers = (
+        "-vl", "vl-", "vision", "llava", "bakllava", "moondream",
+        "minicpm-v", "pixtral", "internvl", "glm-4v", "qwen2-vl",
+        "qwen2.5-vl", "qwen3-vl", "gemma-3-vision", "aio-vision",
+    )
+    return any(marker in name for marker in markers)
+
+
 def _configure_local(config: dict) -> None:
     print("\n本地模型配置")
     print("支持 Ollama、llama.cpp、vLLM、LM Studio 等 OpenAI 兼容接口；本地模型始终单并发。")
@@ -559,6 +585,9 @@ def _configure_local(config: dict) -> None:
     model = _ask("模型名称", default_model)
     alias = _ask("本地模型别名", model)
     queue_timeout = _ask("最多等待多少秒（超过后改走线上或离线规则）", "30")
+    vision_guess = _guess_vision_support(model)
+    vision_hint = "模型名看起来像多模态" if vision_guess else "模型名看不出多模态能力"
+    vision = _yes_no(f"该模型是否支持图片识别（{vision_hint}，agent-image 只会用支持识图的本地模型）", vision_guess)
     if not _valid_url(endpoint):
         print("接口地址无效，已跳过。")
         return
@@ -573,8 +602,11 @@ def _configure_local(config: dict) -> None:
         local_entries = []
         config["local_providers"] = local_entries
     local_entries[:] = [{"id": alias, "name": alias, "endpoint": endpoint,
-        "model": model, "enabled": True, "queue_timeout": int(queue_timeout or 30)}]
+        "model": model, "enabled": True, "queue_timeout": int(queue_timeout or 30),
+        "vision": bool(vision)}]
     print("已保存本地模型配置。首次调用时会再次检查服务是否启动。")
+    if not vision:
+        print("该模型未标记图片识别能力：普通文字任务仍可使用，agent-image 不会把图片发给它。")
 
 
 def _configure_api(config: dict) -> None:

@@ -184,6 +184,35 @@ AgentRelay 会优先使用持久化的 `session_id/href`；首次运行或绑定
 通用 Provider Adapter 仍保留独立的会话作用域和能力接口。未来接入千问等网站时，只需新增
 对应 Adapter、Provider 配置及侧栏链接解析规则；不需要修改主调用流程。
 
+## AgentImage 图片识别中继 🖼️
+
+AgentImage（`agent-image`）是 AgentRelay 的图片识别中继，和 agent-relay 平级的第二个
+Skill。本地 Agent 模型不支持图片识别时，用户输入 `agent-image`，Agent 会把图片文件发给
+当前已配置、支持识图的在线模型（默认 DeepSeek），把拿到的详细描述转述给用户。
+纯用户主动触发，不做 Hook 集成。
+
+```bash
+python3 scripts/agent_image.py /path/to/image1.png /path/to/image2.jpg
+```
+
+Provider 选择顺序：
+
+```text
+1. --provider 显式指定且支持识图的网页 Provider
+2. 默认网页 Provider（支持识图时，例如 DeepSeek 混合模式）
+3. 任意已启用且支持识图的网页 Provider
+4. 安装时标记 vision=true 的本地模型（OpenAI 兼容接口直接调用）
+5. 都不支持：打印说明并正常退出，由调用方 Agent 自行处理
+```
+
+能力约定：
+
+- **网页模型**：识图能力按站点真实能力在配置中心按模式勾选。DeepSeek 混合模式默认支持
+  图片；GPT 网页版识图限时限量，默认按不支持处理，显式勾选后才启用。
+- **本地模型**：install.py 配置本地模型时按模型名保守猜测并询问用户是否支持图片识别，
+  结果以 `vision` 字段保存；未标记的本地模型不会被 agent-image 调用。
+- 调用失败或未配置时脚本始终正常退出（exit 0）并说明原因，图片不会被静默丢弃或误发。
+
 ## Requirements 🛠️
 
 - Codex CLI（当前稳定版本）
