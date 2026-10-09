@@ -2,7 +2,8 @@
 
 **AgentRelay - A local AI relay layer for Codex CLI, connecting your coding agent with external expert models.**
 
-AgentRelay 是 Codex 的自动专家代理中继系统。它通过 Codex Hook 观察问题处理过程，
+AgentRelay 是面向多种 coding Agent 的自动专家代理中继系统（Codex、Claude Code、Pi、Hermes 完整支持；
+OpenCode 仅 Skill）。它通过 Agent 的 Hook 观察问题处理过程，
 在重复失败或长时间调试时向 Agent 提供触发上下文，由 Agent 决定是否请求在线专家模型的
 第二意见。
 
@@ -33,6 +34,19 @@ Hook 到达 `weight = 2` 时每个问题只发一次“本地归档提醒”，�
 `agent_relay_archive.py search` 查同类问题；到 `weight = 3`，或 `retry_count >= 3`
 时才发出候选求援提醒。两类提醒都只是候选材料，最终仍由 Agent 判断；归档匹配同样需要在当前
 环境重新验证，不能直接照抄旧结论。
+
+候选求援提醒按升级阶梯重发，避免模型放弃后陷入死循环却无人介入：
+
+```text
+第 1 次提醒（retry >= 3 或有效时间 >= 15 分钟） -> 等待 10 分钟
+第 2 次提醒（第 1 次被放弃）                     -> 等待 5 分钟
+第 3 次提醒（最后一次）                          -> 等待 5 分钟
+强制执行（第 3 次仍无响应）                      -> Hook 直接代为调用
+```
+
+“放弃”指问题仍未解决且未进入外援协作；期间重试回落（模型已换方向取得进展）、问题
+解决或已发起协作都会中断阶梯。强制执行由 Hook 后台启动 `agent_relay.py`（Playwright
+打开浏览器调用在线模型），结果就绪后自动注入后续上下文；每个问题只强制执行一次。
 
 ### Commander 与模型配置 🧠
 
@@ -229,12 +243,30 @@ cd AgentRelay-Hub
 python3 install.py
 ```
 
-直接在终端运行 `python3 install.py` 会打开本机网页配置中心。页面分为总览、Commander、线上模型、
+直接在终端运行 `python3 install.py`，打开后**会立即在终端提示选择安装目标 Agent**
+（输入编号、逗号分隔；已检测到的 Agent 会标注并默认勾选）。选完后安装器会为每个目标安装
+Skill、注册 Hook，并立即逐项验证（Skill 就位、Hook 配置已注册、Hook 干跑一个合成事件、
+Tracker 可读），验证结果直接打印在终端。随后自动打开网页配置中心，完成模型登录等后续配置；
+网页总览页的“安装目标 Agent”卡片也可以随时补装或调整目标。非交互环境（脚本/CI）可用
+`python3 install.py --targets codex,claude,pi,hermes` 跳过提示。Codex 始终安装。
+
+| Agent | 支持级别 | Hook 注册位置 |
+|---|---|---|
+| Codex CLI | 完整（Hook 计时、提醒、上下文注入） | `$CODEX_HOME/hooks.json` |
+| Claude Code | 完整 | `~/.claude/settings.json` 的 hooks 块 |
+| Kimi Code | 完整（提醒经 Stop 事件注入，失败重试经 PostToolUseFailure 计数） | `$KIMI_CODE_HOME/config.toml` 的 `[[hooks]]` |
+| Pi | 完整 | `~/.pi/agent/extensions/agent-relay.ts` |
+| Hermes | 完整（首次触发 Hook 时需在终端确认 consent） | `~/.hermes/config.yaml` 的 hooks 块 |
+| OpenCode | 仅 Skill（OpenCode 没有 prompt 提交时注入上下文的 Hook 事件，自动提醒不可用） | 无 |
+| deepseek-cli | 不支持（没有任何 Hook、插件或 Skill 机制） | 无 |
+
+配置中心页面分为总览、Commander、线上模型、
 本地模型、API 模型和安全配置几个区域，可以初始化环境、检查 Codex/Skill/Hook、扫描本地服务、增删启停多个 Provider、设置默认
 网页模型、测试接口，以及配置网页模型的混合/极速/专家会话名称和图片能力。会话名会由别名自动生成，例如 `qianwen` 会生成
 `AgentRelay-Qianwen-Flash` 和 `AgentRelay-Qianwen-Expert`；混合模式使用一套统一会话，名称默认为
 `AgentRelay-品牌名`（例如 `AgentRelay-DeepSeek`），同时处理极速和专家提问。网页登录完成后，关闭登录的对话标签页即可自动加密保存 Cookie，配置页会显示“登录状态已保存”。本地扫描支持 Ollama、LM Studio、vLLM 和 llama.cpp。配置完成后点击“完成并关闭”，
-本地服务会立即停止，不会常驻后台；需要纯终端入口时运行 `python3 install.py --menu`。
+本地配置网页服务会立即停止——**AgentRelay 没有任何后台常驻进程**：Hook 只在对应 Agent 会话运行时被
+Agent 自身拉起执行，在线模型也只在被调用那一刻临时打开浏览器。需要纯终端入口时运行 `python3 install.py --menu`。
 
 网页配置中心是手动 Provider 管理平台：已保存 Provider 会明确显示“已经可以自动对话”或“只保存了网页登录状态，暂时不能自动对话”，
 不会因为填了网址就假装千问、Kimi 等网站已经接通。DeepSeek 当前已内置自动操作规则，默认作为混合模型，支持极速、
@@ -243,14 +275,18 @@ python3 install.py
 旧版只保存 DeepSeek 登录状态的安装会在首次打开配置中心或运行 Skill 时自动迁移到统一加密 Provider 配置；
 迁移成功后会删除旧明文状态文件，不需要重新登录。
 
-安装器支持 `CODEX_HOME`；未设置时使用 `$HOME/.codex`。它会：
+安装器支持 `CODEX_HOME`；未设置时使用 `$HOME/.codex`（虚拟环境、Tracker 状态和加密配置
+始终保存在这个目录，多目标共享）。它会：
 
 - 安装 Hook 到 `$CODEX_HOME/hooks/`
-- 安装 Skill 和脚本到 `$CODEX_HOME/skills/agent-relay/`
+- 安装 Skill 和脚本到 `$CODEX_HOME/skills/agent-relay/`，并按选择复制到其他 Agent 的
+  skills 目录（如 `~/.claude/skills/agent-relay`）
+- 向所选 Agent 注册 Hook：Codex 合并 `hooks.json`，Claude 合并 `~/.claude/settings.json`，
+  Hermes 合并 `~/.hermes/config.yaml`，Pi 生成 `~/.pi/agent/extensions/agent-relay.ts`
 - 创建独立环境 `$CODEX_HOME/agentrelay-env/`
 - 在独立环境中自动安装 requirements 和完整 Chromium
 - 保留用户已有文件
-- 备份并原子合并现有 `hooks.json`，不删除任何已有 Hook
+- 备份并原子合并现有 `hooks.json` / `settings.json` / `config.yaml`，不删除任何已有 Hook
 - 检查 Codex CLI、Python、虚拟环境、Playwright 和 Chromium
 
 Provider、Commander 和队列设置会保存到 `$CODEX_HOME/skills/agent-relay/config/` 下的加密文件，
@@ -296,6 +332,10 @@ $CODEX_HOME/skills/agent-relay/agent_relay_login_state.json.enc
 登录完成后重启 Codex，使其重新加载 `hooks.json`。
 
 ## 安装验证
+
+点击“应用并验证”后，安装器会对每个选中的 Agent 自动执行并展示结果：Skill 文件就位、
+Hook 已写入该 Agent 的配置文件、Hook 干跑一个合成事件确认命令能被正常拉起、Tracker
+`status` 可读。终端菜单模式同样在安装后打印逐项验证结果。
 
 安装完成、登录之前，Skill 目录应包含：
 

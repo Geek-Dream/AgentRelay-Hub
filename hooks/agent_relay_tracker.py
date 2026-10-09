@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import traceback
@@ -67,6 +68,17 @@ ARCHIVE_RECORDS_FILENAME = "已完成任务.jsonl"
 CURRENT_FILE = TRACKER_DIR / "current.json"
 EVENTS_FILE = TRACKER_DIR / "events.jsonl"
 LOCK_FILE = TRACKER_DIR / ".lock"
+
+# 求援提醒升级计划。发出第 n 次提醒后如果模型仍放弃（未发起外援
+# 协作、问题未解决），等待对应秒数进入下一步：
+#
+#   第 1 次提醒 -> 等 600 秒 -> 第 2 次提醒
+#   第 2 次提醒 -> 等 300 秒 -> 第 3 次提醒（最后一次）
+#   第 3 次提醒 -> 等 300 秒 -> Hook 直接强制执行外援调用
+#
+# 强制执行由 Hook 后台启动 agent_relay.py，结果就绪后注入后续上下文。
+RELAY_ESCALATION_WAIT_SECONDS = {1: 600, 2: 300, 3: 300}
+RELAY_MAX_SIGNALS = 3
 
 
 def normalize_agent_id(agent_id):
@@ -393,6 +405,18 @@ def default_state(session_id=None, agent_id=None):
 
         # 触发通知只属于这个问题，避免旧状态污染新问题。
         "relay_signal_problem_id": None,
+
+        # 求援提醒升级阶梯：已发出的提醒次数（0-3）、最近一次提醒的
+        # 时间戳（unix 秒）以及当时的 retry_count。模型放弃提醒后按
+        # RELAY_ESCALATION_WAIT_SECONDS 的间隔升级重发，第 3 次之后
+        # 由 Hook 直接强制执行外援调用。
+        "relay_signal_count": 0,
+        "relay_last_signal_at": None,
+        "relay_signal_retry_count": 0,
+
+        # 强制执行进度：None=未启动，"launched"=后台调用进行中，
+        # "delivered"=结果已注入上下文。
+        "relay_force_state": None,
 
         # weight 达到 2 时是否已经提醒过 Agent 先查本地归档。
         # 只提醒一次，避免每个工具调用都重复刷屏。
@@ -1189,6 +1213,16 @@ def is_error_like_output(value):
         r"失败",
         r"报错",
         r"异常",
+        # Shell 直出错误前缀（无 exit_code 结构时唯一可靠的失败信号），
+        # 例如 zsh:1: no matches found: <...>
+        r"zsh:\d+:",
+        r"bash:\s*\S*:\s*line\s*\d+",
+        r"no matches found",
+        r"command not found",
+        r"permission denied",
+        r"segmentation fault",
+        r"\bfatal:\s",
+        r"\bpanic:",
     ]
 
     for pattern in error_patterns:
@@ -1577,7 +1611,8 @@ def find_archive_recurrence(prompt, workspace=None):
 
 def get_trigger_conditions(state):
     """
-    统一计算是否应向 Agent 发出“考虑首次求援”的候选提醒。
+    统一计算是否应向 Agent 发出“考虑首次求援”的候选提醒，
+    以及提醒被放弃后的升级阶梯（第 2/3 次重发与强制执行）。
 
     Tracker 判断两个可机械验证的计数条件，并对用户消息做保守的
     直接行动句式预筛选：
@@ -1591,7 +1626,10 @@ def get_trigger_conditions(state):
     用户是否真的要求当前调用必须由 Agent 结合语境判断。
 
     即使计数条件满足，Hook 也只发候选提醒；是否值得调用以及是否
-    与当前未解决问题匹配，最终由 Agent 判断。
+    与当前未解决问题匹配，最终由 Agent 判断。首次提醒发出后，若
+    模型放弃（问题仍未解决且未进入外援协作），按
+    RELAY_ESCALATION_WAIT_SECONDS 的间隔升级重发，第 3 次提醒后
+    仍无响应则转为 Hook 直接强制执行（force_due）。
     """
 
     retry_count = int(
@@ -1680,13 +1718,63 @@ def get_trigger_conditions(state):
     )
 
     # 直接行动候选不受计数门槛限制；即使权重和重试为零，也要交给
-    # Agent 审核。计数提醒则只为尚未进入外援协作的问题发送一次。
+    # Agent 审核。计数提醒的升级阶梯：首次提醒后若模型放弃（问题仍
+    # 未解决且未进入外援协作），按 RELAY_ESCALATION_WAIT_SECONDS
+    # 间隔重发第 2、3 次提醒，第 3 次之后转由 Hook 强制执行。
+    signal_count = int(
+        state.get(
+            "relay_signal_count",
+            0,
+        )
+        or 0
+    )
+
+    escalation_due = False
+    force_due = False
+
+    if (
+        state.get("problem_active")
+        and automatic_trigger
+        and not already_triggered
+        and not explicit_candidate
+        and signal_count >= 1
+        and state.get("relay_force_state") is None
+    ):
+        last_signal_at = state.get("relay_last_signal_at")
+        wait_seconds = RELAY_ESCALATION_WAIT_SECONDS.get(
+            signal_count
+        )
+        if (
+            wait_seconds is not None
+            and isinstance(last_signal_at, (int, float))
+            and now_ts() - float(last_signal_at) >= wait_seconds
+            and retry_count
+            >= int(
+                state.get(
+                    "relay_signal_retry_count",
+                    0,
+                )
+                or 0
+            )
+        ):
+            if signal_count >= RELAY_MAX_SIGNALS:
+                force_due = True
+            else:
+                escalation_due = True
+
+    conditions["signal_count"] = signal_count
+    conditions["escalation_due"] = escalation_due
+    conditions["force_due"] = force_due
+
     conditions["should_trigger"] = (
         explicit_candidate
         or (
             automatic_trigger
             and not already_triggered
-            and not signal_emitted
+            and (
+                signal_count == 0
+                or escalation_due
+            )
         )
     )
 
@@ -1720,6 +1808,462 @@ def get_trigger_conditions(state):
 # ============================================================
 # AgentRelay 候选提醒输出
 # ============================================================
+
+def relay_reminder_text(state, conditions):
+    """
+    按升级阶梯级别生成候选提醒文案。
+
+    第 1 次：候选提醒，模型审核后自行决定是否调用。
+    第 2 次：说明已等待 10 分钟，预告第 3 次与强制执行。
+    第 3 次：最后一次提醒，预告 5 分钟后强制执行。
+    """
+
+    level = int(
+        conditions.get(
+            "signal_count",
+            0,
+        )
+        or 0
+    ) + 1
+
+    problem_context = normalize_text(
+        state.get("last_prompt")
+    )
+
+    if len(problem_context) > 500:
+        problem_context = (
+            problem_context[:497]
+            + "..."
+        )
+
+    base = (
+        f"retry_count: {conditions.get('retry_count')}。"
+        "effective_time_seconds: "
+        f"{int(conditions.get('effective_time_seconds', 0))}。"
+        f"当前问题: {problem_context or '未记录用户问题摘要'}。"
+        "模型判断优先级最高：必须先核对问题仍未解决、提醒与当前问题匹配、"
+        "当前不是单纯等待，并判断外援是否确实值得调用。只有模型审核通过后才"
+        "可根据 AgentRelay Skill 调用；审核不通过就忽略本提醒并继续正常处理。"
+    )
+
+    if level <= 1:
+        return (
+            "AgentRelay 候选求援提醒（不是调用命令）。"
+            f"候选原因: {conditions.get('reason')}。"
+            f"{base}"
+            "Hook 不会调用 agent_relay.py；用户消息候选只来自保守的直接行动"
+            "句式预筛选，单独出现 DeepSeek 或 AgentRelay 字样不能触发。"
+        )
+
+    if level == 2:
+        return (
+            "AgentRelay 第 2 次求援提醒（升级）。10 分钟前已发出第 1 次提醒，"
+            f"问题仍未解决且未进入外援协作。{base}"
+            "若本次仍不调用，5 分钟后将发出第 3 次（最后一次）提醒；"
+            "第 3 次提醒后 5 分钟仍无响应，Hook 将直接代为强制执行外援调用，"
+            "不再等待审核。"
+        )
+
+    return (
+        "AgentRelay 第 3 次求援提醒（最后一次）。此前两次提醒均未触发"
+        f"外援协作，问题仍未解决。{base}"
+        "5 分钟后若仍未发起外援协作，Hook 将直接强制执行：由 Hook 代为调用"
+        "在线支援模型，并把回答注入后续上下文，不再等待审核。"
+    )
+
+
+def forced_relay_artifacts(problem_id):
+    """强制执行外援调用的输出与 pid 文件路径。"""
+
+    safe_name = re.sub(
+        r"[^0-9A-Za-z_-]",
+        "_",
+        str(problem_id or "unknown"),
+    )
+    target_dir = TRACKER_DIR / "forced_relay"
+    return (
+        target_dir / f"{safe_name}.out",
+        target_dir / f"{safe_name}.pid",
+    )
+
+
+def find_relay_script():
+    """定位 agent_relay.py，优先使用环境变量指定的路径。"""
+
+    candidates = []
+
+    env_script = os.environ.get(
+        "AGENTRELAY_RELAY_SCRIPT"
+    )
+    if env_script:
+        candidates.append(
+            Path(env_script).expanduser()
+        )
+
+    candidates.append(
+        CODEX_DIR
+        / "skills"
+        / "agent-relay"
+        / "scripts"
+        / "agent_relay.py"
+    )
+    candidates.append(
+        HOME
+        / ".agents"
+        / "skills"
+        / "agent-relay"
+        / "scripts"
+        / "agent_relay.py"
+    )
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    return None
+
+
+def find_relay_python():
+    """定位 AgentRelay 独立 Python；缺失时退回当前解释器。"""
+
+    dedicated = (
+        CODEX_DIR / "agentrelay-env" / "bin" / "python"
+    )
+    if dedicated.is_file():
+        return str(dedicated)
+
+    return sys.executable
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def build_forced_relay_question(state):
+    """根据当前问题状态拼装强制执行时发给支援模型的问题。"""
+
+    prompt = normalize_text(
+        state.get("last_prompt")
+        or state.get("initial_prompt")
+        or ""
+    )
+
+    if len(prompt) > 800:
+        prompt = prompt[:797] + "..."
+
+    retry_count = int(
+        state.get("retry_count", 0) or 0
+    )
+    failed_count = int(
+        state.get("failed_tool_call_count", 0) or 0
+    )
+    effective_seconds = int(
+        float(
+            state.get(
+                "effective_time_seconds",
+                0,
+            )
+            or 0
+        )
+    )
+    failed_tool = (
+        state.get("last_failed_solution_tool_name")
+        or "未知工具"
+    )
+
+    return (
+        "【AgentRelay 强制执行】本地 Agent 处理以下问题时陷入重复失败，"
+        f"同一方向已重试 {retry_count} 次（失败工具调用 {failed_count} 次），"
+        f"有效处理时长约 {effective_seconds} 秒，仍未解决。"
+        f"问题：{prompt}"
+        f"最近一次失败的工具类型：{failed_tool}。"
+        "请直接给出最可能解决问题的可操作建议（命令、代码或排查步骤），"
+        "不要寒暄，不要反问。"
+    )
+
+
+def launch_forced_relay(state):
+    """
+    后台启动 agent_relay.py 强制执行外援调用。
+
+    Hook 自身有超时限制（Codex 默认 10 秒），而在线模型调用需要打开
+    浏览器、耗时数分钟，因此这里只负责点火（Popen 立即返回），结果由
+    collect_forced_relay_result 在后续 Hook 事件里检测并注入。
+
+    返回要展示给 Agent 的通知文本；启动失败时返回失败说明。
+    """
+
+    problem_id = state.get("problem_id") or "unknown"
+    out_file, pid_file = forced_relay_artifacts(
+        problem_id
+    )
+
+    script = find_relay_script()
+    if script is None:
+        return (
+            "AgentRelay 强制执行失败：未找到 agent_relay.py，"
+            "无法代为调用在线支援模型。请按 AgentRelay Skill 手动调用。"
+        )
+
+    question = build_forced_relay_question(state)
+
+    try:
+        out_file.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        with open(
+            out_file,
+            "w",
+            encoding="utf-8",
+        ) as out_handle:
+            process = subprocess.Popen(
+                [
+                    find_relay_python(),
+                    str(script),
+                    question,
+                ],
+                stdout=out_handle,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                cwd=str(script.parent),
+                start_new_session=True,
+            )
+        pid_file.write_text(
+            str(process.pid),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        return (
+            f"AgentRelay 强制执行失败：{exc}。"
+            "请按 AgentRelay Skill 手动调用在线支援模型。"
+        )
+
+    state["relay_force_state"] = "launched"
+    log_event(
+        "relay_forced_launch",
+        {
+            "problem_id": problem_id,
+            "pid": process.pid,
+            "output_file": str(out_file),
+            "retry_count": state.get("retry_count", 0),
+        },
+    )
+
+    return (
+        "AgentRelay 强制执行已启动：第 3 次提醒后 5 分钟仍无响应，"
+        "Hook 已代为调用在线支援模型（后台执行，Playwright 会打开浏览器，"
+        "完成后自动关闭）。回答就绪后会自动注入到后续上下文；"
+        f"也可稍后查看 {out_file}。收到注入的回答后，请结合当前问题继续处理。"
+    )
+
+
+def collect_forced_relay_result(state):
+    """
+    检测后台强制执行是否结束，结束后把回答注入上下文。
+
+    进程仍在运行时返回 None；已结束时更新状态（视为进入外援协作），
+    返回投递文本。只投递一次。
+    """
+
+    if state.get("relay_force_state") != "launched":
+        return None
+
+    problem_id = state.get("problem_id") or "unknown"
+    out_file, pid_file = forced_relay_artifacts(
+        problem_id
+    )
+
+    if not out_file.exists():
+        return None
+
+    pid = None
+    try:
+        pid = int(
+            pid_file.read_text(encoding="utf-8").strip()
+        )
+    except (OSError, ValueError):
+        pid = None
+
+    if pid and pid_alive(pid):
+        return None
+
+    try:
+        answer = out_file.read_text(
+            encoding="utf-8",
+            errors="replace",
+        ).strip()
+    except OSError:
+        return None
+
+    state["relay_force_state"] = "delivered"
+    state["relay_triggered"] = True
+    state["relay_collaboration_active"] = True
+    state["relay_call_count"] = int(
+        state.get("relay_call_count", 0) or 0
+    ) + 1
+    state["relay_trigger_reason"] = (
+        state.get("relay_trigger_reason") or "forced"
+    )
+    state["relay_last_reason"] = "forced"
+
+    log_event(
+        "relay_forced",
+        {
+            "problem_id": problem_id,
+            "retry_count": state.get("retry_count", 0),
+            "answer_length": len(answer),
+        },
+    )
+
+    if not answer:
+        answer = "（外援调用已结束但没有输出。）"
+
+    if len(answer) > 4000:
+        answer = answer[:4000] + "\n…(截断)"
+
+    return (
+        "AgentRelay 强制执行结果（第 3 次提醒后未获响应，由 Hook 代为调用"
+        "在线支援模型）：\n"
+        f"{answer}\n"
+        "请判断以上建议是否适用于当前环境，修改后重新验证。"
+    )
+
+
+def emit_relay_trigger(state, hook_event_name="PostToolUse"):
+    """
+    向 Agent 输出候选提醒，并按升级阶梯重发。
+
+    三类输出：
+
+    1. 权重到 2：先查本地归档
+    2. 达到求援门槛或出现直接行动句式候选：考虑调用支援模型
+       （第 1 次提醒；被放弃后按 RELAY_ESCALATION_WAIT_SECONDS
+       升级重发第 2、3 次）
+    3. 第 3 次提醒后仍无响应：Hook 直接强制执行外援调用，
+       结果就绪后注入上下文（collect_forced_relay_result）
+
+    注意：
+    - 提醒本身不是调用命令，也不是已经确认的触发结论
+    - 强制执行只在升级阶梯的最后一步发生，且每个问题只启动一次
+    - 除强制执行投递外，不修改 state["relay_triggered"]
+    """
+
+    # Kimi Code 只有 Stop 事件的阻断原因会写入模型上下文（其余事件的
+    # stdout 只进 transcript）；把非 Stop 事件的提醒推迟到 Stop 发出，
+    # 由 shim 转成 exit 2 + stderr，避免提醒在 PostToolUse 阶段被丢弃。
+    if (
+        os.environ.get("AGENTRELAY_TARGET") == "kimi"
+        and hook_event_name != "Stop"
+    ):
+        return False
+
+    conditions = get_trigger_conditions(state)
+
+    relay_due = bool(
+        conditions.get("should_trigger")
+    )
+
+    archive_due = wants_archive_lookup(
+        state,
+        conditions,
+    )
+
+    notices = []
+
+    # 强制执行结果投递优先：结果一旦就绪就注入，不等提醒门槛。
+    delivery = collect_forced_relay_result(state)
+    if delivery:
+        notices.append(delivery)
+
+    # 第 3 次提醒后等待期满仍无响应：直接强制执行。
+    if (
+        conditions.get("force_due")
+        and state.get("relay_force_state") is None
+    ):
+        launch_notice = launch_forced_relay(state)
+        if launch_notice:
+            notices.append(launch_notice)
+
+    reminder_recorded = False
+
+    if relay_due:
+        notices.append(
+            relay_reminder_text(state, conditions)
+        )
+        if not conditions.get("explicit_candidate"):
+            state["relay_signal_count"] = int(
+                conditions.get("signal_count", 0) or 0
+            ) + 1
+            state["relay_last_signal_at"] = now_ts()
+            state["relay_signal_retry_count"] = int(
+                conditions.get("retry_count", 0) or 0
+            )
+            state["relay_signal_emitted"] = True
+            state["relay_signal_problem_id"] = state.get(
+                "problem_id"
+            )
+            reminder_recorded = True
+
+    if archive_due:
+        notices.append(
+            archive_reminder_text(state)
+        )
+
+    if not notices:
+        return False
+
+    additional_context = "\n".join(notices)
+
+    if hook_event_name == "Stop":
+        output = {
+            "decision": "block",
+            "reason": additional_context,
+        }
+    else:
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "additionalContext": additional_context,
+            },
+        }
+
+    print(json.dumps(output, ensure_ascii=False), flush=True)
+
+    # 显式行动候选是一次性消息，不消耗当前问题未来的计数门槛提醒。
+    if reminder_recorded:
+        log_event(
+            "relay_signal",
+            {
+                "problem_id": state.get("problem_id"),
+                "level": state.get("relay_signal_count"),
+                "reason": conditions.get("reason"),
+                "escalated": bool(
+                    conditions.get("escalation_due")
+                ),
+            },
+        )
+
+    if archive_due:
+        state["archive_signal_emitted"] = True
+        state["archive_signal_problem_id"] = state.get(
+            "problem_id"
+        )
+
+    state["explicit_relay_candidate"] = False
+
+    write_state(state, session_id=state.get("session_id"))
+
+    return True
+
 
 def wants_archive_lookup(state, conditions):
     """
@@ -1810,104 +2354,6 @@ def archive_reminder_text(state):
         "也不改变需求卡、确认卡和验证规则；weight=2 不会触发在线支援模型。"
     )
 
-
-def emit_relay_trigger(state, hook_event_name="PostToolUse"):
-    """
-    向 Agent 输出候选提醒。
-
-    两类提醒：
-
-    1. 权重到 2：先查本地归档
-    2. 达到求援门槛或出现直接行动句式候选：考虑调用支援模型
-
-    注意：
-    - 这里只负责提醒 Agent 做语义审核
-    - 提醒本身不是调用命令，也不是已经确认的触发结论
-    - 不在 Tracker 内直接调用 agent_relay.py
-    - 不修改 state["relay_triggered"]
-    """
-
-    conditions = get_trigger_conditions(state)
-
-    relay_due = bool(
-        conditions.get("should_trigger")
-    )
-
-    archive_due = wants_archive_lookup(
-        state,
-        conditions,
-    )
-
-    if not relay_due and not archive_due:
-        return False
-
-    problem_context = normalize_text(
-        state.get("last_prompt")
-    )
-
-    if len(problem_context) > 500:
-        problem_context = (
-            problem_context[:497]
-            + "..."
-        )
-
-    notices = []
-
-    if archive_due:
-        notices.append(
-            archive_reminder_text(state)
-        )
-
-    if relay_due:
-        notices.append(
-            "AgentRelay 候选求援提醒（不是调用命令）。"
-            f"候选原因: {conditions.get('reason')}。"
-            f"retry_count: {conditions.get('retry_count')}。"
-            "effective_time_seconds: "
-            f"{int(conditions.get('effective_time_seconds', 0))}。"
-            f"当前问题: {problem_context or '未记录用户问题摘要'}。"
-            "模型判断优先级最高：必须先核对问题仍未解决、提醒与当前问题匹配、"
-            "当前不是单纯等待，并判断外援是否确实值得调用。只有模型审核通过后"
-            "才可根据 AgentRelay Skill 调用；审核不通过就忽略本提醒并继续正常处理。"
-            "Hook 不会调用 agent_relay.py；用户消息候选只来自保守的直接行动句式预筛选，"
-            "单独出现 DeepSeek 或 AgentRelay 字样不能触发。"
-        )
-
-    additional_context = "\n".join(notices)
-
-    if hook_event_name == "Stop":
-        output = {
-            "decision": "block",
-            "reason": additional_context,
-        }
-    else:
-        output = {
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "additionalContext": additional_context,
-            },
-        }
-
-    print(json.dumps(output, ensure_ascii=False), flush=True)
-
-    # 显式行动候选是一次性消息，不消耗当前问题未来的计数门槛提醒。
-    if relay_due and not conditions.get("explicit_candidate"):
-        state["relay_signal_emitted"] = True
-        state["relay_signal_problem_id"] = state.get(
-            "problem_id"
-        )
-
-    if archive_due:
-        state["archive_signal_emitted"] = True
-        state["archive_signal_problem_id"] = state.get(
-            "problem_id"
-        )
-
-    state["explicit_relay_candidate"] = False
-
-    write_state(state, session_id=state.get("session_id"))
-
-    return True
 
 # ============================================================
 # 问题生命周期
@@ -3807,7 +4253,9 @@ def handle_hook_event(
             session_id=session_id,
         )
 
-    if event_name == "PostToolUse":
+    if event_name in ("PostToolUse", "PostToolUseFailure"):
+        # PostToolUseFailure 由 Kimi Code 在工具失败时触发（shim 已把
+        # error 桥接为 tool_output）；按同一入口统计失败与重试。
         return handle_post_tool_use(
             tool_name=extract_tool_name(
                 data

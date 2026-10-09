@@ -52,6 +52,7 @@ SCRIPT_FILES = (
     "agent_relay.py",
     "agent_relay_login.py",
     "agent_relay_runtime.py",
+    "agentrelay_hook_shim.py",
     "orchestrator_runtime.py",
     "orchestrator_store.py",
     "orchestrator_dispatcher.py",
@@ -342,6 +343,81 @@ def check_base_environment() -> None:
         print("[正常] Codex CLI")
     else:
         print("[警告] PATH 中未找到 Codex CLI；文件仍会安装。")
+    try:
+        from scripts import agent_targets as at
+    except ImportError:
+        return
+    registry = at.agent_targets()
+    for target_id, meta in registry.items():
+        if target_id == "codex":
+            continue
+        detected = bool(shutil.which(str(meta["detect"])))
+        mark = "已检测到" if detected else "未检测到"
+        print(f"[{'正常' if detected else '提示'}] {meta['label']}：{mark}")
+
+
+def apply_agent_targets(target_ids: list[str]) -> tuple[dict, dict]:
+    """按用户选择的目标安装 Skill、注册 Hook 并逐项验证。"""
+    from scripts import agent_targets as at
+
+    registry = at.agent_targets()
+    results: dict[str, list[dict]] = {}
+    errors: dict[str, str] = {}
+    for target_id in target_ids:
+        meta = registry.get(target_id)
+        if meta is None:
+            errors[target_id] = "未知目标"
+            continue
+        try:
+            print(f"\n[目标] {meta['label']}")
+            at.install_skill_to(
+                meta, PROJECT_ROOT, SKILL_FILES, SCRIPT_FILES,
+                CONFIG_FILES, REFERENCE_FILES,
+            )
+            image_meta = {
+                **meta,
+                "skill_dir": str(Path(meta["skill_dir"]).with_name("agent-image")),
+            }
+            at.install_skill_to(
+                image_meta, PROJECT_ROOT, IMAGE_SKILL_FILES, IMAGE_SCRIPT_FILES,
+                (), (),
+            )
+            shim_path = Path(meta["skill_dir"]) / "scripts" / "agentrelay_hook_shim.py"
+            if target_id == "codex":
+                merge_hooks_json()
+            elif target_id == "claude":
+                command = build_hook_command(
+                    VENV_PYTHON,
+                    TARGET_HOOKS / "agent_relay_hook.py",
+                    os.name,
+                )
+                changed = at.register_claude(Path(meta["config_path"]), command)
+                print(f"[{'安装' if changed else '保留'}] {meta['config_path']}")
+            elif target_id == "hermes":
+                changed = at.register_hermes(
+                    Path(meta["config_path"]), VENV_PYTHON, shim_path
+                )
+                print(f"[{'安装' if changed else '保留'}] {meta['config_path']}")
+            elif target_id == "kimi":
+                changed = at.register_kimi(
+                    Path(meta["config_path"]), VENV_PYTHON, shim_path
+                )
+                print(f"[{'安装' if changed else '保留'}] {meta['config_path']}")
+            elif target_id == "pi":
+                changed = at.write_pi_extension(
+                    Path(meta["config_path"]), VENV_PYTHON, shim_path
+                )
+                print(f"[{'生成' if changed else '保留'}] {meta['config_path']}")
+            results[target_id] = at.verify_target(
+                target_id, meta, VENV_PYTHON,
+                TARGET_HOOKS / "agent_relay_hook.py",
+                shim_path,
+                TARGET_HOOKS / "agent_relay_tracker.py",
+                PROJECT_ROOT,
+            )
+        except (at.TargetError, OSError) as exc:
+            errors[target_id] = str(exc)
+    return results, errors
 
 
 def ensure_virtualenv() -> None:
@@ -721,10 +797,56 @@ def configure_commander(config: dict) -> None:
                                  "manual_disabled": not enabled, "max_agents": max_agents})
 
 
-def initialize_configuration() -> None:
+def choose_install_targets() -> list[str]:
+    """终端多选安装目标；默认勾选 Codex 和已检测到的 Agent。"""
+    from scripts import agent_targets as at
+
+    registry = at.agent_targets()
+    detected = at.detect_agents(registry)
+    ids = list(registry)
+    print("\n安装目标 Agent（输入编号，逗号分隔）：")
+    for index, target_id in enumerate(ids, 1):
+        meta = registry[target_id]
+        mark = "已检测到" if detected[target_id] else "未检测到（仍会安装）"
+        print(f"{index}. {meta['label']} — {meta['level_note']}；{mark}")
+    default_ids = ["codex", *[t for t in ids if t != "codex" and detected[t]]]
+    default = ",".join(str(ids.index(t) + 1) for t in default_ids)
+    raw = _ask("装到哪些 Agent", default)
+    selected: list[str] = []
+    for token in raw.replace("，", ",").split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            target_id = ids[int(token) - 1]
+        except (ValueError, IndexError):
+            print(f"忽略无效编号：{token}")
+            continue
+        if target_id not in selected:
+            selected.append(target_id)
+    if "codex" not in selected:
+        selected.insert(0, "codex")
+    return selected or ["codex"]
+
+
+def print_verify_results(results: dict, errors: dict) -> None:
+    for target_id, checks in results.items():
+        print(f"\n{target_id} 验证结果：")
+        for check in checks:
+            mark = "正常" if check["ok"] else "失败"
+            print(f"  [{mark}] {check['name']}：{check['detail']}")
+    for target_id, message in errors.items():
+        print(f"\n{target_id} 安装失败：{message}")
+
+
+def initialize_configuration(selected_targets: list[str] | None = None) -> None:
     config, save_config = _load_local_config()
     print("\nAgentRelay 初始化向导")
     print("1. 安装离线基础能力：Hook、Skill、Tracker、确认卡和本地规则。")
+    targets = list(selected_targets) if selected_targets else choose_install_targets()
+    results, errors = apply_agent_targets(targets)
+    config["install_targets"] = targets
+    print_verify_results(results, errors)
     if _yes_no("现在配置默认 DeepSeek 网页模型", True):
         _configure_web(config)
     else:
@@ -780,10 +902,11 @@ def print_next_steps() -> None:
     print("接下来请执行：")
     print(f"  1. {VENV_PYTHON} {login}")
     print("     请在浏览器中手动登录，并完成人机验证/CAPTCHA。")
-    print("  2. 重启 Codex，使其重新加载 hooks.json。")
+    print("  2. 重启使用了 AgentRelay 的 Agent（Codex / Claude / Pi / Hermes），")
+    print("     使其重新加载 Hook 配置。")
 
 
-def run_chinese_menu() -> None:
+def run_chinese_menu(selected_targets: list[str] | None = None) -> None:
     """显示中文安装菜单；适合用户直接运行 install.py。"""
     while True:
         print("\n" + "=" * 56)
@@ -799,7 +922,7 @@ def run_chinese_menu() -> None:
             print("已退出，配置仍保存在本机。")
             return
         if choice == "1":
-            initialize_configuration()
+            initialize_configuration(selected_targets)
         elif choice == "2":
             config, save_config = _load_local_config()
             configure_commander(config)
@@ -944,8 +1067,24 @@ def run_web_configurator() -> None:
         return "deepseek" if provider_id == "deepseek-web" else "generic"
 
     def public_config() -> dict:
+        from scripts import agent_targets as at
         result = json.loads(json.dumps(config, ensure_ascii=False))
         result["config_path"] = str(TARGET_SKILL / "config" / "agentrelay-config.json.enc")
+        registry = at.agent_targets()
+        detection = at.detect_agents(registry)
+        result["agents"] = {
+            target_id: {
+                "id": target_id,
+                "label": meta["label"],
+                "level": meta["level"],
+                "level_note": meta["level_note"],
+                "detected": detection.get(target_id, False),
+                "config_path": str(meta["config_path"]) if meta["config_path"] else "",
+            }
+            for target_id, meta in registry.items()
+        }
+        result["unsupported_agents"] = list(at.UNSUPPORTED_AGENTS)
+        result["install_targets"] = config.get("install_targets") or ["codex"]
         for item in result.get("web_providers", []):
             if isinstance(item, dict) and item.get("id"):
                 item["adapter"] = adapter_flag(str(item["id"]))
@@ -1083,9 +1222,39 @@ def run_web_configurator() -> None:
                         {"name": "Skill 文件", "ok": (TARGET_SKILL / "SKILL.md").is_file(), "detail": str(TARGET_SKILL), "reason": "缺少它时 Agent 不会加载工作流"},
                         {"name": "Hook 配置", "ok": HOOKS_JSON.is_file(), "detail": str(HOOKS_JSON), "reason": "缺少它时重试、计时和提醒不会运行"},
                     ]
+                    try:
+                        from scripts import agent_targets as at
+                        registry = at.agent_targets()
+                        shim = TARGET_SKILL / "scripts" / "agentrelay_hook_shim.py"
+                        for target_id in config.get("install_targets") or ["codex"]:
+                            meta = registry.get(str(target_id))
+                            if not meta or meta["level"] == "skill-only":
+                                continue
+                            ok, detail = at.registered_in_config(str(target_id), meta, VENV_PYTHON, shim)
+                            checks.append({
+                                "name": f"{meta['label']} Hook 注册",
+                                "ok": ok,
+                                "detail": detail,
+                                "reason": "未注册时该 Agent 不会收到计时和候选提醒",
+                            })
+                    except Exception:
+                        pass
                     self._send({"checks": checks});return
                 if self.path == "/api/initialize":
                     install_files();merge_hooks_json();self._send({"message":"基础 Skill、Hook 和脚本已重新安装"});return
+                if self.path == "/api/targets":
+                    ids=data.get("targets")
+                    if not isinstance(ids,list) or not ids: raise ValueError("请选择至少一个目标 Agent")
+                    from scripts import agent_targets as at
+                    registry=at.agent_targets()
+                    invalid=[x for x in ids if not isinstance(x,str) or x not in registry]
+                    if invalid: raise ValueError("未知目标："+", ".join(map(str,invalid)))
+                    ids=[str(x) for x in ids]
+                    if "codex" not in ids: ids=["codex",*ids]
+                    results,errors=apply_agent_targets(ids)
+                    config["install_targets"]=ids
+                    save_config(config,CODEX_HOME)
+                    self._send({"results":results,"errors":errors,"config":public_config()});return
                 if self.path == "/api/scan-local": self._send({"found":_scan_local_services()});return
                 data=self._body()
                 if self.path == "/api/settings":
@@ -1177,6 +1346,11 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="AgentRelay 中文安装与配置脚本")
     parser.add_argument("--menu", action="store_true", help="进入中文安装与配置菜单")
     parser.add_argument("--no-menu", action="store_true", help="只安装文件，不进入交互配置页")
+    parser.add_argument(
+        "--targets",
+        default="",
+        help="非交互安装到指定 Agent，逗号分隔，例如 codex,claude,pi,hermes",
+    )
     parser.add_argument("--install-daemon", action="store_true", help="生成后台服务配置")
     parser.add_argument("--register-daemon", action="store_true", help="注册已生成的后台服务")
     args = parser.parse_args(argv)
@@ -1185,6 +1359,16 @@ def main(argv=None) -> int:
     if sys.version_info < (3, 10):
         print("[错误] 需要 Python 3.10 或更高版本。", file=sys.stderr)
         return 1
+    interactive_config = (
+        not args.no_menu
+        and not args.targets
+        and argv is None
+        and sys.stdin.isatty()
+    )
+    selected_targets: list[str] = []
+    if interactive_config:
+        # 一打开就先让用户选择安装目标，再进入安装流程。
+        selected_targets = choose_install_targets()
     try:
         validate_publish_tree()
         check_base_environment()
@@ -1193,9 +1377,43 @@ def main(argv=None) -> int:
         install_and_verify_chromium()
         install_files()
         merge_hooks_json()
-        if not args.no_menu and argv is None and sys.stdin.isatty():
-            # 默认就是网页配置中心；终端菜单保留为明确的 --menu 备用入口。
-            run_web_configurator() if not args.menu else run_chinese_menu()
+        target_ids = [
+            token.strip() for token in args.targets.split(",") if token.strip()
+        ]
+        if target_ids:
+            from scripts import agent_targets as at
+            unknown = [x for x in target_ids if x not in at.agent_targets()]
+            if unknown:
+                raise InstallError(f"未知目标 Agent：{', '.join(unknown)}")
+            if "codex" not in target_ids:
+                target_ids.insert(0, "codex")
+            results, errors = apply_agent_targets(target_ids)
+            config, save_config = _load_local_config()
+            config["install_targets"] = target_ids
+            save_config(config, CODEX_HOME)
+            print_verify_results(results, errors)
+            if errors:
+                return 1
+        elif selected_targets:
+            results, errors = apply_agent_targets(selected_targets)
+            config, save_config = _load_local_config()
+            config["install_targets"] = selected_targets
+            save_config(config, CODEX_HOME)
+            print_verify_results(results, errors)
+        elif not args.no_menu and argv is None:
+            print("\n[提示] 当前 stdin 不是交互终端，未打开配置网页。")
+            print("  选择安装目标 Agent 的方式：")
+            print("    在终端运行：python3 install.py --menu        （终端多选向导）")
+            print("    在终端运行：python3 install.py               （开头即提示选择目标）")
+            print("    脚本/CI：   python3 install.py --targets codex,claude,pi,hermes")
+            print("  本次已按默认目标（Codex）完成安装，其余目标随时可补装。")
+        if interactive_config:
+            # 目标已选定并验证；网页配置中心负责后续的模型登录与 Provider 配置。
+            if args.menu:
+                run_chinese_menu(selected_targets)
+            else:
+                print("\n正在打开配置网页（模型登录等后续配置在页面中完成）。")
+                run_web_configurator()
         if args.install_daemon or args.register_daemon:
             os.environ["AGENTRELAY_INSTALL_DAEMON"] = "1"
         service = write_daemon_service_config()
