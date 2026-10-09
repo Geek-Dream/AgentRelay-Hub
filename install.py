@@ -797,36 +797,79 @@ def configure_commander(config: dict) -> None:
                                  "manual_disabled": not enabled, "max_agents": max_agents})
 
 
-def choose_install_targets() -> list[str]:
-    """终端多选安装目标；默认勾选 Codex 和已检测到的 Agent。"""
+def choose_install_targets() -> tuple[list[str], bool]:
+    """终端 [x] 清单多选安装目标。
+
+    输入编号切换勾选；输入 0 或 web（大小写不敏感）或直接回车 = 确认，
+    确认后都会打开网页配置中心。返回 (选中的目标, 是否打开网页)。
+    """
     from scripts import agent_targets as at
 
     registry = at.agent_targets()
     detected = at.detect_agents(registry)
+    installed = {
+        target_id: at.relay_installed(target_id, meta)
+        for target_id, meta in registry.items()
+    }
     ids = list(registry)
-    print("\n安装目标 Agent（输入编号，逗号分隔）：")
-    for index, target_id in enumerate(ids, 1):
-        meta = registry[target_id]
-        mark = "已检测到" if detected[target_id] else "未检测到（仍会安装）"
-        print(f"{index}. {meta['label']} — {meta['level_note']}；{mark}")
-    default_ids = ["codex", *[t for t in ids if t != "codex" and detected[t]]]
-    default = ",".join(str(ids.index(t) + 1) for t in default_ids)
-    raw = _ask("装到哪些 Agent", default)
-    selected: list[str] = []
-    for token in raw.replace("，", ",").split(","):
-        token = token.strip()
-        if not token:
-            continue
-        try:
-            target_id = ids[int(token) - 1]
-        except (ValueError, IndexError):
-            print(f"忽略无效编号：{token}")
-            continue
-        if target_id not in selected:
-            selected.append(target_id)
-    if "codex" not in selected:
-        selected.insert(0, "codex")
-    return selected or ["codex"]
+    checked = {"codex", *[t for t in ids if t != "codex" and detected[t]]}
+
+    while True:
+        print("\n安装目标 Agent：")
+        print("  输入编号切换勾选 · 输入 0 或 web 确认并打开网页配置 · 回车直接确认")
+        for index, target_id in enumerate(ids, 1):
+            meta = registry[target_id]
+            mark = "[x]" if target_id in checked else "[ ]"
+            cli = "本机已装该 Agent" if detected[target_id] else "本机未装该 Agent"
+            relay = "已接入 AgentRelay" if installed[target_id] else "未接入 AgentRelay"
+            print(f"{mark} {index}. {meta['label']}")
+            print(f"     {meta['level_note']}")
+            print(f"     {cli} · {relay}")
+        raw = input("> ").strip().lower()
+        if raw in ("", "0", "web"):
+            selected = [t for t in ids if t in checked]
+            return selected, True
+        for token in raw.replace("，", ",").split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                target_id = ids[int(token) - 1]
+            except (ValueError, IndexError):
+                print(f"忽略无效编号：{token}")
+                continue
+            if target_id in checked:
+                checked.discard(target_id)
+            else:
+                checked.add(target_id)
+
+
+def prompt_reinstall_filter(selected: list[str]) -> list[str]:
+    """已接入的目标默认重装（覆盖），用户可改为跳过或逐个选择。"""
+    from scripts import agent_targets as at
+
+    registry = at.agent_targets()
+    already = [t for t in selected if at.relay_installed(t, registry[t])]
+    if not already:
+        return list(selected)
+    print(f"\n已接入 AgentRelay：{', '.join(already)}")
+    choice = _ask(
+        "处理方式 1. 全部重装（默认，覆盖现有 Hook 和 Skill）"
+        " 2. 跳过已接入的 3. 逐个选择",
+        "1",
+    )
+    if choice == "2":
+        return [t for t in selected if t not in already]
+    if choice == "3":
+        final: list[str] = []
+        for target_id in selected:
+            if target_id in already:
+                if _yes_no(f"重装 {registry[target_id]['label']}", False):
+                    final.append(target_id)
+            else:
+                final.append(target_id)
+        return final
+    return list(selected)
 
 
 def print_verify_results(results: dict, errors: dict) -> None:
@@ -843,10 +886,17 @@ def initialize_configuration(selected_targets: list[str] | None = None) -> None:
     config, save_config = _load_local_config()
     print("\nAgentRelay 初始化向导")
     print("1. 安装离线基础能力：Hook、Skill、Tracker、确认卡和本地规则。")
-    targets = list(selected_targets) if selected_targets else choose_install_targets()
-    results, errors = apply_agent_targets(targets)
-    config["install_targets"] = targets
-    print_verify_results(results, errors)
+    if selected_targets is None:
+        selected_targets, _ = choose_install_targets()
+    selected_targets = list(selected_targets)
+    install_list = prompt_reinstall_filter(selected_targets)
+    if install_list:
+        results, errors = apply_agent_targets(install_list)
+        print_verify_results(results, errors)
+    else:
+        results, errors = {}, {}
+        print("没有需要安装的目标，跳过安装（已接入的部分保持原样）。")
+    config["install_targets"] = selected_targets
     if _yes_no("现在配置默认 DeepSeek 网页模型", True):
         _configure_web(config)
     else:
@@ -1079,6 +1129,7 @@ def run_web_configurator() -> None:
                 "level": meta["level"],
                 "level_note": meta["level_note"],
                 "detected": detection.get(target_id, False),
+                "relay_installed": at.relay_installed(target_id, meta),
                 "config_path": str(meta["config_path"]) if meta["config_path"] else "",
             }
             for target_id, meta in registry.items()
@@ -1366,9 +1417,10 @@ def main(argv=None) -> int:
         and sys.stdin.isatty()
     )
     selected_targets: list[str] = []
+    open_web_after_install = False
     if interactive_config:
-        # 一打开就先让用户选择安装目标，再进入安装流程。
-        selected_targets = choose_install_targets()
+        # 一打开就先让用户用 [x] 清单选择安装目标，再进入安装流程。
+        selected_targets, open_web_after_install = choose_install_targets()
     try:
         validate_publish_tree()
         check_base_environment()
@@ -1395,11 +1447,16 @@ def main(argv=None) -> int:
             if errors:
                 return 1
         elif selected_targets:
-            results, errors = apply_agent_targets(selected_targets)
+            # 已接入的目标默认重装；用户可选择跳过或逐个确认
+            install_list = prompt_reinstall_filter(selected_targets)
+            if install_list:
+                results, errors = apply_agent_targets(install_list)
+                print_verify_results(results, errors)
+            else:
+                print("没有需要安装的目标，跳过安装（已接入的部分保持原样）。")
             config, save_config = _load_local_config()
             config["install_targets"] = selected_targets
             save_config(config, CODEX_HOME)
-            print_verify_results(results, errors)
         elif not args.no_menu and argv is None:
             print("\n[提示] 当前 stdin 不是交互终端，未打开配置网页。")
             print("  选择安装目标 Agent 的方式：")
@@ -1407,12 +1464,15 @@ def main(argv=None) -> int:
             print("    在终端运行：python3 install.py               （开头即提示选择目标）")
             print("    脚本/CI：   python3 install.py --targets codex,claude,pi,hermes")
             print("  本次已按默认目标（Codex）完成安装，其余目标随时可补装。")
-        if interactive_config:
+        if interactive_config and open_web_after_install:
             # 目标已选定并验证；网页配置中心负责后续的模型登录与 Provider 配置。
             if args.menu:
                 run_chinese_menu(selected_targets)
             else:
-                print("\n正在打开配置网页（模型登录等后续配置在页面中完成）。")
+                if selected_targets:
+                    print("\n正在打开配置网页（模型登录等后续配置在页面中完成）。")
+                else:
+                    print("\n未选择安装目标，直接打开配置网页。")
                 run_web_configurator()
         if args.install_daemon or args.register_daemon:
             os.environ["AGENTRELAY_INSTALL_DAEMON"] = "1"

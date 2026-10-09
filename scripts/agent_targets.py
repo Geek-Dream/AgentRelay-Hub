@@ -567,6 +567,18 @@ def registered_in_config(target_id: str, meta: dict, venv_python: Path, shim_pat
     return False, f"未知目标：{target_id}"
 
 
+def relay_installed(target_id: str, meta: dict | None = None) -> bool:
+    """轻量检查 AgentRelay 是否已接入该 Agent：Skill 就位且 Hook 已注册。
+
+    只做文件级检查，不启动 Hook 干跑（干跑留给 verify_target）。
+    """
+    if meta is None:
+        meta = agent_targets()[target_id]
+    skill_ok = (Path(meta["skill_dir"]) / "SKILL.md").is_file()
+    registered_ok, _ = registered_in_config(target_id, meta, None, None)
+    return skill_ok and registered_ok
+
+
 def dry_run_hook(command: list[str], payload: dict, timeout: int = 15) -> tuple[bool, str]:
     """向 Hook 命令喂一个合成事件，确认它能正常执行并退出。"""
     try:
