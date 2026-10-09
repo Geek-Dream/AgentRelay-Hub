@@ -819,16 +819,14 @@ def choose_install_targets() -> tuple[list[str], str]:
 
     while True:
         print("\n安装目标 Agent：")
-        print("  输入编号切换勾选 · 回车 = 按勾选安装并打开网页配置")
-        print("  输入 0 或 web = 跳过安装，直接打开网页配置")
+        print("  输入编号切换勾选 · 回车 = 安装并打开网页配置 · 0/web = 只开网页")
         for index, target_id in enumerate(ids, 1):
             meta = registry[target_id]
             mark = "[x]" if target_id in checked else "[ ]"
-            cli = "本机已装该 Agent" if detected[target_id] else "本机未装该 Agent"
-            relay = "已接入 AgentRelay" if installed[target_id] else "未接入 AgentRelay"
-            print(f"{mark} {index}. {meta['label']}")
-            print(f"     {meta['level_note']}")
-            print(f"     {cli} · {relay}")
+            level = "完整支持" if meta["level"] == "full" else "仅装 Skill"
+            cli = "已装" if detected[target_id] else "未装"
+            relay = "已接入" if installed[target_id] else "未接入"
+            print(f"{mark} {index}. {meta['label']} — {level} · 本机{cli} · {relay}")
         raw = input("> ").strip().lower()
         if raw in ("0", "web"):
             return [t for t in ids if t in checked], "web"
