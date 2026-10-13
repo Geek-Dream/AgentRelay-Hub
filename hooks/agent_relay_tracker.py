@@ -3406,11 +3406,15 @@ def handle_stop(session_id=None, last_assistant_message=None):
         state["last_assistant_message"] = assistant_message
         stop_event_state = state
 
-        # 如果门槛是在最后一段思考期间达到，Stop Hook 阻止本轮直接结束，
-        # 把候选提醒送回 Agent 做最终语义审核。
-        if state.get("problem_active") and emit_relay_trigger(
-            state,
-            hook_event_name="Stop",
+        # 助手已明确宣告解决时，优先按解决处理：
+        # 此时再拦截本轮去提醒查归档/重试，只会打扰一个已经结束的问题。
+        if (
+            state.get("problem_active")
+            and not assistant_indicates_resolution(assistant_message)
+            and emit_relay_trigger(
+                state,
+                hook_event_name="Stop",
+            )
         ):
             state["turn_closed"] = False
             start_active_time(state)
