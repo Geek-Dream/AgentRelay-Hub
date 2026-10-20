@@ -31,6 +31,7 @@ CODEX_HOME = Path(
 TARGET_HOOKS = CODEX_HOME / "hooks"
 TARGET_SKILL = CODEX_HOME / "skills" / "agent-relay"
 TARGET_IMAGE_SKILL = CODEX_HOME / "skills" / "agent-image"
+TARGET_FUSION_SKILL = CODEX_HOME / "skills" / "agent-fusion"
 HOOKS_JSON = CODEX_HOME / "hooks.json"
 VENV_DIR = CODEX_HOME / "agentrelay-env"
 VENV_PYTHON = (
@@ -48,6 +49,8 @@ HOOK_FILES = (
 SKILL_FILES = ("SKILL.md",)
 IMAGE_SKILL_FILES = ("SKILL.md",)
 IMAGE_SCRIPT_FILES = ("agent_image.py",)
+FUSION_SKILL_FILES = ("SKILL.md",)
+FUSION_SCRIPT_FILES = ("agent_fusion.py", "fusion_mode.py", "fusion_runner.py")
 SCRIPT_FILES = (
     "agent_relay.py",
     "agent_relay_login.py",
@@ -78,6 +81,9 @@ SCRIPT_FILES = (
     "generic_web_adapter.py",
     "diagnose_web_provider.py",
     "agent_relay_archive.py",
+    "agent_fusion.py",
+    "fusion_mode.py",
+    "fusion_runner.py",
 )
 CONFIG_FILES = ("model_registry.json",)
 REFERENCE_FILES = ("orchestrator-v1.md",)
@@ -175,6 +181,18 @@ def install_files() -> None:
         install_managed_file(
             PROJECT_ROOT / "scripts" / filename,
             TARGET_IMAGE_SKILL / "scripts" / filename,
+        )
+
+    for filename in FUSION_SKILL_FILES:
+        install_managed_file(
+            PROJECT_ROOT / "skills" / "agent-fusion" / filename,
+            TARGET_FUSION_SKILL / filename,
+        )
+
+    for filename in FUSION_SCRIPT_FILES:
+        install_managed_file(
+            PROJECT_ROOT / "scripts" / filename,
+            TARGET_FUSION_SKILL / "scripts" / filename,
         )
 
 
@@ -381,6 +399,16 @@ def apply_agent_targets(target_ids: list[str]) -> tuple[dict, dict]:
             at.install_skill_to(
                 image_meta, PROJECT_ROOT, IMAGE_SKILL_FILES, IMAGE_SCRIPT_FILES,
                 (), (),
+                skill_name="agent-image",
+            )
+            fusion_meta = {
+                **meta,
+                "skill_dir": str(Path(meta["skill_dir"]).with_name("agent-fusion")),
+            }
+            at.install_skill_to(
+                fusion_meta, PROJECT_ROOT, FUSION_SKILL_FILES, FUSION_SCRIPT_FILES,
+                (), (),
+                skill_name="agent-fusion",
             )
             shim_path = Path(meta["skill_dir"]) / "scripts" / "agentrelay_hook_shim.py"
             if target_id == "codex":
@@ -405,7 +433,10 @@ def apply_agent_targets(target_ids: list[str]) -> tuple[dict, dict]:
                 print(f"[{'安装' if changed else '保留'}] {meta['config_path']}")
             elif target_id == "pi":
                 changed = at.write_pi_extension(
-                    Path(meta["config_path"]), VENV_PYTHON, shim_path
+                    Path(meta["config_path"]),
+                    VENV_PYTHON,
+                    shim_path,
+                    Path(fusion_meta["skill_dir"]) / "scripts" / "agent_fusion.py",
                 )
                 print(f"[{'生成' if changed else '保留'}] {meta['config_path']}")
             results[target_id] = at.verify_target(
@@ -557,6 +588,22 @@ def _scan_local_services() -> list[dict]:
         if ok:
             found.append({"name": name, "endpoint": endpoint, "models": models, "message": message})
     return found
+
+
+def commander_terminal_status(configured_path: str) -> tuple[bool, str]:
+    """Check a Commander CLI name or native absolute/relative executable path."""
+    value = str(configured_path or "").strip() or "codex"
+    path = Path(value).expanduser()
+    looks_like_path = bool(
+        os.path.isabs(value)
+        or os.path.dirname(value)
+        or re.match(r"^[A-Za-z]:[\\/]", value)
+        or value.startswith("\\\\")
+    )
+    if looks_like_path:
+        return path.is_file(), str(path)
+    resolved = shutil.which(value)
+    return bool(resolved), resolved or value
 
 
 def _load_local_config():
@@ -1272,10 +1319,10 @@ def run_web_configurator() -> None:
                 if self.path == "/api/close": stopped.set();self._send({"ok":True});return
                 if self.path == "/api/environment":
                     configured_path = str((config.get("commander") or {}).get("terminal_path") or "").strip()
-                    terminal_ok = bool(shutil.which(configured_path) if configured_path and "/" not in configured_path else (Path(configured_path).is_file() if configured_path else shutil.which("codex")))
+                    terminal_ok, terminal_detail = commander_terminal_status(configured_path)
                     checks = [
                         {"name": "Python", "ok": sys.version_info >= (3, 10), "detail": sys.version.split()[0], "reason": "需要 Python 3.10 或更高版本"},
-                        {"name": "Codex CLI", "ok": terminal_ok, "detail": configured_path or shutil.which("codex") or "PATH 中未找到", "reason": "Commander 需要它启动隔离子 Agent；路径不存在时无法开启 Commander"},
+                        {"name": "Codex CLI", "ok": terminal_ok, "detail": terminal_detail if terminal_ok else configured_path or "PATH 中未找到", "reason": "Commander 需要它启动隔离子 Agent；路径不存在时无法开启 Commander"},
                         {"name": "AgentRelay 虚拟环境", "ok": VENV_PYTHON.is_file(), "detail": str(VENV_PYTHON), "reason": "网页配置和 Playwright 使用独立环境"},
                         {"name": "Skill 文件", "ok": (TARGET_SKILL / "SKILL.md").is_file(), "detail": str(TARGET_SKILL), "reason": "缺少它时 Agent 不会加载工作流"},
                         {"name": "Hook 配置", "ok": HOOKS_JSON.is_file(), "detail": str(HOOKS_JSON), "reason": "缺少它时重试、计时和提醒不会运行"},
@@ -1383,6 +1430,11 @@ def write_daemon_service_config() -> Path | None:
         from scripts.research_commander import service_config
         target = CODEX_HOME / "systemd" / "agentrelay.service"
         target.parent.mkdir(parents=True, exist_ok=True); target.write_text(service_config("systemd", TARGET_SKILL, command), encoding="utf-8")
+    else:
+        raise InstallError(
+            "当前平台不支持自动生成 daemon 服务配置；"
+            "Windows 可直接运行 agentrelay_daemon.py。"
+        )
     print(f"[生成] daemon 服务配置：{target}")
     return target
 

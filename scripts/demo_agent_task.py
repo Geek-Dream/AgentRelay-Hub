@@ -7,10 +7,18 @@ from pathlib import Path
 from dataclasses import asdict
 
 try:
-    from .orchestrator_core import Orchestrator, WorkflowEngine
+    from .orchestrator_core import (
+        Orchestrator,
+        WorkflowEngine,
+        default_compileall_command,
+    )
     from .agent_provider import DeepSeekProvider
 except ImportError:
-    from orchestrator_core import Orchestrator, WorkflowEngine
+    from orchestrator_core import (
+        Orchestrator,
+        WorkflowEngine,
+        default_compileall_command,
+    )
     from agent_provider import DeepSeekProvider
 
 
@@ -27,7 +35,7 @@ def main() -> int:
             "demo-user-dto", "重构 UserDto 并增加 age 字段", complexity=5,
             modules=("backend",), allowed_files=("UserDto.java",),
             workspace=root, edits={"UserDto.java": "public class UserDto {\n    private int age;\n}\n"},
-            verification_commands=("python3 -m compileall -q scripts",))
+            verification_commands=(default_compileall_command(),))
         card = outcome["card"]
         confirmation = outcome["confirmation"]
         engine.approve_and_execute("demo-user-dto")

@@ -511,7 +511,16 @@ class SelfReviewer:
 
 
 class VerificationRunner:
-    ALLOWED = ("python -m compileall", "python3 -m compileall", "pytest", "python -m unittest", "python3 -m unittest", "git diff --check")
+    ALLOWED = (
+        "python -m compileall",
+        "python3 -m compileall",
+        "py -m compileall",
+        "pytest",
+        "python -m unittest",
+        "python3 -m unittest",
+        "py -m unittest",
+        "git diff --check",
+    )
 
     def run(self, command: str, workspace: str | Path, timeout_seconds: int = 120) -> VerificationResult:
         if not any(command == allowed or command.startswith(allowed + " ") for allowed in self.ALLOWED):
@@ -530,6 +539,11 @@ class VerificationRunner:
 
     def run_many(self, commands: Iterable[str], workspace: str | Path, timeout_seconds: int = 120) -> tuple[VerificationResult, ...]:
         return tuple(self.run(command, workspace, timeout_seconds) for command in commands)
+
+
+def default_compileall_command() -> str:
+    """Return a compile check command available on the current platform."""
+    return "py -m compileall -q scripts" if os.name == "nt" else "python3 -m compileall -q scripts"
 
 
 class Orchestrator:
@@ -674,7 +688,7 @@ class Orchestrator:
         acceptance = ["修改后通过验证", "不修改未授权文件"]
         if "kafka" in text and ("mq" in text or "rabbitmq" in text):
             acceptance += ["生产者发送 Kafka 消息", "消费者能够正常消费"]
-        checks = tuple(verification_commands) or ("python3 -m compileall -q scripts",)
+        checks = tuple(verification_commands) or (default_compileall_command(),)
         rollback_steps = ["保存修改前文件指纹和内容", "失败时逐文件检查冲突", "无冲突则恢复，有用户修改则跳过"]
         card = RequirementCard(task_id, request[:80], request, task_type.value, complexity, request,
                                acceptance, list(inferred_modules), inferred_files, [], list(assessment.risks),
@@ -708,7 +722,7 @@ class Orchestrator:
         files = tuple(files)
         parts = [part.strip(" ，,。；;") for part in request.replace("以及", "并").replace("同时", "并").split("并")]
         requested_changes = tuple(part for part in parts if part) or (request,)
-        checks = tuple(verification_commands) or ("python3 -m compileall -q scripts",)
+        checks = tuple(verification_commands) or (default_compileall_command(),)
         assessment = RequirementAssessment(False, "多个普通修改点，使用一张汇总确认卡", complexity,
                                            tuple(modules), ("确认后只修改授权文件",), False, True)
         confirmation = ConfirmationCard(
@@ -819,8 +833,10 @@ class Orchestrator:
         """
         try:
             from .config_manager import apply_config_to_environment
+            from .fusion_mode import fusion_commander_lock
         except ImportError:
             from config_manager import apply_config_to_environment
+            from fusion_mode import fusion_commander_lock
         apply_config_to_environment()
         try:
             configured_max_agents = int(os.environ.get("AGENTRELAY_COMMANDER_MAX_AGENTS", max_agents))
@@ -843,109 +859,111 @@ class Orchestrator:
             from research_commander import CommanderRuntime, codex_cli_available
             from commander_provider_pool import CommanderProviderCoordinator, ProviderProfile
         if not native or not codex_cli_available(codex):
-            return {"mode": "offline-plan", "codex_available": codex_cli_available(codex),
-                    "roles": [asdict(item) for item in role_plan],
-                    "reports": self.run_commander(task_id, request, modules=modules,
-                                                   roles=roles, max_agents=max_agents)}
+            with fusion_commander_lock(task_id):
+                return {"mode": "offline-plan", "codex_available": codex_cli_available(codex),
+                        "roles": [asdict(item) for item in role_plan],
+                        "reports": self.run_commander(task_id, request, modules=modules,
+                                                       roles=roles, max_agents=max_agents)}
         source = Path(workspace).resolve()
         if not source.is_dir():
             raise ValueError(f"Commander 源 workspace 不存在: {source}")
-        runtime_path = Path(runtime_root).resolve() if runtime_root else source / ".agentrelay" / "commander"
-        profiles = [
-            ProviderProfile("deepseek-web", "web", login_command="agent_relay_login.py --provider deepseek"),
-            ProviderProfile("qianwen-web", "web", login_command="agent_relay_login.py --provider qianwen"),
-            ProviderProfile("kimi-web", "web", login_command="agent_relay_login.py --provider kimi"),
-            ProviderProfile("local-llm", "local"),
-            ProviderProfile("gpt-api", "api"),
-        ]
-        coordinator = CommanderProviderCoordinator(runtime_path, profiles)
-        runtime = CommanderRuntime(runtime_path, max_agents=max_agents, coordinator=coordinator)
-        configs = model_configs or {}
-        agents = [runtime.create(item.role, task_id, model_config={"provider": "codex-self",
-                    "task_id": task_id, "goal": item.goal, **dict(configs.get(item.role, {}))}) for item in role_plan]
-        for agent in agents:
-            runtime.prepare_workspace(agent, source)
-            child = TaskContext(f"{task_id}:{agent.role}", str(agent.workspace), request)
-            child.transition(TaskExecutionState.ANALYZING)
-            child.transition(TaskExecutionState.EXECUTING)
-            agent.context = child
-            runtime._persist_child_context(agent)
-
-        # Commander 只配置终端可执行文件路径；子 Agent 的启动参数由这里统一编排。
-        configured_terminal = os.environ.get("AGENTRELAY_COMMANDER_TERMINAL_PATH", "").strip()
-        # API/CLI 显式传入的路径优先；网页配置只覆盖默认的 `codex`。
-        terminal = codex if codex != "codex" else (configured_terminal or codex)
-        command_prefix = [terminal, "exec"]
-
-        def command_factory(agent):
-            goal = agent.model_config.get("goal", "完成分配任务")
-            configured_provider = agent.model_config.get("provider")
-            if configured_provider in {"deepseek-web", "qianwen-web", "kimi-web", "local-llm"}:
-                default_provider = configured_provider
-            else:
-                default_provider = os.environ.get("AGENTRELAY_COMMANDER_DEFAULT_PROVIDER", "deepseek-web")
-            provider_id = agent.model_config.get("consult_provider", default_provider)
-            fallback_providers = tuple(agent.model_config.get("fallback_providers", ())) or tuple(
-                item.strip() for item in os.environ.get(
-                    "AGENTRELAY_COMMANDER_FALLBACK_PROVIDERS",
-                    "qianwen-web,kimi-web,local-llm",
-                ).split(",") if item.strip()
-            )
-            coordinator_cli = str(Path(__file__).with_name("commander_provider_call.py").resolve())
-            assist_note = (
-                f"当前主力角色仍是 {agent.model_config.get('assist_for_role')}；你现在只作为协助者，"
-                "请提供分析、验证或补充修改建议，不得接管该角色，也不要把自己的角色改成目标角色。\n"
-                if agent.model_config.get("assist_for") else ""
-            )
-            prompt = (
-                f"你是 Commander 的 {agent.role} 子 Agent。\n"
-                f"职责：{goal}\n"
-                f"{assist_note}"
-                f"指定 Provider：{provider_id}。如果该 Provider 是 web 或 local，"
-                "你只能通过主 Agent/AgentRelay 的受控调用使用它；不要自行打开新的 Commander，"
-                "不要调用任何 API Provider。\n"
-                f"受控 Provider 入口（如确需咨询）：{coordinator_cli} --provider {provider_id} "
-                + " ".join(f"--fallback-provider {item}" for item in fallback_providers) + " "
-                + f"--task-id {task_id} --role {agent.role} --coordinator {runtime_path}\n"
-                f"用户任务：{request}\n\n"
-                "你在隔离 workspace 中工作，只处理自己的职责。可以读取和修改该隔离目录，"
-                "不要访问父 workspace，不要 git commit，不要执行 git reset/checkout，不要调用外部模型。"
-                "完成后用简洁文字报告：完成内容、修改文件、验证结果、风险和建议。"
-            )
-            model = agent.model_config.get("model")
-            return list(command_prefix) + (["-m", str(model)] if model else []) + ["--skip-git-repo-check", "--sandbox", "workspace-write",
-                    "--approve-for-me", "--ephemeral", "--color", "never", prompt]
-
-        runtime.run_processes(agents, command_factory, timeout=timeout)
-        for agent in agents:
-            if agent.context is not None:
-                target = TaskExecutionState.SUCCESS if agent.status == "SUCCESS" else TaskExecutionState.FAILED
-                if target == TaskExecutionState.SUCCESS:
-                    agent.context.transition(TaskExecutionState.VERIFYING)
-                agent.context.transition(target)
+        with fusion_commander_lock(task_id):
+            runtime_path = Path(runtime_root).resolve() if runtime_root else source / ".agentrelay" / "commander"
+            profiles = [
+                ProviderProfile("deepseek-web", "web", login_command="agent_relay_login.py --provider deepseek"),
+                ProviderProfile("qianwen-web", "web", login_command="agent_relay_login.py --provider qianwen"),
+                ProviderProfile("kimi-web", "web", login_command="agent_relay_login.py --provider kimi"),
+                ProviderProfile("local-llm", "local"),
+                ProviderProfile("gpt-api", "api"),
+            ]
+            coordinator = CommanderProviderCoordinator(runtime_path, profiles)
+            runtime = CommanderRuntime(runtime_path, max_agents=max_agents, coordinator=coordinator)
+            configs = model_configs or {}
+            agents = [runtime.create(item.role, task_id, model_config={"provider": "codex-self",
+                        "task_id": task_id, "goal": item.goal, **dict(configs.get(item.role, {}))}) for item in role_plan]
+            for agent in agents:
+                runtime.prepare_workspace(agent, source)
+                child = TaskContext(f"{task_id}:{agent.role}", str(agent.workspace), request)
+                child.transition(TaskExecutionState.ANALYZING)
+                child.transition(TaskExecutionState.EXECUTING)
+                agent.context = child
                 runtime._persist_child_context(agent)
-            runtime.save(agent, runtime_path / "agents")
-        merged = runtime.merge_results(agents)
-        merge_plan = runtime.build_merge_plan(agents, source)
-        merge_confirmation = None
-        if merge_plan.get("entries"):
-            merge_id = f"{task_id}:merge"
-            merge_confirmation = ConfirmationCard(
-                merge_id, "execute", tuple(sorted({item["path"] for item in merge_plan["entries"]})),
-                ("主审查官已检查各子 Agent 输出", "只合并审查通过的子 Agent 文件",
-                 "主工作区当前文件未被用户同时修改"), "pending",
-                request=f"合并 Commander 子 Agent 结果：{request}", workspace=str(source),
-                allowed_files=tuple(sorted({item["path"] for item in merge_plan["entries"]})),
-                verification_commands=("git diff --check",))
-            self.confirmations.create(merge_confirmation)
-        merged["merge_plan"] = merge_plan
-        merged["merge_confirmation"] = merge_confirmation
-        merged["summary"] = runtime.summarize(agents, merge_plan)
-        self.changelog.append(ChangeLog(task_id, "commander", "codex-self", "codex-self", (),
-                                        request, ("native Codex reports collected",), event_type="EXECUTION"))
-        return {"mode": "native-codex", "codex_available": True,
-                "roles": [asdict(item) for item in role_plan], "agents": agents, "merged": merged,
-                "runtime_root": str(runtime_path)}
+
+            # Commander 只配置终端可执行文件路径；子 Agent 的启动参数由这里统一编排。
+            configured_terminal = os.environ.get("AGENTRELAY_COMMANDER_TERMINAL_PATH", "").strip()
+            # API/CLI 显式传入的路径优先；网页配置只覆盖默认的 `codex`。
+            terminal = codex if codex != "codex" else (configured_terminal or codex)
+            command_prefix = [terminal, "exec"]
+
+            def command_factory(agent):
+                goal = agent.model_config.get("goal", "完成分配任务")
+                configured_provider = agent.model_config.get("provider")
+                if configured_provider in {"deepseek-web", "qianwen-web", "kimi-web", "local-llm"}:
+                    default_provider = configured_provider
+                else:
+                    default_provider = os.environ.get("AGENTRELAY_COMMANDER_DEFAULT_PROVIDER", "deepseek-web")
+                provider_id = agent.model_config.get("consult_provider", default_provider)
+                fallback_providers = tuple(agent.model_config.get("fallback_providers", ())) or tuple(
+                    item.strip() for item in os.environ.get(
+                        "AGENTRELAY_COMMANDER_FALLBACK_PROVIDERS",
+                        "qianwen-web,kimi-web,local-llm",
+                    ).split(",") if item.strip()
+                )
+                coordinator_cli = str(Path(__file__).with_name("commander_provider_call.py").resolve())
+                assist_note = (
+                    f"当前主力角色仍是 {agent.model_config.get('assist_for_role')}；你现在只作为协助者，"
+                    "请提供分析、验证或补充修改建议，不得接管该角色，也不要把自己的角色改成目标角色。\n"
+                    if agent.model_config.get("assist_for") else ""
+                )
+                prompt = (
+                    f"你是 Commander 的 {agent.role} 子 Agent。\n"
+                    f"职责：{goal}\n"
+                    f"{assist_note}"
+                    f"指定 Provider：{provider_id}。如果该 Provider 是 web 或 local，"
+                    "你只能通过主 Agent/AgentRelay 的受控调用使用它；不要自行打开新的 Commander，"
+                    "不要调用任何 API Provider。\n"
+                    f"受控 Provider 入口（如确需咨询）：{coordinator_cli} --provider {provider_id} "
+                    + " ".join(f"--fallback-provider {item}" for item in fallback_providers) + " "
+                    + f"--task-id {task_id} --role {agent.role} --coordinator {runtime_path}\n"
+                    f"用户任务：{request}\n\n"
+                    "你在隔离 workspace 中工作，只处理自己的职责。可以读取和修改该隔离目录，"
+                    "不要访问父 workspace，不要 git commit，不要执行 git reset/checkout，不要调用外部模型。"
+                    "完成后用简洁文字报告：完成内容、修改文件、验证结果、风险和建议。"
+                )
+                model = agent.model_config.get("model")
+                return list(command_prefix) + (["-m", str(model)] if model else []) + ["--skip-git-repo-check", "--sandbox", "workspace-write",
+                        "--approve-for-me", "--ephemeral", "--color", "never", prompt]
+
+            runtime.run_processes(agents, command_factory, timeout=timeout)
+            for agent in agents:
+                if agent.context is not None:
+                    target = TaskExecutionState.SUCCESS if agent.status == "SUCCESS" else TaskExecutionState.FAILED
+                    if target == TaskExecutionState.SUCCESS:
+                        agent.context.transition(TaskExecutionState.VERIFYING)
+                    agent.context.transition(target)
+                    runtime._persist_child_context(agent)
+                runtime.save(agent, runtime_path / "agents")
+            merged = runtime.merge_results(agents)
+            merge_plan = runtime.build_merge_plan(agents, source)
+            merge_confirmation = None
+            if merge_plan.get("entries"):
+                merge_id = f"{task_id}:merge"
+                merge_confirmation = ConfirmationCard(
+                    merge_id, "execute", tuple(sorted({item["path"] for item in merge_plan["entries"]})),
+                    ("主审查官已检查各子 Agent 输出", "只合并审查通过的子 Agent 文件",
+                     "主工作区当前文件未被用户同时修改"), "pending",
+                    request=f"合并 Commander 子 Agent 结果：{request}", workspace=str(source),
+                    allowed_files=tuple(sorted({item["path"] for item in merge_plan["entries"]})),
+                    verification_commands=("git diff --check",))
+                self.confirmations.create(merge_confirmation)
+            merged["merge_plan"] = merge_plan
+            merged["merge_confirmation"] = merge_confirmation
+            merged["summary"] = runtime.summarize(agents, merge_plan)
+            self.changelog.append(ChangeLog(task_id, "commander", "codex-self", "codex-self", (),
+                                            request, ("native Codex reports collected",), event_type="EXECUTION"))
+            return {"mode": "native-codex", "codex_available": True,
+                    "roles": [asdict(item) for item in role_plan], "agents": agents, "merged": merged,
+                    "runtime_root": str(runtime_path)}
 
     def merge_commander_results(self, task_id: str, workspace: str | Path,
                                 runtime_root: str | Path, *, confirmed: bool = False) -> dict:
@@ -999,30 +1017,33 @@ class Orchestrator:
         """
         try:
             from .research_commander import CommanderRuntime
+            from .fusion_mode import fusion_commander_lock
         except ImportError:
             from research_commander import CommanderRuntime
-        runtime = CommanderRuntime(root, max_agents=max_agents)
-        configs = model_configs or {}
-        agents = [runtime.create(role, task_id, model_config=configs.get(role, {})) for role in roles]
-        for agent in agents:
-            child = TaskContext(f"{task_id}:{agent.role}", str(agent.workspace), request)
-            child.transition(TaskExecutionState.ANALYZING)
-            child.transition(TaskExecutionState.EXECUTING)
-            agent.context = child
-            runtime._persist_child_context(agent)
-        runtime.run_processes(agents, command_factory, timeout=timeout)
-        for agent in agents:
-            if agent.context is not None:
-                target = TaskExecutionState.SUCCESS if agent.status == "SUCCESS" else TaskExecutionState.FAILED
-                if target == TaskExecutionState.SUCCESS:
-                    agent.context.transition(TaskExecutionState.VERIFYING)
-                agent.context.transition(target)
+            from fusion_mode import fusion_commander_lock
+        with fusion_commander_lock(task_id):
+            runtime = CommanderRuntime(root, max_agents=max_agents)
+            configs = model_configs or {}
+            agents = [runtime.create(role, task_id, model_config=configs.get(role, {})) for role in roles]
+            for agent in agents:
+                child = TaskContext(f"{task_id}:{agent.role}", str(agent.workspace), request)
+                child.transition(TaskExecutionState.ANALYZING)
+                child.transition(TaskExecutionState.EXECUTING)
+                agent.context = child
                 runtime._persist_child_context(agent)
-            runtime.save(agent, Path(root) / "agents")
-        merged = runtime.merge_results(agents)
-        self.changelog.append(ChangeLog(task_id, "commander", "codex-self", "codex-subagent", (),
-                                        request, ("processes collected",), event_type="EXECUTION"))
-        return {"agents": agents, "merged": merged}
+            runtime.run_processes(agents, command_factory, timeout=timeout)
+            for agent in agents:
+                if agent.context is not None:
+                    target = TaskExecutionState.SUCCESS if agent.status == "SUCCESS" else TaskExecutionState.FAILED
+                    if target == TaskExecutionState.SUCCESS:
+                        agent.context.transition(TaskExecutionState.VERIFYING)
+                    agent.context.transition(target)
+                    runtime._persist_child_context(agent)
+                runtime.save(agent, Path(root) / "agents")
+            merged = runtime.merge_results(agents)
+            self.changelog.append(ChangeLog(task_id, "commander", "codex-self", "codex-subagent", (),
+                                            request, ("processes collected",), event_type="EXECUTION"))
+            return {"agents": agents, "merged": merged}
 
     def rollback_plan(self, task_id: str, files: Iterable[str], current: dict[str, str], checkpoint: dict[str, str]) -> dict:
         entries = []

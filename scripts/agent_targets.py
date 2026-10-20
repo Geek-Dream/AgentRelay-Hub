@@ -377,18 +377,108 @@ def register_hermes(config_path: Path, venv_python: Path, shim_path: Path) -> bo
 
 PI_EXTENSION_TEMPLATE = """// AgentRelay 上下文注入扩展（由 AgentRelay 安装器生成，重新安装会覆盖此文件）
 import {{ spawnSync }} from "node:child_process";
+import {{ existsSync }} from "node:fs";
+import {{ homedir }} from "node:os";
+import {{ dirname, join }} from "node:path";
+import {{ fileURLToPath }} from "node:url";
 
-const PYTHON = {python};
-const SHIM = {shim};
+const IS_WIN = process.platform === "win32";
+const HOME = homedir();
+const CODEX_HOME = process.env.CODEX_HOME || join(HOME, ".codex");
+const VENV = join(CODEX_HOME, "agentrelay-env");
+const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
+const PI_AGENT_DIR = dirname(EXTENSION_DIR);
+const PI_SKILLS = join(PI_AGENT_DIR, "skills");
+const HOME_PI_SKILLS = join(HOME, ".pi", "agent", "skills");
+const BACKSLASH = String.fromCharCode(92);
+
+function firstExisting(candidates) {{
+  return candidates.find((candidate) => {{
+    try {{
+      return Boolean(candidate && existsSync(candidate));
+    }} catch {{
+      return false;
+    }}
+  }}) ?? "";
+}}
+
+const SHIM = firstExisting([
+  process.env.AGENTRELAY_SHIM,
+  join(PI_SKILLS, "agent-relay", "scripts", "agentrelay_hook_shim.py"),
+  join(HOME_PI_SKILLS, "agent-relay", "scripts", "agentrelay_hook_shim.py"),
+  join(CODEX_HOME, "skills", "agent-relay", "scripts", "agentrelay_hook_shim.py"),
+]);
+const FUSION = firstExisting([
+  process.env.AGENTRELAY_FUSION,
+  join(PI_SKILLS, "agent-fusion", "scripts", "agent_fusion.py"),
+  join(HOME_PI_SKILLS, "agent-fusion", "scripts", "agent_fusion.py"),
+  join(CODEX_HOME, "skills", "agent-fusion", "scripts", "agent_fusion.py"),
+]);
+const VENV_PYTHONS = IS_WIN
+  ? [
+      join(VENV, "Scripts", "python.exe"),
+      join(VENV, "bin", "python"),
+    ]
+  : [
+      join(VENV, "bin", "python"),
+      join(VENV, "Scripts", "python.exe"),
+    ];
+const PYTHON_CANDIDATES = [
+  process.env.AGENTRELAY_PYTHON,
+  ...VENV_PYTHONS,
+  IS_WIN ? "py" : "python3",
+  IS_WIN ? "python" : "python",
+].filter(Boolean);
+
+let resolvedPython;
+
+function pythonCommand() {{
+  if (resolvedPython !== undefined) return resolvedPython;
+  for (const candidate of PYTHON_CANDIDATES) {{
+    const looksLikePath = candidate.includes("/")
+      || candidate.includes(BACKSLASH)
+      || candidate.includes(":");
+    if (looksLikePath && !existsSync(candidate)) continue;
+    try {{
+      const probe = spawnSync(candidate, ["--version"], {{
+        encoding: "utf-8",
+        timeout: 2000,
+      }});
+      if (!probe?.error && probe?.status === 0) {{
+        resolvedPython = candidate;
+        return candidate;
+      }}
+    }} catch {{
+      // Try the next interpreter instead of blocking the host Agent.
+    }}
+  }}
+  resolvedPython = null;
+  return null;
+}}
+
+function runPython(script, args, options) {{
+  if (!script || !existsSync(script)) return null;
+  const python = pythonCommand();
+  if (!python) return null;
+  try {{
+    return spawnSync(python, [script, ...args], options);
+  }} catch {{
+    return null;
+  }}
+}}
 
 function relay(payload) {{
-  try {{
-    const res = spawnSync(PYTHON, [SHIM, "--target", "pi", "--event", "UserPromptSubmit"], {{
+  const res = runPython(
+    SHIM,
+    ["--target", "pi", "--event", "UserPromptSubmit"],
+    {{
       input: JSON.stringify(payload),
       encoding: "utf-8",
       timeout: 12000,
-    }});
-    if (!res || res.status !== 0 || !res.stdout) return "";
+    }},
+  );
+  if (!res || res.status !== 0 || !res.stdout) return "";
+  try {{
     const out = JSON.parse(String(res.stdout).trim());
     return out?.hookSpecificOutput?.additionalContext ?? out?.additionalContext ?? "";
   }} catch {{
@@ -396,14 +486,322 @@ function relay(payload) {{
   }}
 }}
 
+function fusion(args) {{
+  if (!FUSION) {{
+    return {{ result: null, status: null, error: "Agent Fusion 文件未安装" }};
+  }}
+  const res = runPython(FUSION, args, {{
+    encoding: "utf-8",
+    timeout: 5000,
+  }});
+  if (!res) {{
+    return {{ result: null, status: null, error: "未找到可用的 AgentRelay Python" }};
+  }}
+  const stdout = String(res?.stdout ?? "").trim();
+  const line = stdout.split(/\\r?\\n/).find((item) => item.startsWith("AGENT_FUSION_RESULT="));
+  let result = null;
+  if (line) {{
+    try {{
+      result = JSON.parse(line.slice("AGENT_FUSION_RESULT=".length));
+    }} catch {{
+      result = null;
+    }}
+  }}
+  return {{
+    result,
+    status: res?.status ?? null,
+    error: String(res?.stderr ?? "").trim(),
+  }};
+}}
+
+function fusionStatus() {{
+  return fusion(["status", "--json"]).result?.state ?? null;
+}}
+
+function fusionGuidance(ctx) {{
+  const state = fusionStatus();
+  if (!state?.delegable) return "";
+  const python = pythonCommand();
+  if (!python || !FUSION) return "";
+  const provider = state.provider?.ref ?? state.provider_id ?? "";
+  const toolMode = String(state.tool_mode || "readonly");
+  const sessionId = ctx?.sessionId ?? ctx?.session_id ?? "";
+  const workspace = ctx?.cwd ?? process.cwd();
+  const command = JSON.stringify(python) + " " + JSON.stringify(FUSION);
+  const delegate = command
+    + " delegate \\"the concrete task\\""
+    + " --workspace " + JSON.stringify(workspace)
+    + (sessionId ? " --session-id " + JSON.stringify(sessionId) : "")
+    + " --context \\"relevant context\\"";
+  return [
+    "AgentRelay Fusion is available as a persistent sidekick with its own session and tool loop.",
+    "Selected provider: " + provider,
+    "Tool mode: " + toolMode + " (maximum " + String(state.max_steps || 8) + " model steps).",
+    toolMode === "coding"
+      ? "WARNING: coding mode can modify workspace files and execute shell commands."
+      : "Readonly mode can inspect files, list directories, and search, but cannot write files or run commands.",
+    "Use Fusion for delegated investigation or execution while the main agent keeps planning and final review:",
+    delegate,
+    "The same workspace and session id reuse persistent context. Fusion cannot start another Fusion or Commander. If Commander starts, Fusion is preempted, writes a handoff, and must not resume the old task.",
+    "Continue local work if Fusion is unavailable or fails; do not block the main task.",
+  ].join("\\n");
+}}
+
+const FUSION_REASONS = {{
+  FUSION_DISABLED: "Fusion 已关闭",
+  FUSION_PROVIDER_NOT_CONFIGURED: "尚未选择 Provider",
+  FUSION_PROVIDER_NOT_FOUND: "配置的 Provider 已不存在",
+  FUSION_PROVIDER_DISABLED: "配置的 Provider 已停用",
+  FUSION_PROVIDER_NOT_READY: "Provider 缺少必要地址或模型名称",
+  FUSION_PROVIDER_AMBIGUOUS: "Provider ID 同时匹配多个类型，请使用类型前缀",
+  COMMANDER_ACTIVE: "Commander 正在运行，拥有最高优先级并强制停用 Fusion",
+  COMMANDER_CHILD: "当前是 Commander 子 Agent，禁止调用 Fusion",
+  FUSION_CHILD: "当前是 Fusion 子会话，禁止递归调用 Fusion 或 Commander",
+  FUSION_TOOL_MODE_UNSUPPORTED: "网页 Provider 不支持 coding 工具模式，请改为 readonly",
+  FUSION_BUSY: "该 Fusion 会话已有任务正在运行",
+}};
+
+function fusionReasonText(state) {{
+  const reason = String(state?.reason || "");
+  if (!reason || reason === "READY") return "就绪";
+  return FUSION_REASONS[reason] || ("状态码 " + reason);
+}}
+
+function describeFusion(result) {{
+  if (!result) return "Agent Fusion 状态不可读";
+  if (result.status !== "success") return String(result.message || result.error || "Agent Fusion 操作失败");
+  const state = result.state || {{}};
+  const provider = state.provider?.ref || state.provider_id || "未配置";
+  const status = state.delegable ? "可调用" : "不可调用";
+  return "Agent Fusion：" + status
+    + "；开关偏好 " + (state.enabled ? "开启" : "关闭")
+    + "；运行态 " + (state.effective_enabled ? "开启" : "关闭")
+    + "；工具模式 " + String(state.tool_mode || "readonly")
+    + "；最多 " + String(state.max_steps || 8) + " 步"
+    + "；Provider " + provider
+    + "；说明：" + fusionReasonText(state);
+}}
+
+function fusionMenuText(item) {{
+  return item.label + " - " + item.description;
+}}
+
+function fusionMenuChoice(items, selected) {{
+  return items.find((item) => fusionMenuText(item) === selected);
+}}
+
+function fusionProviderDescription(kind) {{
+  if (kind === "web") return "网页 Provider，沿用现有登录会话，不切换默认网站";
+  if (kind === "local") return "本地模型 Provider，只调用本机配置，不访问云端";
+  if (kind === "api") return "API Provider，使用已配置的接口、协议和模型";
+  return "已配置的外部模型 Provider";
+}}
+
+async function fusionProviderMenu(ctx) {{
+  const state = fusionStatus();
+  if (!state) {{
+    ctx.ui.notify("无法读取 Agent Fusion 状态，请检查 AgentRelay 安装", "error");
+    return;
+  }}
+  const current = String(state.provider_id || "");
+  const providers = Array.isArray(state.available_providers) ? state.available_providers : [];
+  const items = providers
+    .filter((provider) => provider && provider.ref)
+    .map((provider) => ({{
+      id: String(provider.ref),
+      label: String(provider.ref) + (String(provider.ref) === current ? "（当前）" : ""),
+      description: fusionProviderDescription(String(provider.kind || "")),
+    }}));
+  items.push({{
+    id: "",
+    label: "返回",
+    description: "不修改当前 Provider",
+  }});
+  const selected = await ctx.ui.select(
+    providers.length > 0
+      ? "选择 Agent Fusion Provider（只列出本机已配置项，不探测登录）"
+      : "尚未配置 Provider，请先在 AgentRelay 配置中心添加网页、本地或 API Provider",
+    items.map(fusionMenuText),
+  );
+  const item = fusionMenuChoice(items, selected);
+  if (!item || !item.id) return;
+  const outcome = fusion(["provider", item.id]);
+  const level = outcome.result?.status === "success" ? "info" : "error";
+  ctx.ui.notify(
+    describeFusion(outcome.result || {{ status: "failed", error: outcome.error }}),
+    level,
+  );
+}}
+
+async function confirmFusionCoding(ctx) {{
+  const choices = [
+    "确认启用 coding - 允许 Fusion 修改工作区文件并执行命令",
+    "取消 - 保持当前工具模式",
+  ];
+  const selected = await ctx.ui.select(
+    "确定要启用 coding 模式吗？\\n"
+      + "coding 模式会修改文件和执行命令，风险明显高于 readonly。",
+    choices,
+  );
+  return selected === choices[0];
+}}
+
+async function fusionMenu(ctx) {{
+  const state = fusionStatus();
+  const current = state
+    ? "当前：开关" + (state.enabled ? "开启" : "关闭")
+      + "；工具模式 " + String(state.tool_mode || "readonly")
+      + "；最多 " + String(state.max_steps || 8) + " 步"
+      + "；" + (state.delegable ? "可调用" : fusionReasonText(state))
+    : "当前：状态不可读";
+  const items = [
+    {{
+      id: "status",
+      label: "查看当前状态",
+      description: "检查开关、Commander 最高优先级互斥和 Provider 是否可用",
+    }},
+    {{
+      id: "on",
+      label: "开启 Fusion",
+      description: "保存开启偏好；Commander 运行期间仍会强制停用",
+    }},
+    {{
+      id: "off",
+      label: "关闭 Fusion",
+      description: "保存关闭偏好；普通任务不再调用外部模型",
+    }},
+    {{
+      id: "provider",
+      label: "选择 Provider",
+      description: "从本机已配置的网页、本地或 API Provider 中选择独立会话使用的模型",
+    }},
+    {{
+      id: "mode-readonly",
+      label: "切换为 readonly",
+      description: "允许读取、列目录和搜索，不允许写文件或执行命令，适合默认安全协作",
+    }},
+    {{
+      id: "mode-coding",
+      label: "切换为 coding",
+      description: "允许修改工作区文件并执行 shell 命令，启用前会再次要求确认风险",
+    }},
+    {{
+      id: "reset-session",
+      label: "重置当前会话",
+      description: "清除当前工作区和会话 ID 对应的持久上下文，下一次从空白 Fusion 会话开始",
+    }},
+    {{
+      id: "clear-provider",
+      label: "清除 Provider",
+      description: "保留 Fusion 开关，但立即停止外部模型调用",
+    }},
+  ];
+  const selected = await ctx.ui.select("Agent Fusion 设置\\n" + current, items.map(fusionMenuText));
+  const item = fusionMenuChoice(items, selected);
+  if (!item) return;
+  if (item.id === "provider") {{
+    await fusionProviderMenu(ctx);
+    return;
+  }}
+  if (item.id === "mode-coding") {{
+    if (!await confirmFusionCoding(ctx)) return;
+  }}
+  let command = null;
+  if (item.id === "clear-provider") {{
+    command = ["provider", "none"];
+  }} else if (item.id === "mode-readonly") {{
+    command = ["mode", "readonly"];
+  }} else if (item.id === "mode-coding") {{
+    command = ["mode", "coding", "--confirm-coding"];
+  }} else if (item.id === "reset-session") {{
+    const workspace = ctx?.cwd ?? process.cwd();
+    const sessionId = ctx?.sessionId ?? ctx?.session_id ?? "";
+    command = ["reset", "--workspace", workspace];
+    if (sessionId) command.push("--session-id", sessionId);
+  }} else {{
+    command = [item.id];
+  }}
+  const outcome = fusion(command);
+  const level = outcome.result?.status === "success" ? "info" : "error";
+  ctx.ui.notify(
+    describeFusion(outcome.result || {{ status: "failed", error: outcome.error }}),
+    level,
+  );
+}}
+
+async function fusionCommand(args, ctx) {{
+  const parts = String(args || "").trim().split(/\\s+/).filter(Boolean);
+  if (parts.length === 0) {{
+    if (!ctx.hasUI) {{
+      ctx.ui.notify(
+        "非交互模式请使用：/agent-fusion [status|on|off|provider <ref|none>|mode <readonly|coding>|reset]",
+        "warning",
+      );
+      return;
+    }}
+    await fusionMenu(ctx);
+    return;
+  }}
+  let command = null;
+  if (parts.length === 1 && parts[0] === "status") {{
+    command = ["status", "--json"];
+  }} else if (parts.length === 1 && (parts[0] === "on" || parts[0] === "off")) {{
+    command = [parts[0]];
+  }} else if (parts[0] === "provider" && parts.length === 2) {{
+    command = ["provider", parts[1]];
+  }} else if (parts.length === 2 && parts[0] === "mode"
+             && (parts[1] === "readonly" || parts[1] === "coding")) {{
+    if (parts[1] === "coding") {{
+      if (!ctx.hasUI) {{
+        ctx.ui.notify(
+          "非交互启用 coding 请使用：/agent-fusion mode coding --confirm-coding",
+          "warning",
+        );
+        return;
+      }}
+      if (!await confirmFusionCoding(ctx)) return;
+      command = ["mode", "coding", "--confirm-coding"];
+    }} else {{
+      command = ["mode", "readonly"];
+    }}
+  }} else if (parts.length === 3 && parts[0] === "mode"
+             && parts[1] === "coding" && parts[2] === "--confirm-coding") {{
+    command = ["mode", "coding", "--confirm-coding"];
+  }} else if (parts.length === 1 && parts[0] === "reset") {{
+    command = ["reset", "--workspace", ctx?.cwd ?? process.cwd()];
+    const sessionId = ctx?.sessionId ?? ctx?.session_id ?? "";
+    if (sessionId) command.push("--session-id", sessionId);
+  }}
+  if (!command) {{
+    ctx.ui.notify(
+      "用法：/agent-fusion [status|on|off|provider <ref|none>|mode <readonly|coding>|reset]",
+      "warning",
+    );
+    return;
+  }}
+  const outcome = fusion(command);
+  const level = outcome.result?.status === "success" ? "info" : "error";
+  ctx.ui.notify(
+    describeFusion(outcome.result || {{ status: "failed", error: outcome.error }}),
+    level,
+  );
+}}
+
 export default function agentRelay(pi) {{
+  pi.registerCommand("agent-fusion", {{
+    description: "管理 AgentRelay Fusion；无参数进入中文选择菜单",
+    handler: fusionCommand,
+  }});
+
   pi.on("before_agent_start", (event, ctx) => {{
-    const content = relay({{
+    const relayContent = relay({{
       hook_event_name: "UserPromptSubmit",
       session_id: ctx?.sessionId ?? ctx?.session_id ?? "",
       cwd: ctx?.cwd ?? process.cwd(),
       prompt: event?.prompt ?? event?.message ?? "",
     }});
+    const fusionContent = fusionGuidance(ctx);
+    const content = [relayContent, fusionContent].filter(Boolean).join("\\n\\n");
     if (!content) return;
     return {{ message: {{ customType: "agent-relay", content, display: false }} }};
   }});
@@ -503,11 +901,19 @@ def register_kimi(config_path: Path, venv_python: Path, shim_path: Path) -> bool
     return True
 
 
-def write_pi_extension(extension_path: Path, venv_python: Path, shim_path: Path) -> bool:
-    content = PI_EXTENSION_TEMPLATE.format(
-        python=json.dumps(str(venv_python)),
-        shim=json.dumps(str(shim_path)),
-    )
+def write_pi_extension(
+    extension_path: Path,
+    venv_python: Path,
+    shim_path: Path,
+    fusion_path: Path | None = None,
+) -> bool:
+    """Write a portable Pi extension without embedding this machine's paths.
+
+    The path arguments remain part of the public helper signature for installer
+    compatibility. The generated extension resolves them again at runtime.
+    """
+    _ = venv_python, shim_path, fusion_path
+    content = PI_EXTENSION_TEMPLATE.format()
     if extension_path.is_file() and extension_path.read_text(encoding="utf-8") == content:
         return False
     backup_file(extension_path, "before-agentrelay-update")
@@ -574,9 +980,15 @@ def relay_installed(target_id: str, meta: dict | None = None) -> bool:
     """
     if meta is None:
         meta = agent_targets()[target_id]
-    skill_ok = (Path(meta["skill_dir"]) / "SKILL.md").is_file()
+    skill_dir = Path(meta["skill_dir"])
+    skill_ok = (skill_dir / "SKILL.md").is_file()
+    fusion_ok = (
+        (skill_dir.with_name("agent-fusion") / "SKILL.md").is_file()
+        and (skill_dir.with_name("agent-fusion") / "scripts" / "agent_fusion.py").is_file()
+        and (skill_dir.with_name("agent-fusion") / "scripts" / "fusion_runner.py").is_file()
+    )
     registered_ok, _ = registered_in_config(target_id, meta, None, None)
-    return skill_ok and registered_ok
+    return skill_ok and fusion_ok and registered_ok
 
 
 def dry_run_hook(command: list[str], payload: dict, timeout: int = 15) -> tuple[bool, str]:
@@ -620,6 +1032,19 @@ def verify_target(
         "ok": skill_ok,
         "detail": str(skill_dir),
         "reason": "缺少 SKILL.md 时该 Agent 不会加载 AgentRelay 工作流",
+    })
+    fusion_dir = skill_dir.with_name("agent-fusion")
+    fusion_ok = (
+        (fusion_dir / "SKILL.md").is_file()
+        and (fusion_dir / "scripts" / "agent_fusion.py").is_file()
+        and (fusion_dir / "scripts" / "fusion_mode.py").is_file()
+        and (fusion_dir / "scripts" / "fusion_runner.py").is_file()
+    )
+    checks.append({
+        "name": "Fusion Skill",
+        "ok": fusion_ok,
+        "detail": str(fusion_dir),
+        "reason": "缺少 Fusion 文件时持久 sidekick、工具模式和 /agent-fusion 开关不可用",
     })
 
     if meta["level"] == "skill-only":

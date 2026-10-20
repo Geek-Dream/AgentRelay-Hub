@@ -38,6 +38,11 @@ try:
 except ImportError:
     fcntl = None
 
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
 
 # ============================================================
 # 路径
@@ -535,15 +540,15 @@ def acquire_lock():
     """
     获取文件锁。
 
-    macOS / Linux 使用 fcntl。
-    如果当前环境没有 fcntl，则退化为空操作。
+    macOS / Linux 使用 fcntl，Windows 使用 msvcrt。
+    两个原生锁都不可用时才退化为空操作。
     """
 
     ensure_dirs()
 
     fp = open(
         LOCK_FILE,
-        "a+",
+        "a+b",
     )
 
     if fcntl is not None:
@@ -551,6 +556,18 @@ def acquire_lock():
             fp.fileno(),
             fcntl.LOCK_EX,
         )
+    elif msvcrt is not None:
+        fp.seek(0, os.SEEK_END)
+        if fp.tell() == 0:
+            fp.write(b"\0")
+            fp.flush()
+        while True:
+            try:
+                fp.seek(0)
+                msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                time.sleep(0.05)
 
     return fp
 
@@ -569,6 +586,9 @@ def release_lock(fp):
                 fp.fileno(),
                 fcntl.LOCK_UN,
             )
+        elif msvcrt is not None:
+            fp.seek(0)
+            msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
     finally:
         fp.close()
 
@@ -1926,16 +1946,22 @@ def find_relay_script():
 def find_relay_python():
     """定位 AgentRelay 独立 Python；缺失时退回当前解释器。"""
 
-    dedicated = (
-        CODEX_DIR / "agentrelay-env" / "bin" / "python"
+    configured = os.environ.get("AGENTRELAY_PYTHON")
+    candidates = (
+        Path(configured).expanduser() if configured else None,
+        CODEX_DIR / "agentrelay-env" / "bin" / "python",
+        CODEX_DIR / "agentrelay-env" / "Scripts" / "python.exe",
     )
-    if dedicated.is_file():
-        return str(dedicated)
+    for candidate in candidates:
+        if candidate is not None and candidate.is_file():
+            return str(candidate)
 
     return sys.executable
 
 
 def pid_alive(pid):
+    if os.name == "nt":
+        return windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -1945,6 +1971,30 @@ def pid_alive(pid):
     except OSError:
         return False
     return True
+
+
+def windows_pid_alive(pid):
+    """Use a Win32 process handle because os.kill(pid, 0) is not a liveness probe."""
+    if pid <= 0:
+        return False
+    try:
+        import ctypes
+
+        process_query_limited_information = 0x1000
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(
+            process_query_limited_information,
+            False,
+            int(pid),
+        )
+        if not handle:
+            return False
+        try:
+            return True
+        finally:
+            kernel32.CloseHandle(handle)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
 
 
 def build_forced_relay_question(state):
@@ -2347,8 +2397,8 @@ def archive_reminder_text(state):
         f"{match_text}"
         f"当前问题: {problem_context or '未记录用户问题摘要'}。"
         f"{reason_text}"
-        f'查询命令: python3 "{ARCHIVE_SCRIPT}" search "关键词"；'
-        f'不确定项目名时先运行 python3 "{ARCHIVE_SCRIPT}" projects。'
+        f'查询命令: "{sys.executable}" "{ARCHIVE_SCRIPT}" search "关键词"；'
+        f'不确定项目名时先运行 "{sys.executable}" "{ARCHIVE_SCRIPT}" projects。'
         "命中时优先复用归档里已验证的结论，并在本次环境重新验证；"
         "没有命中再继续自行排查。归档只保存结论，不替 Agent 做决定，"
         "也不改变需求卡、确认卡和验证规则；weight=2 不会触发在线支援模型。"

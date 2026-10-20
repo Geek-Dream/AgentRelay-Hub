@@ -227,6 +227,41 @@ Provider 选择顺序：
   结果以 `vision` 字段保存；未标记的本地模型不会被 agent-image 调用。
 - 调用失败或未配置时脚本始终正常退出（exit 0）并说明原因，图片不会被静默丢弃或误发。
 
+## AgentFusion 持久 sidekick ⚡
+
+AgentFusion（`agent-fusion`）默认开启，但不会自动选择默认 Provider。只有用户明确配置了
+`web`、`local` 或 `api` Provider 后才会进入可调用状态；未配置时本地状态检查立即返回，
+不探网、不检查登录、不打开浏览器，也不让主模型等待。Fusion 默认使用 `readonly` 工具模式，
+拥有独立持久会话和多步工具循环，可以和主 Agent 并行处理调查、批量阅读、局部实现等委派工作。
+
+Pi 中直接输入 `/agent-fusion` 会进入中文选择菜单，每个选项都带有用途说明。显式命令仍然
+保留，便于脚本化和高级操作。Codex 中可用 `$agent-fusion` 提及本 Skill：
+
+```text
+/agent-fusion
+/agent-fusion status
+/agent-fusion on
+/agent-fusion off
+/agent-fusion mode readonly
+/agent-fusion mode coding
+/agent-fusion reset
+/agent-fusion provider web:deepseek-web
+/agent-fusion provider local:local-llm
+/agent-fusion provider api:kimi-api
+/agent-fusion provider none
+```
+
+Fusion 的 `readonly` 模式只能使用 `read_file`、`list_files` 和 `grep`，不能写文件或执行
+命令。`local`/`api` Provider 可切换到 `coding`，切换前必须确认，因为该模式允许 Fusion
+修改工作区文件并执行 shell 命令；网页 Provider 不具备工具协议，只能保持文本只读协作。
+持久会话按 workspace 与 session ID 隔离，Provider 或工具模式变化时会自动重置，避免污染
+上下文。主 Agent 可以多次向同一 Fusion 会话委派连续工作。
+
+Commander 启动后拥有最高优先级：无论 Fusion 的保存开关是开启还是关闭，主流程和 Commander
+的全部子 Agent 都不能调用 Fusion。正在运行的 Fusion 会在下一次模型或工具调用前停住，
+生成交接快照并关闭旧任务；Commander 结束后不会自动恢复旧任务，Fusion 等待主 Agent 的
+下一次明确委派。这个互斥只影响运行态，不会改写用户保存的 on/off 偏好。
+
 ## Requirements 🛠️
 
 - Codex CLI（当前稳定版本）
@@ -283,7 +318,8 @@ Agent 自身拉起执行，在线模型也只在被调用那一刻临时打开�
 
 - 安装 Hook 到 `$CODEX_HOME/hooks/`
 - 安装 Skill 和脚本到 `$CODEX_HOME/skills/agent-relay/`，并按选择复制到其他 Agent 的
-  skills 目录（如 `~/.claude/skills/agent-relay`）
+  skills 目录（如 `~/.claude/skills/agent-relay`）；同时安装平级的 `agent-image` 和
+  `agent-fusion` Skill
 - 向所选 Agent 注册 Hook：Codex 合并 `hooks.json`，Claude 合并 `~/.claude/settings.json`，
   Hermes 合并 `~/.hermes/config.yaml`，Pi 生成 `~/.pi/agent/extensions/agent-relay.ts`
 - 创建独立环境 `$CODEX_HOME/agentrelay-env/`
@@ -291,6 +327,12 @@ Agent 自身拉起执行，在线模型也只在被调用那一刻临时打开�
 - 保留用户已有文件
 - 备份并原子合并现有 `hooks.json` / `settings.json` / `config.yaml`，不删除任何已有 Hook
 - 检查 Codex CLI、Python、虚拟环境、Playwright 和 Chromium
+
+Pi 扩展文件不会写入当前用户的绝对路径。运行时优先读取 `AGENTRELAY_PYTHON`、
+`AGENTRELAY_SHIM`、`AGENTRELAY_FUSION`，随后从扩展所在目录和 `CODEX_HOME` 查找 Skill；
+独立 Python 在 macOS/Linux 使用 `agentrelay-env/bin/python`，在 Windows 使用
+`agentrelay-env\Scripts\python.exe`，缺失时才依次尝试系统的 `python3`/`python` 或 `py`。
+因此同一个 Pi Skill 目录可以跨平台使用，不依赖 `wl` 或某台 Mac 的用户目录。
 
 Provider、Commander 和队列设置会保存到 `$CODEX_HOME/skills/agent-relay/config/` 下的加密文件，
 密钥也只在该目录保存并限制当前用户读取。API Key 和网页登录状态不会写进项目目录、日志或 Git；
@@ -402,6 +444,8 @@ $CODEX_HOME/
 │   └── problems/            # 按 Session 分组的问题独立快照
 ├── hooks/
 ├── skills/agent-relay/
+├── skills/agent-image/
+├── skills/agent-fusion/
 └── hooks.json
 ```
 

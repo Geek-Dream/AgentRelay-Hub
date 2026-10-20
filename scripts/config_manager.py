@@ -84,6 +84,13 @@ def default_config() -> dict[str, Any]:
     return {
         "version": 1,
         "mode": "offline",
+        "fusion": {
+            "enabled": True,
+            "provider_id": "",
+            "timeout": 30,
+            "tool_mode": "readonly",
+            "max_steps": 8,
+        },
         "commander": {
             "enabled": False,
             "terminal": "codex",
@@ -227,11 +234,34 @@ def load_config(home: Path | None = None) -> dict[str, Any]:
         return default_config()
     merged = default_config()
     merged.update(value)
-    for section in ("commander", "web_providers", "local_providers", "api_providers"):
-        if section == "commander":
+    for section in ("fusion", "commander", "web_providers", "local_providers", "api_providers"):
+        if section in {"fusion", "commander"}:
             value_section = value.get(section)
             if isinstance(value_section, dict):
                 merged[section] = {**default_config()[section], **value_section}
+                if section == "fusion":
+                    try:
+                        merged[section]["timeout"] = max(
+                            1, min(120, int(merged[section].get("timeout", 30) or 30))
+                        )
+                    except (TypeError, ValueError):
+                        merged[section]["timeout"] = 30
+                    merged[section]["enabled"] = bool(merged[section].get("enabled", True))
+                    merged[section]["provider_id"] = str(
+                        merged[section].get("provider_id") or ""
+                    ).strip()
+                    tool_mode = str(
+                        merged[section].get("tool_mode") or "readonly"
+                    ).strip().lower()
+                    merged[section]["tool_mode"] = (
+                        tool_mode if tool_mode in {"readonly", "coding"} else "readonly"
+                    )
+                    try:
+                        merged[section]["max_steps"] = max(
+                            1, min(20, int(merged[section].get("max_steps", 8) or 8))
+                        )
+                    except (TypeError, ValueError):
+                        merged[section]["max_steps"] = 8
         elif not isinstance(merged.get(section), list):
             merged[section] = []
     merged["web_providers"] = [
@@ -331,6 +361,32 @@ def resolve_conversation_mode(
 def save_config(value: Mapping[str, Any], home: Path | None = None) -> Path:
     cipher = _fernet(home, create=True)
     normalized = dict(value)
+    fusion = normalized.get("fusion")
+    if isinstance(fusion, dict):
+        normalized["fusion"] = {
+            **default_config()["fusion"],
+            **fusion,
+        }
+        try:
+            normalized["fusion"]["timeout"] = max(
+                1, min(120, int(normalized["fusion"].get("timeout", 30) or 30))
+            )
+        except (TypeError, ValueError):
+            normalized["fusion"]["timeout"] = 30
+        normalized["fusion"]["enabled"] = bool(normalized["fusion"].get("enabled", True))
+        normalized["fusion"]["provider_id"] = str(
+            normalized["fusion"].get("provider_id") or ""
+        ).strip()
+        tool_mode = str(normalized["fusion"].get("tool_mode") or "readonly").strip().lower()
+        normalized["fusion"]["tool_mode"] = (
+            tool_mode if tool_mode in {"readonly", "coding"} else "readonly"
+        )
+        try:
+            normalized["fusion"]["max_steps"] = max(
+                1, min(20, int(normalized["fusion"].get("max_steps", 8) or 8))
+            )
+        except (TypeError, ValueError):
+            normalized["fusion"]["max_steps"] = 8
     normalized["web_providers"] = [
         item for raw in normalized.get("web_providers", [])
         if (item := _normalize_web_provider(raw)) is not None

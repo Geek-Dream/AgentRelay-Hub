@@ -19,8 +19,13 @@ from typing import Iterable
 
 try:
     import fcntl
-except ImportError:  # pragma: no cover - Windows falls back to process-local use
+except ImportError:  # pragma: no cover - Windows uses msvcrt instead
     fcntl = None
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX uses fcntl instead
+    msvcrt = None
 
 
 WEB = "web"
@@ -127,10 +132,20 @@ class CommanderProviderCoordinator:
 
     def _try_lock(self, provider_id: str, task_id: str, role: str) -> ProviderLease | None:
         self.locks.mkdir(parents=True, exist_ok=True)
-        handle = (self.locks / f"{provider_id}.lock").open("a+", encoding="utf-8")
+        handle = (self.locks / f"{provider_id}.lock").open("a+b")
         try:
             if fcntl is not None:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            elif msvcrt is not None:
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                handle.close()
+                return None
             return ProviderLease(provider_id, task_id, role, handle)
         except (BlockingIOError, OSError):
             handle.close()
@@ -164,6 +179,9 @@ class CommanderProviderCoordinator:
         try:
             if fcntl is not None:
                 fcntl.flock(lease._handle.fileno(), fcntl.LOCK_UN)
+            elif msvcrt is not None:
+                lease._handle.seek(0)
+                msvcrt.locking(lease._handle.fileno(), msvcrt.LK_UNLCK, 1)
         finally:
             lease._handle.close()
             lease._handle = None

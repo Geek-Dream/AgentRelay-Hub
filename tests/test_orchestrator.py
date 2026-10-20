@@ -1,9 +1,11 @@
+import importlib.util
 import tempfile
 import unittest
 import json
 import subprocess
 import os
 from unittest import mock
+from types import SimpleNamespace
 from scripts.task_scheduler import TaskAnalyzer, TaskPlan, TaskScheduler, ModelRegistry as SchedulerRegistry, TaskDecisionEngine
 from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
@@ -15,8 +17,29 @@ from scripts.orchestrator_store import CheckpointStore, KnowledgeRecord, MemoryS
 from scripts.orchestrator_dispatcher import Dispatcher
 from scripts.orchestrator_store import DispatchRequest
 from scripts.orchestrator_core import (Orchestrator, TaskType, classify_task,
-                                        SelfWorker, SelfReviewer, VerificationRunner, ConfirmationStore, FallbackExecutor)
+                                        SelfWorker, SelfReviewer, VerificationRunner, ConfirmationStore, FallbackExecutor,
+                                        default_compileall_command)
 from scripts.orchestrator_core import WorkflowEngine, TaskExecutionState, TaskStateMachine, TaskContext
+from scripts import commander_provider_pool, fusion_mode, orchestrator_core
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class FakeMsvcrt(SimpleNamespace):
+    def __init__(self):
+        super().__init__(LK_NBLCK=1, LK_UNLCK=2)
+        self.calls = []
+
+    def locking(self, file_descriptor, mode, size):
+        self.calls.append((mode, size))
 
 
 class OrchestratorTests(unittest.TestCase):
@@ -292,6 +315,8 @@ class OrchestratorTests(unittest.TestCase):
     def test_verification_runner_success_failure_timeout_and_rejection(self):
         runner = VerificationRunner()
         root = Path.cwd()
+        self.assertIn(default_compileall_command(),
+                      {"python3 -m compileall -q scripts", "py -m compileall -q scripts"})
         self.assertEqual(runner.run("python3 -m compileall -q scripts", root).status, "passed")
         self.assertEqual(runner.run("python3 -c exit(1)", root).status, "rejected")
         self.assertIn(runner.run("python3 -m unittest", root, timeout_seconds=0).status, {"timeout", "failed"})
@@ -476,6 +501,259 @@ class OrchestratorTests(unittest.TestCase):
             self.assertFalse(verification.passed)
             self.assertEqual(target.read_text(encoding="utf-8"), "after")
             self.assertIn("restored_files", orchestrator.changelog[-1].rollback)
+
+
+class CrossPlatformRuntimeTests(unittest.TestCase):
+    def test_windows_provider_lock_is_exclusive_and_released(self):
+        fake_msvcrt = FakeMsvcrt()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            commander_provider_pool, "fcntl", None
+        ), mock.patch.object(commander_provider_pool, "msvcrt", fake_msvcrt):
+            pool = commander_provider_pool.CommanderProviderCoordinator(directory)
+            lease = pool._try_lock("deepseek-web", "task-1", "backend-code")
+
+            self.assertIsNotNone(lease)
+            self.assertEqual(fake_msvcrt.calls, [(fake_msvcrt.LK_NBLCK, 1)])
+
+            pool.release(lease)
+            self.assertEqual(
+                fake_msvcrt.calls,
+                [
+                    (fake_msvcrt.LK_NBLCK, 1),
+                    (fake_msvcrt.LK_UNLCK, 1),
+                ],
+            )
+
+    def test_windows_tracker_lock_uses_msvcrt(self):
+        tracker = load_module(
+            "agent_relay_tracker_cross_platform",
+            PROJECT_ROOT / "hooks" / "agent_relay_tracker.py",
+        )
+        fake_msvcrt = FakeMsvcrt()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            tracker, "fcntl", None
+        ), mock.patch.object(tracker, "msvcrt", fake_msvcrt):
+            tracker.LOCK_FILE = Path(directory) / ".lock"
+            tracker.ensure_dirs = lambda: Path(directory).mkdir(
+                parents=True, exist_ok=True
+            )
+            handle = tracker.acquire_lock()
+            tracker.release_lock(handle)
+
+        self.assertEqual(
+            fake_msvcrt.calls,
+            [
+                (fake_msvcrt.LK_NBLCK, 1),
+                (fake_msvcrt.LK_UNLCK, 1),
+            ],
+        )
+
+    def test_windows_tracker_pid_probe_uses_win32_branch(self):
+        tracker = load_module(
+            "agent_relay_tracker_pid_probe",
+            PROJECT_ROOT / "hooks" / "agent_relay_tracker.py",
+        )
+        with mock.patch.object(tracker.os, "name", "nt"), mock.patch.object(
+            tracker, "windows_pid_alive", return_value=True
+        ) as windows_probe:
+            self.assertTrue(tracker.pid_alive(4242))
+        windows_probe.assert_called_once_with(4242)
+
+    def test_archive_hint_uses_the_active_python_interpreter(self):
+        tracker = load_module(
+            "agent_relay_tracker_archive_hint",
+            PROJECT_ROOT / "hooks" / "agent_relay_tracker.py",
+        )
+        python_path = r"C:\Program Files\AgentRelay\python.exe"
+        script_path = (
+            r"C:\Users\example\.codex\skills\agent-relay\scripts"
+            r"\agent_relay_archive.py"
+        )
+        with mock.patch.object(
+            tracker.sys, "executable", python_path
+        ), mock.patch.object(tracker, "ARCHIVE_SCRIPT", script_path):
+            text = tracker.archive_reminder_text(
+                {
+                    "weight": 2,
+                    "last_prompt": "检查跨平台路径",
+                }
+            )
+
+        self.assertIn(f'"{python_path}" "{script_path}" search', text)
+        self.assertNotIn("python3", text)
+
+    def test_windows_fusion_pid_probe_uses_win32_branch(self):
+        with mock.patch.object(fusion_mode.os, "name", "nt"), mock.patch.object(
+            fusion_mode, "_windows_pid_alive", return_value=True
+        ) as windows_probe:
+            self.assertTrue(fusion_mode._pid_alive(4242))
+        windows_probe.assert_called_once_with(4242)
+
+    def test_default_compile_command_uses_python_launcher_on_windows(self):
+        with mock.patch.object(orchestrator_core.os, "name", "nt"):
+            self.assertEqual(
+                orchestrator_core.default_compileall_command(),
+                "py -m compileall -q scripts",
+            )
+
+    def test_python_launcher_compile_and_unittest_are_allowed(self):
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        runner = VerificationRunner()
+        with mock.patch.object(
+            orchestrator_core.subprocess,
+            "run",
+            return_value=completed,
+        ) as run:
+            compile_result = runner.run(
+                "py -m compileall -q scripts",
+                PROJECT_ROOT,
+            )
+            unittest_result = runner.run(
+                "py -m unittest",
+                PROJECT_ROOT,
+            )
+
+        self.assertEqual(compile_result.status, "passed")
+        self.assertEqual(unittest_result.status, "passed")
+        self.assertEqual(run.call_count, 2)
+
+    def test_python_launcher_does_not_bypass_command_allowlist(self):
+        result = VerificationRunner().run(
+            "py -c \"print('unsafe')\"",
+            PROJECT_ROOT,
+        )
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.error, "COMMAND_NOT_ALLOWED")
+
+    def test_commander_terminal_accepts_absolute_file(self):
+        installer = load_module(
+            "agent_relay_installer_cross_platform",
+            PROJECT_ROOT / "install.py",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "codex-custom"
+            executable.write_text("", encoding="utf-8")
+            ok, detail = installer.commander_terminal_status(str(executable))
+        self.assertTrue(ok)
+        self.assertEqual(detail, str(executable))
+
+    def test_commander_terminal_resolves_path_command(self):
+        installer = load_module(
+            "agent_relay_installer_path_command",
+            PROJECT_ROOT / "install.py",
+        )
+        with mock.patch.object(
+            installer.shutil,
+            "which",
+            return_value=r"C:\Tools\codex.exe",
+        ) as which:
+            ok, detail = installer.commander_terminal_status("codex")
+        self.assertTrue(ok)
+        self.assertEqual(detail, r"C:\Tools\codex.exe")
+        which.assert_called_once_with("codex")
+
+    def test_windows_daemon_generation_fails_clearly(self):
+        installer = load_module(
+            "agent_relay_installer_daemon",
+            PROJECT_ROOT / "install.py",
+        )
+        with mock.patch.dict(
+            os.environ, {"AGENTRELAY_INSTALL_DAEMON": "1"}
+        ), mock.patch.object(installer.sys, "platform", "win32"):
+            with self.assertRaisesRegex(installer.InstallError, "Windows"):
+                installer.write_daemon_service_config()
+
+
+class CrossPlatformHookTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.installer = load_module(
+            "agent_relay_installer_hook_commands",
+            PROJECT_ROOT / "install.py",
+        )
+        cls.hook = load_module(
+            "agent_relay_hook_cross_platform",
+            PROJECT_ROOT / "hooks" / "agent_relay_hook.py",
+        )
+
+    def test_windows_command_quotes_paths_with_spaces(self):
+        command = self.installer.build_hook_command(
+            Path("C:/Users/Test User/.codex/agentrelay-env/Scripts/python.exe"),
+            Path("C:/Users/Test User/.codex/hooks/agent_relay_hook.py"),
+            "nt",
+        )
+        self.assertIn('"C:\\Users\\Test User', command.replace("/", "\\"))
+        self.assertIn("python.exe", command)
+        self.assertIn("agent_relay_hook.py", command)
+
+    def test_posix_command_quotes_paths_with_spaces(self):
+        command = self.installer.build_hook_command(
+            Path("/Users/test user/.codex/agentrelay-env/bin/python"),
+            Path("/Users/test user/.codex/hooks/agent_relay_hook.py"),
+            "posix",
+        )
+        self.assertIn("'/Users/test user/", command)
+
+    def test_hook_only_forwards_valid_post_tool_output(self):
+        valid = (
+            '{"hookSpecificOutput":{"hookEventName":"PostToolUse",'
+            '"additionalContext":"ready"}}'
+        )
+        self.assertTrue(self.hook.valid_hook_output(valid))
+        self.assertFalse(self.hook.valid_hook_output('{"value": 1}'))
+        self.assertFalse(self.hook.valid_hook_output("not-json"))
+
+    def test_hook_forwards_valid_stop_block(self):
+        value = '{"decision":"block","reason":"call AgentRelay"}'
+        self.assertTrue(self.hook.valid_hook_output(value, event_name="Stop"))
+        self.assertFalse(
+            self.hook.valid_hook_output(
+                '{"decision":"block"}',
+                event_name="Stop",
+            )
+        )
+
+
+class SkillInstallerSourceTests(unittest.TestCase):
+    def test_auxiliary_skills_copy_their_own_skill_md(self):
+        installer = load_module(
+            "agent_relay_installer_skill_sources",
+            PROJECT_ROOT / "install.py",
+        )
+        from scripts import agent_targets
+
+        meta = {
+            "label": "测试目标",
+            "skill_dir": str(Path(tempfile.gettempdir()) / "agent-relay"),
+            "detect": "",
+            "level": "skill-only",
+        }
+        with mock.patch.object(
+            agent_targets,
+            "agent_targets",
+            return_value={"test": meta},
+        ), mock.patch.object(
+            agent_targets,
+            "install_skill_to",
+        ) as install_skill, mock.patch.object(
+            agent_targets,
+            "verify_target",
+            return_value=[],
+        ):
+            results, errors = installer.apply_agent_targets(["test"])
+
+        self.assertEqual(results, {"test": []})
+        self.assertEqual(errors, {})
+        self.assertEqual(install_skill.call_count, 3)
+        self.assertNotIn("skill_name", install_skill.call_args_list[0].kwargs)
+        self.assertEqual(
+            install_skill.call_args_list[1].kwargs["skill_name"],
+            "agent-image",
+        )
+        self.assertEqual(
+            install_skill.call_args_list[2].kwargs["skill_name"],
+            "agent-fusion",
+        )
 
 
 if __name__ == "__main__":

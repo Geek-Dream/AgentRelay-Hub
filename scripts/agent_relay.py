@@ -2080,13 +2080,14 @@ class DeepSeekAdapter(SiteAdapter):
         image_path 支持：
 
             单张：
-                "/tmp/a.png"
+                "/path/to/a.png"
+                "C:\\path\\to\\a.png"
 
             多张：
                 [
-                    "/tmp/a.png",
-                    "/tmp/b.png",
-                    "/tmp/c.png"
+                    "/path/to/a.png",
+                    "/path/to/b.png",
+                    "/path/to/c.png"
                 ]
         """
 

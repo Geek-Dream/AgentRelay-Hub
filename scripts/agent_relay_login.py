@@ -38,7 +38,10 @@ def save_storage_state(context, target: Path) -> Path:
         except ImportError:
             from config_manager import encrypt_secret_bytes
         encrypted_path.write_bytes(encrypt_secret_bytes(temporary_state.read_bytes(), CODEX_HOME))
-        encrypted_path.chmod(0o600)
+        try:
+            encrypted_path.chmod(0o600)
+        except OSError:
+            pass
         return encrypted_path
     finally:
         temporary_state.unlink(missing_ok=True)
