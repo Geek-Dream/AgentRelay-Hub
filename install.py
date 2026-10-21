@@ -1172,8 +1172,13 @@ def run_web_configurator() -> None:
 
     def public_config() -> dict:
         from scripts import agent_targets as at
+        from scripts import fusion_mode
         result = json.loads(json.dumps(config, ensure_ascii=False))
         result["config_path"] = str(TARGET_SKILL / "config" / "agentrelay-config.json.enc")
+        result["fusion_state"] = fusion_mode.fusion_state(
+            config=config,
+            home=CODEX_HOME,
+        )
         registry = at.agent_targets()
         detection = at.detect_agents(registry)
         result["agents"] = {
@@ -1363,6 +1368,21 @@ def run_web_configurator() -> None:
                 if self.path == "/api/scan-local": self._send({"found":_scan_local_services()});return
                 data=self._body()
                 if self.path == "/api/settings":
+                    fusion_incoming=data.get("fusion",{})
+                    if isinstance(fusion_incoming,dict):
+                        from scripts import fusion_mode
+                        changes={}
+                        if "enabled" in fusion_incoming:
+                            changes["enabled"]=bool(fusion_incoming.get("enabled"))
+                        if "provider_id" in fusion_incoming:
+                            changes["provider_id"]=str(fusion_incoming.get("provider_id") or "").strip()
+                        if "tool_mode" in fusion_incoming:
+                            changes["tool_mode"]=str(fusion_incoming.get("tool_mode") or "readonly").strip().lower()
+                        config["fusion"]=fusion_mode.validated_fusion_config(
+                            config,
+                            changes,
+                            confirm_coding=bool(fusion_incoming.get("confirm_coding")),
+                        )
                     incoming=data.get("commander",{})
                     if isinstance(incoming,dict):
                         enabled=bool(incoming.get("enabled",False))

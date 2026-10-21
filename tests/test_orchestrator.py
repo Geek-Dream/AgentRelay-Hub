@@ -678,21 +678,21 @@ class CrossPlatformHookTests(unittest.TestCase):
 
     def test_windows_command_quotes_paths_with_spaces(self):
         command = self.installer.build_hook_command(
-            Path("C:/Users/Test User/.codex/agentrelay-env/Scripts/python.exe"),
-            Path("C:/Users/Test User/.codex/hooks/agent_relay_hook.py"),
+            Path("C:/Temp/Test User/.codex/agentrelay-env/Scripts/python.exe"),
+            Path("C:/Temp/Test User/.codex/hooks/agent_relay_hook.py"),
             "nt",
         )
-        self.assertIn('"C:\\Users\\Test User', command.replace("/", "\\"))
+        self.assertIn('"C:\\Temp\\Test User', command.replace("/", "\\"))
         self.assertIn("python.exe", command)
         self.assertIn("agent_relay_hook.py", command)
 
     def test_posix_command_quotes_paths_with_spaces(self):
         command = self.installer.build_hook_command(
-            Path("/Users/test user/.codex/agentrelay-env/bin/python"),
-            Path("/Users/test user/.codex/hooks/agent_relay_hook.py"),
+            Path("/home/test user/.codex/agentrelay-env/bin/python"),
+            Path("/home/test user/.codex/hooks/agent_relay_hook.py"),
             "posix",
         )
-        self.assertIn("'/Users/test user/", command)
+        self.assertIn("'/home/test user/", command)
 
     def test_hook_only_forwards_valid_post_tool_output(self):
         valid = (

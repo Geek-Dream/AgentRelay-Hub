@@ -215,6 +215,126 @@ class FusionProviderResolutionTests(unittest.TestCase):
         self.assertEqual(error, "")
 
 
+class FusionSettingsValidationTests(unittest.TestCase):
+    def base_config(self):
+        return {
+            "fusion": {
+                "enabled": True,
+                "provider_id": "",
+                "tool_mode": "readonly",
+                "timeout": 30,
+                "max_steps": 8,
+            },
+            "web_providers": [{
+                "id": "deepseek-web",
+                "name": "DeepSeek",
+                "base_url": "https://chat.deepseek.com/",
+                "enabled": True,
+            }],
+            "local_providers": [{
+                "id": "qwen-local",
+                "name": "Qwen",
+                "endpoint": "http://127.0.0.1:11434/v1",
+                "model": "qwen",
+                "enabled": True,
+            }],
+            "api_providers": [{
+                "id": "kimi-api",
+                "name": "Kimi",
+                "endpoint": "https://api.example.test/v1",
+                "model": "kimi",
+                "enabled": True,
+            }],
+        }
+
+    def test_enabled_without_provider_is_allowed_but_not_delegable(self):
+        config = self.base_config()
+        result = fusion_mode.validated_fusion_config(
+            config,
+            {"enabled": True, "provider_id": "", "tool_mode": "readonly"},
+        )
+        config["fusion"] = result
+        state = fusion_mode.fusion_state(config=config, environ={})
+        self.assertEqual(result["provider_id"], "")
+        self.assertFalse(state["delegable"])
+        self.assertEqual(state["reason"], "FUSION_PROVIDER_NOT_CONFIGURED")
+
+    def test_exact_provider_reference_is_canonicalized(self):
+        config = self.base_config()
+        result = fusion_mode.validated_fusion_config(
+            config,
+            {"provider_id": "api:kimi-api", "tool_mode": "readonly"},
+        )
+        self.assertEqual(result["provider_id"], "api:kimi-api")
+
+    def test_missing_disabled_and_incomplete_providers_are_rejected(self):
+        config = self.base_config()
+        with self.assertRaisesRegex(fusion_mode.FusionSettingsError, "找不到"):
+            fusion_mode.validated_fusion_config(
+                config,
+                {"provider_id": "local:missing"},
+            )
+        config["local_providers"][0]["enabled"] = False
+        with self.assertRaisesRegex(fusion_mode.FusionSettingsError, "已停用"):
+            fusion_mode.validated_fusion_config(
+                config,
+                {"provider_id": "local:qwen-local"},
+            )
+        config["local_providers"][0]["enabled"] = True
+        config["local_providers"][0]["model"] = ""
+        with self.assertRaisesRegex(fusion_mode.FusionSettingsError, "缺少"):
+            fusion_mode.validated_fusion_config(
+                config,
+                {"provider_id": "local:qwen-local"},
+            )
+
+    def test_coding_requires_confirmation_and_a_tool_capable_provider(self):
+        config = self.base_config()
+        with self.assertRaises(fusion_mode.FusionSettingsError) as missing_confirmation:
+            fusion_mode.validated_fusion_config(
+                config,
+                {"provider_id": "api:kimi-api", "tool_mode": "coding"},
+            )
+        self.assertEqual(
+            missing_confirmation.exception.code,
+            "FUSION_CODING_CONFIRMATION_REQUIRED",
+        )
+
+        result = fusion_mode.validated_fusion_config(
+            config,
+            {"provider_id": "local:qwen-local", "tool_mode": "coding"},
+            confirm_coding=True,
+        )
+        self.assertEqual(result["tool_mode"], "coding")
+        self.assertEqual(result["provider_id"], "local:qwen-local")
+
+        with self.assertRaises(fusion_mode.FusionSettingsError) as web_coding:
+            fusion_mode.validated_fusion_config(
+                config,
+                {"provider_id": "web:deepseek-web", "tool_mode": "coding"},
+                confirm_coding=True,
+            )
+        self.assertEqual(
+            web_coding.exception.code,
+            "FUSION_TOOL_MODE_UNSUPPORTED",
+        )
+
+    def test_disabling_can_keep_a_now_invalid_saved_provider(self):
+        current = {
+            "enabled": True,
+            "provider_id": "local:removed",
+            "tool_mode": "readonly",
+        }
+        config = self.base_config()
+        result = fusion_mode.validated_fusion_config(
+            config,
+            {"enabled": False, "provider_id": "local:removed"},
+            current=current,
+        )
+        self.assertFalse(result["enabled"])
+        self.assertEqual(result["provider_id"], "local:removed")
+
+
 class FusionCommanderMutualExclusionTests(FusionTestBase):
     def test_commander_lock_temporarily_blocks_fusion(self):
         self.configure_ready_fusion()

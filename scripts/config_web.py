@@ -5,6 +5,131 @@ import json
 from typing import Any
 
 
+def _replace_once(page: str, needle: str, replacement: str) -> str:
+    if page.count(needle) != 1:
+        raise RuntimeError(f"配置页模板锚点不唯一：{needle[:80]}")
+    return page.replace(needle, replacement, 1)
+
+
+def _apply_fusion_ui(page: str) -> str:
+    css = r"""
+.fusion-status{display:flex;align-items:flex-start;gap:10px;margin-top:16px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:#f7f9fa}.fusion-status .dot{margin-top:6px}.fusion-status strong{display:block;font-size:14px}.fusion-status small{display:block;color:var(--muted);margin-top:2px}.fusion-status.ready{border-color:#bfe8d8;background:#effaf5}.fusion-status.warn{border-color:#efd39e;background:#fff8e9}.fusion-status.off{background:#f5f7f8}.fusion-overview{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:14px;padding:12px 14px;border:1px solid #efd39e;border-radius:8px;background:#fff8e9}.fusion-overview.ready{border-color:#bfe8d8;background:#effaf5}.fusion-overview strong{display:block}.fusion-overview small{display:block;color:var(--muted);margin-top:2px}.fusion-command{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px;padding:11px 12px;border:1px solid var(--line);border-radius:8px;background:#f7f9fa;font-size:13px}.fusion-command code{padding:2px 6px;border-radius:5px;background:#e8eef2;color:#34495e}@media(max-width:780px){.fusion-overview,.fusion-command{align-items:flex-start;flex-direction:column}}
+"""
+    nav = r"""<button data-tab="fusion">Fusion 辅助 Agent</button><button data-tab="security">安全与配置</button>"""
+    overview = r"""<div id="fusion-overview" class="fusion-overview"></div><div class="grid" id="stats"></div>"""
+    view = r"""<div id="fusion" class="view"><div class="head"><div><h1>Fusion 辅助 Agent</h1><p class="hint">主 Agent 负责拆解任务、审查改动和最终验收；Fusion 只承接明确的辅助调查、批量阅读和局部杂活。</p></div><button class="btn primary" onclick="saveFusion()">保存</button></div><div class="card"><div class="form"><div class="field full"><div class="switch-row"><div><label>启用 Fusion 辅助能力</label><small>开启后仍需选择 Provider 才能真正接受委派；不会自动继承默认模型。</small></div><label class="switch"><input id="fusion-enabled" type="checkbox"><span class="slider"></span></label></div></div><div class="field full"><label>Provider</label><select id="fusion-provider" onchange="updateFusionControls(true)"></select><p class="hint" id="fusion-provider-note">使用带 web/local/api 前缀的精确引用，默认留空。</p></div><div class="field"><label>工具模式</label><select id="fusion-mode" onchange="updateFusionControls(true)"><option value="readonly">只读：查阅、搜索和整理</option><option id="fusion-coding-option" value="coding">可修改：写入文件并执行命令</option></select><p class="hint" id="fusion-mode-note">只读模式不能写文件或执行命令。</p></div></div><div id="fusion-status" class="fusion-status"></div><div class="notice">Fusion 永不启动 Commander，也不会递归启动另一个 Fusion；Commander 运行时 Fusion 会自动让位。coding 模式仅支持 local 或 api Provider，保存前会再次确认。</div><div class="fusion-command"><span>会话内也可管理同一份配置</span><code>/agent-fusion</code></div></div></div>"""
+    javascript = r"""
+function fusionReason(reason){
+  const messages={
+    READY:['Fusion 可用','主 Agent 可以按需分配辅助调查、批量阅读或已确认的局部修改。'],
+    FUSION_DISABLED:['Fusion 已关闭','保存为开启后才会接受主 Agent 的委派。'],
+    FUSION_PROVIDER_NOT_CONFIGURED:['已开启，但尚未选择模型','当前不可调用；请选择 Provider 并保存。'],
+    FUSION_PROVIDER_NOT_FOUND:['已配置的 Provider 不存在','原 Provider 可能已被删除；请重新选择。'],
+    FUSION_PROVIDER_DISABLED:['已配置的 Provider 已停用','请先启用该 Provider，或在这里重新选择。'],
+    FUSION_PROVIDER_NOT_READY:['Provider 配置不完整','缺少必要地址或模型名称，当前不可调用。'],
+    FUSION_TOOL_MODE_UNSUPPORTED:['当前工具模式不受支持','网页 Provider 只能使用 readonly；请切换模式或改选 local/api。'],
+    FUSION_PROVIDER_AMBIGUOUS:['Provider 引用不唯一','请选择带 web/local/api 前缀的完整引用。'],
+    COMMANDER_ACTIVE:['Commander 正在运行','Fusion 会自动让位，Commander 结束后恢复本地可委派状态。'],
+    COMMANDER_CHILD:['当前是 Commander 子会话','这里不能调用 Fusion。'],
+    FUSION_CHILD:['当前是 Fusion 子会话','Fusion 不会递归调用自身。']
+  };
+  return messages[reason]||['Fusion 暂不可用',reason||'尚未完成配置'];
+}
+function fusionProviderOptions(selected){
+  const groups=[['线上网页模型','web'],['本地模型','local'],['API 模型','api']];
+  let known=false;
+  let html='<option value="">未选择（开启后也不可调用）</option>';
+  groups.forEach(([label,kind])=>{
+    const items=providers(kind);
+    if(!items.length)return;
+    html+=`<optgroup label="${label}">`;
+    items.forEach(p=>{
+      const ref=kind+':'+p.id;
+      if(ref===selected)known=true;
+      const disabled=p.enabled===false?' disabled':'';
+      const state=p.enabled===false?'（已停用）':'';
+      html+=`<option value="${esc(ref)}"${disabled}>${esc(p.name||p.id)} · ${esc(ref)}${state}</option>`;
+    });
+    html+='</optgroup>';
+  });
+  if(selected&&!known)html+=`<option value="${esc(selected)}" selected>配置失效 · ${esc(selected)}</option>`;
+  return html;
+}
+function updateFusionControls(announce=false){
+  const provider=$('fusion-provider').value;
+  const mode=$('fusion-mode');
+  const coding=$('fusion-coding-option');
+  const isWeb=provider.startsWith('web:');
+  coding.disabled=isWeb;
+  if(isWeb&&mode.value==='coding'){
+    mode.value='readonly';
+    if(announce)toast('网页 Provider 只能使用只读模式，已切换为 readonly');
+  }
+  $('fusion-mode-note').textContent=isWeb?'网页 Provider 不具备工具协议，只能只读协作。':(mode.value==='coding'?'可修改模式允许 Fusion 写入工作区并执行命令。':'只读模式不能写文件或执行命令。');
+}
+function renderFusion(){
+  const fusion=state.fusion||{};
+  const fusionState=state.fusion_state||{};
+  const enabled=fusion.enabled!==false;
+  const selected=String(fusion.provider_id||'');
+  const reason=fusionState.reason||(enabled?(selected?'FUSION_PROVIDER_NOT_READY':'FUSION_PROVIDER_NOT_CONFIGURED'):'FUSION_DISABLED');
+  const ready=!!fusionState.delegable;
+  const [title,detail]=fusionReason(reason);
+  $('fusion-enabled').checked=enabled;
+  $('fusion-provider').innerHTML=fusionProviderOptions(selected);
+  $('fusion-provider').value=selected;
+  $('fusion-mode').value=fusion.tool_mode||'readonly';
+  updateFusionControls(false);
+  const status=$('fusion-status');
+  status.className='fusion-status '+(ready?'ready':(enabled?'warn':'off'));
+  status.innerHTML=`<span class="dot ${ready?'on':'off'}"></span><div><strong>${esc(title)}</strong><small>${esc(detail)}</small></div>`;
+  const overview=$('fusion-overview');
+  overview.className='fusion-overview '+(ready?'ready':'');
+  overview.innerHTML=`<div><strong>Fusion · ${esc(title)}</strong><small>${esc(detail)}</small></div>${ready?'<span class="stag on">可委派</span>':'<button class="btn" onclick="showFusionTab()">配置 Fusion</button>'}`;
+}
+function showFusionTab(){const button=document.querySelector('[data-tab="fusion"]');if(button)button.click()}
+async function saveFusion(){
+  try{
+    const toolMode=$('fusion-mode').value;
+    const currentMode=(state.fusion||{}).tool_mode||'readonly';
+    const enteringCoding=toolMode==='coding'&&currentMode!=='coding';
+    if(enteringCoding&&!confirm('允许 Fusion 修改工作区文件并执行 shell 命令？主 Agent 仍会审查并重新验证结果。'))return;
+    const data=await api('/api/settings',{method:'POST',body:JSON.stringify({fusion:{enabled:$('fusion-enabled').checked,provider_id:$('fusion-provider').value,tool_mode:toolMode,confirm_coding:enteringCoding}})});
+    Object.assign(state,data.config);
+    render();
+    toast('Fusion 配置已保存');
+  }catch(error){toast(error.message)}
+}
+"""
+    page = _replace_once(page, "</style>", css + "</style>")
+    page = _replace_once(
+        page,
+        '<button data-tab="security">安全与配置</button>',
+        nav,
+    )
+    page = _replace_once(
+        page,
+        '<div class="grid" id="stats"></div>',
+        overview,
+    )
+    page = _replace_once(
+        page,
+        '<div id="security" class="view">',
+        view + '<div id="security" class="view">',
+    )
+    page = _replace_once(
+        page,
+        "renderTargets();stagger()",
+        "renderFusion();renderTargets();stagger()",
+    )
+    page = _replace_once(
+        page,
+        "async function saveCommander()",
+        javascript + "\nasync function saveCommander()",
+    )
+    return page
+
+
 def build_config_page(config: dict[str, Any]) -> str:
     state = json.dumps(config, ensure_ascii=False).replace("</", "<\\/")
     page = r"""<!doctype html>
@@ -56,4 +181,4 @@ async function testProvider(kind,id){try{const data=await api('/api/test',{metho
 async function scanLocal(){try{const data=await api('/api/scan-local');const box=$('local-scan');box.style.display='block';box.innerHTML=data.found.length?'检测到本地服务：'+data.found.map(x=>`<button class="btn" onclick="useLocal('${esc(x.endpoint)}','${esc(x.models[0]||'')}')">${esc(x.name)} · ${esc(x.endpoint)} · ${esc(x.models.join('、')||'未返回模型')}</button>`).join(' '):'没有发现 Ollama、LM Studio、vLLM 或 llama.cpp。llama.cpp 默认常见端口为 8080；请确认它启动了 OpenAI 兼容服务器（/v1/models）。';toast(data.found.length?'扫描完成':'未发现兼容本地服务')}catch(error){toast(error.message)}}function useLocal(endpoint,model){showForm('local');$('f-endpoint').value=endpoint;$('f-model').value=model}
 async function checkEnvironment(){try{const data=await api('/api/environment');const fail=data.checks.filter(x=>!x.ok);$('environment').innerHTML='<strong>环境检查检查的是安装链路，不检查模型登录。</strong><br>'+data.checks.map(x=>`${x.ok?'✓':'!'} ${esc(x.name)}：${esc(x.detail)}（${esc(x.reason)}）`).join('<br>');toast(fail.length?'未找到：'+fail.map(x=>x.name).join('、'):'环境检查通过')}catch(error){toast(error.message)}}async function initializeFiles(){try{const data=await api('/api/initialize',{method:'POST'});toast(data.message)}catch(error){toast(error.message)}}async function closeApp(){try{await api('/api/close',{method:'POST'});document.body.innerHTML='<main class="app"><div class="card"><h1>配置已完成</h1><p>本地配置服务已关闭，可以安全关闭这个页面。</p></div></main>'}catch(error){toast(error.message)}}render();
 </script></body></html>"""
-    return page.replace("__CONFIG__", state)
+    return _apply_fusion_ui(page).replace("__CONFIG__", state)

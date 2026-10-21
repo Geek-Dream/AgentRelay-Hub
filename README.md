@@ -233,6 +233,9 @@ AgentFusion（`agent-fusion`）默认开启，但不会自动选择默认 Provid
 `web`、`local` 或 `api` Provider 后才会进入可调用状态；未配置时本地状态检查立即返回，
 不探网、不检查登录、不打开浏览器，也不让主模型等待。Fusion 默认使用 `readonly` 工具模式，
 拥有独立持久会话和多步工具循环，可以和主 Agent 并行处理调查、批量阅读、局部实现等委派工作。
+网页配置中心的“Fusion 辅助 Agent”页会直接显示当前是否可委派，并明确区分“已开启但未选择
+模型”“Provider 已停用”“配置不完整”等原因；开关、Provider 和只读/可修改模式都与
+`/agent-fusion` 共用同一份加密配置。
 
 Pi 中直接输入 `/agent-fusion` 会进入中文选择菜单，每个选项都带有用途说明。显式命令仍然
 保留，便于脚本化和高级操作。Codex 中可用 `$agent-fusion` 提及本 Skill：
@@ -255,7 +258,8 @@ Fusion 的 `readonly` 模式只能使用 `read_file`、`list_files` 和 `grep`�
 命令。`local`/`api` Provider 可切换到 `coding`，切换前必须确认，因为该模式允许 Fusion
 修改工作区文件并执行 shell 命令；网页 Provider 不具备工具协议，只能保持文本只读协作。
 持久会话按 workspace 与 session ID 隔离，Provider 或工具模式变化时会自动重置，避免污染
-上下文。主 Agent 可以多次向同一 Fusion 会话委派连续工作。
+上下文。主 Agent 可以多次向同一 Fusion 会话委派连续工作，并始终负责需求判断、任务分配、
+改动审查和最终验收。
 
 Commander 启动后拥有最高优先级：无论 Fusion 的保存开关是开启还是关闭，主流程和 Commander
 的全部子 Agent 都不能调用 Fusion。正在运行的 Fusion 会在下一次模型或工具调用前停住，
@@ -300,8 +304,8 @@ Tracker 可读），验证结果直接打印在终端。随后自动打开网页
 | OpenCode | 仅 Skill（OpenCode 没有 prompt 提交时注入上下文的 Hook 事件，自动提醒不可用） | 无 |
 | deepseek-cli | 不支持（没有任何 Hook、插件或 Skill 机制） | 无 |
 
-配置中心页面分为总览、Commander、线上模型、
-本地模型、API 模型和安全配置几个区域，可以初始化环境、检查 Codex/Skill/Hook、扫描本地服务、增删启停多个 Provider、设置默认
+配置中心页面分为总览、Commander、Fusion 辅助 Agent、线上模型、
+本地模型、API 模型和安全配置几个区域，可以初始化环境、检查 Codex/Skill/Hook、扫描本地服务、配置 Fusion 开关/Provider/工具模式、增删启停多个 Provider、设置默认
 网页模型、测试接口，以及配置网页模型的混合/极速/专家会话名称和图片能力。会话名会由别名自动生成，例如 `qianwen` 会生成
 `AgentRelay-Qianwen-Flash` 和 `AgentRelay-Qianwen-Expert`；混合模式使用一套统一会话，名称默认为
 `AgentRelay-品牌名`（例如 `AgentRelay-DeepSeek`），同时处理极速和专家提问。网页登录完成后，关闭登录的对话标签页即可自动加密保存 Cookie，配置页会显示“登录状态已保存”。本地扫描支持 Ollama、LM Studio、vLLM 和 llama.cpp。配置完成后点击“完成并关闭”，

@@ -47,6 +47,14 @@ TAKEOVER_OPEN_STATES = {"pending", "assigned"}
 TAKEOVER_CLOSED_STATES = {"completed", "failed"}
 
 
+class FusionSettingsError(ValueError):
+    """A validation failure that can be shown directly in configuration UIs."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
 def normalize_fusion_config(value: object) -> dict[str, Any]:
     """Return a stable Fusion config while preserving forward-compatible keys."""
     raw = dict(value) if isinstance(value, dict) else {}
@@ -174,6 +182,58 @@ def provider_is_ready(provider: dict[str, Any]) -> bool:
         str(entry.get("endpoint") or "").strip()
         and str(entry.get("model") or "").strip()
     )
+
+
+def validated_fusion_config(
+    config: Mapping[str, Any],
+    changes: Mapping[str, Any],
+    *,
+    current: Mapping[str, Any] | None = None,
+    confirm_coding: bool = False,
+) -> dict[str, Any]:
+    """Validate settings submitted by a menu or the local web configuration page."""
+    current_config = normalize_fusion_config(
+        current if current is not None else config.get("fusion")
+    )
+    merged = {**current_config}
+    for key in ("enabled", "provider_id", "tool_mode", "timeout", "max_steps"):
+        if key in changes:
+            merged[key] = changes[key]
+    normalized = normalize_fusion_config(merged)
+    if normalized["tool_mode"] == "coding":
+        if current_config["tool_mode"] != "coding" and not confirm_coding:
+            raise FusionSettingsError(
+                "FUSION_CODING_CONFIRMATION_REQUIRED",
+                "coding 模式允许修改工作区文件并执行命令，必须明确确认后才能启用。",
+            )
+    requested_provider = normalized["provider_id"]
+    provider_changed = requested_provider != current_config["provider_id"]
+    should_validate_provider = bool(normalized["enabled"] or provider_changed)
+    if requested_provider and should_validate_provider:
+        provider, error = resolve_fusion_provider(config, requested_provider)
+        if provider is None:
+            if error == "FUSION_PROVIDER_AMBIGUOUS":
+                message = "Provider 引用不唯一，请选择带 web/local/api 前缀的完整引用。"
+            else:
+                message = "找不到所选 Provider，请重新选择。"
+            raise FusionSettingsError(error, message)
+        if not bool(provider["entry"].get("enabled", True)):
+            raise FusionSettingsError(
+                "FUSION_PROVIDER_DISABLED",
+                "所选 Provider 已停用，请先启用它或选择其他 Provider。",
+            )
+        if not provider_is_ready(provider):
+            raise FusionSettingsError(
+                "FUSION_PROVIDER_NOT_READY",
+                "所选 Provider 缺少必要地址或模型名称，当前不可调用。",
+            )
+        normalized["provider_id"] = provider["ref"]
+        if normalized["tool_mode"] == "coding" and provider["kind"] == "web":
+            raise FusionSettingsError(
+                "FUSION_TOOL_MODE_UNSUPPORTED",
+                "网页 Provider 不具备工具协议，只能使用 readonly 模式。",
+            )
+    return normalized
 
 
 def public_provider(provider: dict[str, Any] | None) -> dict[str, str] | None:
