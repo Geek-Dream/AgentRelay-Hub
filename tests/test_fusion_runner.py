@@ -4,6 +4,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -361,13 +363,168 @@ class FusionRunnerTests(unittest.TestCase):
         self.assertEqual(next_result["status"], "success")
         self.assertEqual(len(next_result["commander_results_applied"]), 1)
         self.assertTrue(any(
-            "Commander run completed" in str(message.get("content") or "")
+            "Commander has closed the Fusion work" in str(message.get("content") or "")
+            and "takeover_status=failed" in str(message.get("content") or "")
+            and "Do not resume it automatically" in str(message.get("content") or "")
             for message in seen[0]
         ))
         self.assertEqual(sum(
             message.get("content") == "delegated task"
             for message in seen[0]
         ), 1)
+
+    def test_native_handoff_wins_the_commander_snapshot_race(self):
+        run = fusion_mode.start_fusion_run(
+            session_id="race-session",
+            workspace=self.workspace,
+            task="finish coding handoff",
+            tool_mode="coding",
+            home=self.home,
+        )
+        session = {
+            "session_id": "race-session",
+            "workspace": str(self.workspace),
+            "tool_mode": "coding",
+            "messages": [{
+                "role": "user",
+                "content": "finish coding handoff",
+            }],
+        }
+        activity = [{
+            "step": 1,
+            "tool": "write_file",
+            "args": {"path": "result.txt"},
+            "ok": True,
+            "path": "result.txt",
+            "exit_code": None,
+            "truncated": False,
+        }]
+
+        def write_native_handoff():
+            time.sleep(0.2)
+            fusion_runner._write_handoff(
+                session=session,
+                run={**run, "phase": "tool_complete"},
+                activity=activity,
+                reason="COMMANDER_ACTIVE",
+                home=self.home,
+            )
+
+        writer = threading.Thread(target=write_native_handoff)
+        writer.start()
+        try:
+            manifest = fusion_mode.prepare_fusion_takeover(
+                "race-commander",
+                home=self.home,
+                wait_timeout=2,
+            )
+        finally:
+            writer.join(timeout=3)
+            fusion_mode.finish_fusion_run(run["run_id"], home=self.home)
+
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(len(manifest["items"]), 1)
+        item = manifest["items"][0]
+        self.assertEqual(item["source"], "fusion_handoff")
+        self.assertTrue(item["handoff_ready"])
+        self.assertEqual(item["handoff"]["tool_mode"], "coding")
+        self.assertEqual(item["handoff"]["changed_files"], ["result.txt"])
+        self.assertTrue(any(
+            "coding" in risk for risk in item["handoff"]["risks"]
+        ))
+
+    def test_commander_receipt_messages_are_scoped_to_each_fusion_session(self):
+        key_a = fusion_runner.session_key(self.workspace, "session-a")
+        key_b = fusion_runner.session_key(self.workspace, "session-b")
+        run_a = fusion_mode.start_fusion_run(
+            session_id=key_a,
+            workspace=self.workspace,
+            task="finish task a",
+            tool_mode="readonly",
+            home=self.home,
+        )
+        run_b = fusion_mode.start_fusion_run(
+            session_id=key_b,
+            workspace=self.workspace,
+            task="finish task b",
+            tool_mode="readonly",
+            home=self.home,
+        )
+        try:
+            with fusion_mode.fusion_commander_lock(
+                "scoped-receipt",
+                home=self.home,
+                lock_dir=self.lock_dir,
+            ):
+                manifest = fusion_mode.prepare_fusion_takeover(
+                    "scoped-receipt",
+                    home=self.home,
+                    wait_timeout=0,
+                )
+                items = {
+                    item["session_id"]: item["item_id"]
+                    for item in manifest["items"]
+                }
+                fusion_mode.assign_fusion_takeover(
+                    "scoped-receipt",
+                    {
+                        "agent-a": [items[key_a]],
+                        "agent-b": [items[key_b]],
+                    },
+                    home=self.home,
+                )
+                fusion_mode.record_fusion_takeover_result(
+                    "scoped-receipt",
+                    "agent-a",
+                    succeeded=True,
+                    report="session a completed",
+                    changed_files=("a.txt",),
+                    verification=("a verified",),
+                    home=self.home,
+                )
+                fusion_mode.record_fusion_takeover_result(
+                    "scoped-receipt",
+                    "agent-b",
+                    succeeded=False,
+                    report="session b failed",
+                    error="b needs follow-up",
+                    home=self.home,
+                )
+                fusion_mode.finalize_fusion_takeover(
+                    "scoped-receipt",
+                    reason="receipts recorded",
+                    home=self.home,
+                )
+        finally:
+            fusion_mode.finish_fusion_run(run_a["run_id"], home=self.home)
+            fusion_mode.finish_fusion_run(run_b["run_id"], home=self.home)
+
+        seen = []
+
+        def scoped_model(messages, _tools, _timeout):
+            seen.append(copy.deepcopy(messages))
+            return chat_response("new task after commander")
+
+        result = self.run_sidekick(scoped_model)
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(len(result["commander_results_applied"]), 1)
+        applied_items = result["commander_results_applied"][0]["takeover"]["items"]
+        self.assertEqual(
+            [item["session_id"] for item in applied_items],
+            [key_a],
+        )
+        notice = next(
+            str(message.get("content") or "")
+            for message in seen[0]
+            if message.get("kind") == "commander_result"
+        )
+        self.assertIn(run_a["run_id"], notice)
+        self.assertIn("takeover_status=completed", notice)
+        self.assertIn("session a completed", notice)
+        self.assertIn("a verified", notice)
+        self.assertNotIn(run_b["run_id"], notice)
+        self.assertNotIn("session b failed", notice)
 
     def test_commander_started_during_model_call_preempts_final_response(self):
         commander_context = None

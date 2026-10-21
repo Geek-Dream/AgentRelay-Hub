@@ -819,6 +819,124 @@ class Orchestrator:
                                         request, ("roles planned",)))
         return reports
 
+    def _assign_fusion_takeover(self, task_id: str, agents: list) -> dict:
+        try:
+            from . import fusion_mode
+        except ImportError:
+            import fusion_mode
+        if not agents:
+            return {}
+        manifest = fusion_mode.prepare_fusion_takeover(task_id)
+        pending = [
+            item for item in (manifest or {}).get("items", [])
+            if isinstance(item, dict) and item.get("status") == "pending"
+        ]
+        assignments: dict[str, list[str]] = {}
+        agent_roles: dict[str, str] = {}
+        for index, item in enumerate(pending):
+            agent = agents[index % len(agents)]
+            item_copy = dict(item)
+            item_copy["assigned_role"] = agent.role
+            agent.model_config.setdefault("fusion_takeover_items", []).append(
+                item_copy
+            )
+            assignments.setdefault(agent.agent_id, []).append(str(item["item_id"]))
+            agent_roles[agent.agent_id] = agent.role
+        if assignments:
+            manifest = fusion_mode.assign_fusion_takeover(
+                task_id,
+                assignments,
+                agent_roles=agent_roles,
+            )
+        return manifest or {}
+
+    def _fusion_takeover_prompt(self, agent) -> str:
+        items = agent.model_config.get("fusion_takeover_items")
+        if not isinstance(items, list) or not items:
+            return ""
+        summaries = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            summaries.append({
+                "item_id": item.get("item_id"),
+                "run_id": item.get("run_id"),
+                "workspace": item.get("workspace"),
+                "source": item.get("source"),
+                "handoff": item.get("handoff"),
+                "handoff_path": item.get("handoff_path"),
+            })
+        return (
+            "你已被 Commander 指派为 Fusion 遗留任务的接管者。必须先处理这些遗留任务，"
+            "再继续你自己的主角色工作。\n"
+            "规则：\n"
+            "1. 只使用当前隔离 workspace 和下面的结构化交接快照，不读取或复用 Fusion 的旧会话。\n"
+            "2. 从原任务、已完成项、未完成项、改动文件、命令和风险继续，不重复已完成工作。\n"
+            "3. 不得调用 Fusion，也不得启动新的 Commander。\n"
+            "4. 能完成时必须实际检查改动并给出验证；不能完成时必须明确失败原因和剩余风险，"
+            "禁止谎报完成。\n"
+            "5. 最终报告必须包含：完成内容、修改文件、验证结果、未完成项、风险。\n"
+            f"Fusion 接管清单：{json.dumps(summaries, ensure_ascii=False)}\n"
+        )
+
+    @staticmethod
+    def _commander_agent_report(agent) -> tuple[str, list[str], str, list[str]]:
+        result = agent.result if isinstance(agent.result, dict) else {}
+        report = str(
+            result.get("stdout")
+            or result.get("report")
+            or agent.result
+            or ""
+        ).strip()
+        changed_files = [
+            str(item) for item in agent.model_config.get(
+                "fusion_takeover_changed_files",
+                [],
+            )
+        ]
+        error = str(result.get("stderr") or result.get("error") or "").strip()
+        exit_code = result.get("exit_code")
+        verification = (
+            [f"Commander 子 Agent 进程退出码 {exit_code}"]
+            if exit_code == 0
+            else []
+        )
+        return report, changed_files, error, verification
+
+    def _record_fusion_takeover_results(self, task_id: str, agents: list) -> dict:
+        try:
+            from . import fusion_mode
+        except ImportError:
+            import fusion_mode
+        for agent in agents:
+            items = agent.model_config.get("fusion_takeover_items")
+            if not isinstance(items, list) or not items:
+                continue
+            report, changed_files, error, verification = (
+                self._commander_agent_report(agent)
+            )
+            succeeded = agent.status == "SUCCESS" and bool(report)
+            if agent.status == "SUCCESS" and not report and not error:
+                error = "Commander 子 Agent 未提交 Fusion 接管报告"
+            fusion_mode.record_fusion_takeover_result(
+                task_id,
+                agent.agent_id,
+                succeeded=succeeded,
+                report=report,
+                changed_files=changed_files,
+                verification=verification if succeeded else [],
+                error=error or ("" if succeeded else f"子 Agent 状态：{agent.status}"),
+            )
+        return fusion_mode.takeover_manifest(task_id) or {}
+
+    def _finalize_fusion_takeover(self, task_id: str, *, reason: str = "") -> dict:
+        try:
+            from . import fusion_mode
+        except ImportError:
+            import fusion_mode
+        manifest = fusion_mode.finalize_fusion_takeover(task_id, reason=reason)
+        return fusion_mode.takeover_receipt(manifest)
+
     def run_commander_auto(self, task_id: str, request: str, workspace: str | Path, *,
                            modules: Iterable[str] = (), roles: Iterable[str] | None = None,
                            max_agents: int = 5, timeout: float = 600, codex: str = "codex",
@@ -860,8 +978,13 @@ class Orchestrator:
             from commander_provider_pool import CommanderProviderCoordinator, ProviderProfile
         if not native or not codex_cli_available(codex):
             with fusion_commander_lock(task_id):
+                takeover = self._finalize_fusion_takeover(
+                    task_id,
+                    reason="Commander 当前为离线计划，无法执行 Fusion 遗留任务",
+                )
                 return {"mode": "offline-plan", "codex_available": codex_cli_available(codex),
                         "roles": [asdict(item) for item in role_plan],
+                        "takeover": takeover,
                         "reports": self.run_commander(task_id, request, modules=modules,
                                                        roles=roles, max_agents=max_agents)}
         source = Path(workspace).resolve()
@@ -888,6 +1011,7 @@ class Orchestrator:
                 child.transition(TaskExecutionState.EXECUTING)
                 agent.context = child
                 runtime._persist_child_context(agent)
+            self._assign_fusion_takeover(task_id, agents)
 
             # Commander 只配置终端可执行文件路径；子 Agent 的启动参数由这里统一编排。
             configured_terminal = os.environ.get("AGENTRELAY_COMMANDER_TERMINAL_PATH", "").strip()
@@ -915,24 +1039,65 @@ class Orchestrator:
                     "请提供分析、验证或补充修改建议，不得接管该角色，也不要把自己的角色改成目标角色。\n"
                     if agent.model_config.get("assist_for") else ""
                 )
-                prompt = (
-                    f"你是 Commander 的 {agent.role} 子 Agent。\n"
-                    f"职责：{goal}\n"
-                    f"{assist_note}"
-                    f"指定 Provider：{provider_id}。如果该 Provider 是 web 或 local，"
-                    "你只能通过主 Agent/AgentRelay 的受控调用使用它；不要自行打开新的 Commander，"
-                    "不要调用任何 API Provider。\n"
-                    f"受控 Provider 入口（如确需咨询）：{coordinator_cli} --provider {provider_id} "
-                    + " ".join(f"--fallback-provider {item}" for item in fallback_providers) + " "
-                    + f"--task-id {task_id} --role {agent.role} --coordinator {runtime_path}\n"
-                    f"用户任务：{request}\n\n"
-                    "你在隔离 workspace 中工作，只处理自己的职责。可以读取和修改该隔离目录，"
-                    "不要访问父 workspace，不要 git commit，不要执行 git reset/checkout，不要调用外部模型。"
-                    "完成后用简洁文字报告：完成内容、修改文件、验证结果、风险和建议。"
-                )
+                if agent.model_config.get("fusion_takeover_phase"):
+                    prompt = (
+                        self._fusion_takeover_prompt(agent)
+                        + f"指定 Provider：{provider_id}。不要调用 Fusion 或 API Provider。\n"
+                        f"受控 Provider 入口（如确需咨询）：{coordinator_cli} "
+                        f"--provider {provider_id} "
+                        + " ".join(
+                            f"--fallback-provider {item}"
+                            for item in fallback_providers
+                        )
+                        + f" --task-id {task_id} --role {agent.role} "
+                        f"--coordinator {runtime_path}\n"
+                        "你在隔离 workspace 中工作，不要访问父 workspace，不要 git commit，"
+                        "不要执行 git reset/checkout。"
+                    )
+                else:
+                    prompt = (
+                        f"你是 Commander 的 {agent.role} 子 Agent。\n"
+                        f"职责：{goal}\n"
+                        f"{assist_note}"
+                        f"指定 Provider：{provider_id}。如果该 Provider 是 web 或 local，"
+                        "你只能通过主 Agent/AgentRelay 的受控调用使用它；不要自行打开新的 Commander，"
+                        "不要调用任何 API Provider。\n"
+                        f"受控 Provider 入口（如确需咨询）：{coordinator_cli} --provider {provider_id} "
+                        + " ".join(f"--fallback-provider {item}" for item in fallback_providers) + " "
+                        + f"--task-id {task_id} --role {agent.role} --coordinator {runtime_path}\n"
+                        f"用户任务：{request}\n\n"
+                        "你在隔离 workspace 中工作，只处理自己的职责。可以读取和修改该隔离目录，"
+                        "不要访问父 workspace，不要 git commit，不要执行 git reset/checkout，不要调用外部模型。"
+                        "完成后用简洁文字报告：完成内容、修改文件、验证结果、风险和建议。"
+                    )
                 model = agent.model_config.get("model")
                 return list(command_prefix) + (["-m", str(model)] if model else []) + ["--skip-git-repo-check", "--sandbox", "workspace-write",
                         "--approve-for-me", "--ephemeral", "--color", "never", prompt]
+
+            takeover_agents = [
+                agent for agent in agents
+                if agent.model_config.get("fusion_takeover_items")
+            ]
+            if takeover_agents:
+                for agent in takeover_agents:
+                    agent.model_config["fusion_takeover_phase"] = True
+                try:
+                    runtime.run_processes(
+                        takeover_agents,
+                        command_factory,
+                        timeout=timeout,
+                    )
+                finally:
+                    for agent in takeover_agents:
+                        agent.model_config.pop("fusion_takeover_phase", None)
+                takeover_plan = runtime.build_merge_plan(takeover_agents, source)
+                for agent in takeover_agents:
+                    agent.model_config["fusion_takeover_changed_files"] = [
+                        str(item.get("path") or "")
+                        for item in takeover_plan.get("entries", [])
+                        if item.get("agent_id") == agent.agent_id
+                    ]
+                self._record_fusion_takeover_results(task_id, takeover_agents)
 
             runtime.run_processes(agents, command_factory, timeout=timeout)
             for agent in agents:
@@ -959,11 +1124,25 @@ class Orchestrator:
             merged["merge_plan"] = merge_plan
             merged["merge_confirmation"] = merge_confirmation
             merged["summary"] = runtime.summarize(agents, merge_plan)
+            takeover = self._finalize_fusion_takeover(
+                task_id,
+                reason="Commander 流程结束，接管清单由主审查官完成最终核对",
+            )
+            takeover_failed = takeover.get("status") == "failed"
+            if takeover_failed:
+                merged["summary"]["status"] = "needs_review"
+                merged["summary"]["message"] += (
+                    " Fusion 遗留任务存在失败项，已在接管清单和回执中明确记录，"
+                    "不能视为整体完成。"
+                )
+            merged["summary"]["takeover"] = takeover
+            merged["takeover"] = takeover
             self.changelog.append(ChangeLog(task_id, "commander", "codex-self", "codex-self", (),
                                             request, ("native Codex reports collected",), event_type="EXECUTION"))
             return {"mode": "native-codex", "codex_available": True,
+                    "status": "failed" if takeover_failed else merged["summary"].get("status", "completed"),
                     "roles": [asdict(item) for item in role_plan], "agents": agents, "merged": merged,
-                    "runtime_root": str(runtime_path)}
+                    "takeover": takeover, "runtime_root": str(runtime_path)}
 
     def merge_commander_results(self, task_id: str, workspace: str | Path,
                                 runtime_root: str | Path, *, confirmed: bool = False) -> dict:
@@ -1031,6 +1210,35 @@ class Orchestrator:
                 child.transition(TaskExecutionState.EXECUTING)
                 agent.context = child
                 runtime._persist_child_context(agent)
+            self._assign_fusion_takeover(task_id, agents)
+            takeover_agents = [
+                agent for agent in agents
+                if agent.model_config.get("fusion_takeover_items")
+            ]
+            if takeover_agents:
+                takeover_before = {
+                    agent.agent_id: runtime._snapshot_files(agent.workspace)
+                    for agent in takeover_agents
+                }
+                for agent in takeover_agents:
+                    agent.model_config["fusion_takeover_phase"] = True
+                try:
+                    runtime.run_processes(
+                        takeover_agents,
+                        command_factory,
+                        timeout=timeout,
+                    )
+                finally:
+                    for agent in takeover_agents:
+                        agent.model_config.pop("fusion_takeover_phase", None)
+                for agent in takeover_agents:
+                    after = runtime._snapshot_files(agent.workspace)
+                    before = takeover_before.get(agent.agent_id, {})
+                    agent.model_config["fusion_takeover_changed_files"] = sorted(
+                        path for path in set(before) | set(after)
+                        if before.get(path) != after.get(path)
+                    )
+                self._record_fusion_takeover_results(task_id, takeover_agents)
             runtime.run_processes(agents, command_factory, timeout=timeout)
             for agent in agents:
                 if agent.context is not None:
@@ -1041,9 +1249,25 @@ class Orchestrator:
                     runtime._persist_child_context(agent)
                 runtime.save(agent, Path(root) / "agents")
             merged = runtime.merge_results(agents)
+            takeover = self._finalize_fusion_takeover(
+                task_id,
+                reason="Commander 进程组结束，接管清单由主审查官完成最终核对",
+            )
+            takeover_failed = takeover.get("status") == "failed"
+            if takeover_failed:
+                merged["status"] = "needs_review"
+                merged["takeover_failure"] = (
+                    "Fusion 遗留任务存在失败项，已在接管清单和回执中明确记录。"
+                )
+            merged["takeover"] = takeover
             self.changelog.append(ChangeLog(task_id, "commander", "codex-self", "codex-subagent", (),
                                             request, ("processes collected",), event_type="EXECUTION"))
-            return {"agents": agents, "merged": merged}
+            return {
+                "status": "failed" if takeover_failed else "completed",
+                "agents": agents,
+                "merged": merged,
+                "takeover": takeover,
+            }
 
     def rollback_plan(self, task_id: str, files: Iterable[str], current: dict[str, str], checkpoint: dict[str, str]) -> dict:
         entries = []

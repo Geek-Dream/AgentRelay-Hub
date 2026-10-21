@@ -259,8 +259,10 @@ Fusion 的 `readonly` 模式只能使用 `read_file`、`list_files` 和 `grep`�
 
 Commander 启动后拥有最高优先级：无论 Fusion 的保存开关是开启还是关闭，主流程和 Commander
 的全部子 Agent 都不能调用 Fusion。正在运行的 Fusion 会在下一次模型或工具调用前停住，
-生成交接快照并关闭旧任务；Commander 结束后不会自动恢复旧任务，Fusion 等待主 Agent 的
-下一次明确委派。这个互斥只影响运行态，不会改写用户保存的 on/off 偏好。
+生成交接快照并关闭旧任务。Commander 子 Agent 会先接手 Fusion 遗留工作，再执行 Commander
+主任务；结束时按 Fusion 会话返回明确回执，逐项标记完成或失败，并记录报告、改动文件和可用
+验证证据。旧任务不会自动恢复，Fusion 等待主 Agent 的下一次明确委派。这个互斥只影响运行态，
+不会改写用户保存的 on/off 偏好。
 
 ## Requirements 🛠️
 

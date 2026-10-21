@@ -305,24 +305,93 @@ def _attach_commander_results(
         if isinstance(item, str)
     }
     applied: list[dict[str, Any]] = []
+    current_session = str(session.get("session_id") or "")
     for result in reversed(fusion_mode.commander_results(
         home=home,
         limit=20,
-        session_id=str(session.get("session_id") or ""),
+        session_id=current_session,
     )):
         identity = f"{result.get('task_id', '')}:{result.get('finished_at', '')}"
         if identity in seen:
             continue
         seen.add(identity)
-        applied.append(result)
+        takeover = result.get("takeover")
+        takeover_items = (
+            takeover.get("items")
+            if isinstance(takeover, dict)
+            and isinstance(takeover.get("items"), list)
+            else []
+        )
+        item_session_ids = {
+            str(item.get("session_id") or "")
+            for item in takeover_items
+            if isinstance(item, dict) and item.get("session_id")
+        }
+        if current_session and item_session_ids:
+            takeover_items = [
+                item for item in takeover_items
+                if isinstance(item, dict)
+                and str(item.get("session_id") or "") == current_session
+            ]
+        takeover_status = (
+            str(takeover.get("status") or "")
+            if isinstance(takeover, dict)
+            else ""
+        )
+        if takeover_items:
+            item_states = [
+                str(item.get("status") or "")
+                for item in takeover_items
+                if isinstance(item, dict)
+            ]
+            takeover_status = (
+                "completed"
+                if item_states and all(state == "completed" for state in item_states)
+                else "failed"
+            )
+        scoped_takeover = (
+            {**takeover, "status": takeover_status, "items": takeover_items}
+            if isinstance(takeover, dict)
+            else {}
+        )
+        scoped_result = {**result, "takeover": scoped_takeover}
+        applied.append(scoped_result)
+        item_status = ", ".join(
+            f"{item.get('run_id', '')}:{item.get('status', '')}"
+            for item in takeover_items
+            if isinstance(item, dict)
+        )
+        receipt_items = [
+            {
+                "run_id": str(item.get("run_id") or ""),
+                "status": str(item.get("status") or ""),
+                "changed_files": [
+                    str(path) for path in item.get("changed_files") or []
+                    if str(path)
+                ][:20],
+                "report": str(item.get("report") or "")[:1200],
+                "verification": [
+                    str(value) for value in item.get("verification") or []
+                    if str(value)
+                ][:20],
+                "error": str(item.get("error") or "")[:600],
+            }
+            for item in takeover_items
+            if isinstance(item, dict)
+        ][:5]
         session.setdefault("messages", []).append({
             "role": "system",
             "kind": "commander_result",
             "content": (
-                "A Commander run completed and took over work that may have belonged "
-                f"to Fusion: task_id={result.get('task_id', '')}, "
-                f"status={result.get('status', '')}. Treat the interrupted Fusion task "
-                "as closed and do not resume it unless the main agent explicitly asks."
+                "Commander has closed the Fusion work it took over. "
+                f"task_id={result.get('task_id', '')}; "
+                f"commander_status={result.get('status', '')}; "
+                f"takeover_status={takeover_status or 'not_required'}; "
+                f"items={item_status or 'none'}; "
+                f"scoped_receipt={json.dumps(receipt_items, ensure_ascii=False)}. "
+                "The old Fusion task is closed, whether completed or failed. "
+                "Do not resume it automatically; wait for a new explicit task "
+                "from the main agent."
             ),
         })
     session["seen_commander_results"] = sorted(seen)[-50:]
@@ -767,30 +836,14 @@ def _write_handoff(
     reason: str,
     home: Path | None,
 ) -> Path:
-    directory = fusion_mode.fusion_runtime_directory(home) / "handoffs"
+    directory = fusion_mode.fusion_handoffs_directory(home)
     path = directory / f"handoff-{run.get('run_id', '')}.json"
-    changed_files = sorted({
-        str(item.get("path") or "")
-        for item in activity
-        if item.get("tool") == "write_file" and item.get("ok") and item.get("path")
-    })
-    commands = [
-        item for item in activity
-        if item.get("tool") == "run_command"
-    ]
-    _atomic_json(path, {
-        "run_id": str(run.get("run_id") or ""),
-        "session_id": str(session.get("session_id") or ""),
-        "workspace": str(session.get("workspace") or ""),
-        "task": str(run.get("task") or ""),
-        "reason": reason,
-        "phase": str(run.get("phase") or ""),
-        "tool_mode": str(session.get("tool_mode") or ""),
-        "changed_files": changed_files,
-        "commands": commands[-10:],
-        "recent_activity": activity[-20:],
-        "created_at": _now(),
-    })
+    _atomic_json(path, fusion_mode.build_fusion_handoff(
+        session=session,
+        run=run,
+        activity=activity,
+        reason=reason,
+    ))
     return path
 
 
@@ -879,13 +932,63 @@ def run_sidekick(
         session["updated_at"] = _now()
         _atomic_json(path, session)
 
-        run = fusion_mode.start_fusion_run(
-            session_id=key,
-            workspace=workspace,
-            task=prompt,
-            tool_mode=tool_mode,
-            home=home,
-        )
+        try:
+            with fusion_mode.fusion_execution_gate(
+                home=home,
+                lock_dir=lock_dir,
+                environ=environ,
+            ):
+                run = fusion_mode.start_fusion_run(
+                    session_id=key,
+                    workspace=workspace,
+                    task=prompt,
+                    tool_mode=tool_mode,
+                    home=home,
+                )
+        except fusion_mode.FusionPreempted as exc:
+            rejected_run = {
+                "run_id": f"rejected-before-start-{key[:12]}",
+                "session_id": key,
+                "workspace": str(workspace),
+                "task": prompt,
+                "tool_mode": tool_mode,
+                "phase": "rejected_before_start",
+                "updated_at": _now(),
+            }
+            handoff = _write_handoff(
+                session=session,
+                run=rejected_run,
+                activity=[],
+                reason=exc.reason,
+                home=home,
+            )
+            session["state"] = "idle"
+            session["last_handoff"] = {
+                "reason": exc.reason,
+                "handoff_path": str(handoff),
+                "created_at": _now(),
+            }
+            session["messages"].append({
+                "role": "system",
+                "kind": "commander_handoff",
+                "content": (
+                    "Commander is active, so this Fusion task was not started. "
+                    "Do not start it automatically after Commander ends; wait for "
+                    "a new explicit task from the main agent."
+                ),
+            })
+            session["updated_at"] = _now()
+            _atomic_json(path, session)
+            return {
+                "status": "rejected",
+                "error": exc.reason,
+                "message": "Commander 优先，Fusion 任务未启动",
+                "session_id": key,
+                "tool_mode": tool_mode,
+                "steps": 0,
+                "handoff_path": str(handoff),
+                "state": exc.state,
+            }
         run_id = str(run["run_id"])
         tools = tools_for_mode(tool_mode) if tool_capable else []
         activity: list[dict[str, Any]] = []
@@ -1009,9 +1112,11 @@ def run_sidekick(
                 "role": "system",
                 "kind": "commander_handoff",
                 "content": (
-                    "The previous task was interrupted because Commander has priority. "
-                    "Treat that task as handed off and closed. Wait for a new explicit "
-                    "task from the main agent."
+                    "Commander has priority and has taken over the previous task. "
+                    "Stop now and do not continue or resume that work yourself. "
+                    "A Commander child agent will finish the remaining steps from "
+                    "the saved handoff. Commander will later send a completion or "
+                    "failure receipt. Wait for a new explicit task from the main agent."
                 ),
             })
             session["updated_at"] = _now()

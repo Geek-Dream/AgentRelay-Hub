@@ -374,6 +374,219 @@ class FusionCommanderMutualExclusionTests(FusionTestBase):
         )
         self.assertEqual(unrelated, [])
 
+    def test_takeover_completion_requires_and_carries_agent_evidence(self):
+        self.configure_ready_fusion()
+        run_a = fusion_mode.start_fusion_run(
+            session_id="session-a",
+            workspace=self.home,
+            task="finish task a",
+            tool_mode="readonly",
+            home=self.home,
+        )
+        run_b = fusion_mode.start_fusion_run(
+            session_id="session-b",
+            workspace=self.home,
+            task="finish task b",
+            tool_mode="coding",
+            home=self.home,
+        )
+        try:
+            with fusion_mode.fusion_commander_lock(
+                "takeover-task",
+                home=self.home,
+                lock_dir=self.lock_dir,
+            ):
+                manifest = fusion_mode.prepare_fusion_takeover(
+                    "takeover-task",
+                    home=self.home,
+                    wait_timeout=0,
+                )
+                items = {
+                    item["session_id"]: item["item_id"]
+                    for item in manifest["items"]
+                }
+                fusion_mode.assign_fusion_takeover(
+                    "takeover-task",
+                    {
+                        "agent-a": [items["session-a"]],
+                        "agent-b": [items["session-b"]],
+                    },
+                    agent_roles={
+                        "agent-a": "backend-code",
+                        "agent-b": "git-audit",
+                    },
+                    home=self.home,
+                )
+                for agent_id, session_id in (
+                    ("agent-a", "session-a"),
+                    ("agent-b", "session-b"),
+                ):
+                    fusion_mode.record_fusion_takeover_result(
+                        "takeover-task",
+                        agent_id,
+                        succeeded=True,
+                        report=f"finished {session_id}",
+                        changed_files=("result.txt",),
+                        verification=("python3 -m unittest",),
+                        home=self.home,
+                    )
+                closed = fusion_mode.finalize_fusion_takeover(
+                    "takeover-task",
+                    reason="all evidence recorded",
+                    home=self.home,
+                )
+                self.assertEqual(closed["result_status"], "completed")
+                self.assertEqual(
+                    {item["session_id"] for item in closed["items"]},
+                    {"session-a", "session-b"},
+                )
+        finally:
+            fusion_mode.finish_fusion_run(run_a["run_id"], home=self.home)
+            fusion_mode.finish_fusion_run(run_b["run_id"], home=self.home)
+
+        receipt_a = fusion_mode.commander_results(
+            home=self.home,
+            session_id="session-a",
+        )
+        receipt_b = fusion_mode.commander_results(
+            home=self.home,
+            session_id="session-b",
+        )
+        unrelated = fusion_mode.commander_results(
+            home=self.home,
+            session_id="session-c",
+        )
+        self.assertEqual(len(receipt_a), 1)
+        self.assertEqual(len(receipt_b), 1)
+        self.assertEqual(receipt_a[0]["takeover"]["status"], "completed")
+        reports = {
+            item["session_id"]: item["report"]
+            for item in receipt_a[0]["takeover"]["items"]
+        }
+        self.assertEqual(reports["session-a"], "finished session-a")
+        self.assertEqual(reports["session-b"], "finished session-b")
+        self.assertEqual(unrelated, [])
+
+    def test_unfinished_takeover_item_cannot_be_reported_completed(self):
+        self.configure_ready_fusion()
+        run = fusion_mode.start_fusion_run(
+            session_id="unfinished-session",
+            workspace=self.home,
+            task="unfinished takeover",
+            tool_mode="readonly",
+            home=self.home,
+        )
+        try:
+            with fusion_mode.fusion_commander_lock(
+                "unfinished-commander",
+                home=self.home,
+                lock_dir=self.lock_dir,
+            ):
+                manifest = fusion_mode.prepare_fusion_takeover(
+                    "unfinished-commander",
+                    home=self.home,
+                    wait_timeout=0,
+                )
+                item_id = manifest["items"][0]["item_id"]
+                fusion_mode.assign_fusion_takeover(
+                    "unfinished-commander",
+                    {"agent-a": [item_id]},
+                    home=self.home,
+                )
+                closed = fusion_mode.finalize_fusion_takeover(
+                    "unfinished-commander",
+                    reason="child did not return evidence",
+                    home=self.home,
+                )
+        finally:
+            fusion_mode.finish_fusion_run(run["run_id"], home=self.home)
+
+        self.assertEqual(closed["result_status"], "failed")
+        self.assertEqual(closed["items"][0]["status"], "failed")
+        self.assertIn(
+            "child did not return evidence",
+            closed["items"][0]["resolution"]["error"],
+        )
+        receipt = fusion_mode.commander_results(
+            home=self.home,
+            session_id="unfinished-session",
+        )
+        self.assertEqual(receipt[0]["takeover"]["status"], "failed")
+
+    def test_commander_without_active_fusion_needs_no_takeover(self):
+        manifest = fusion_mode.prepare_fusion_takeover(
+            "no-fusion-commander",
+            home=self.home,
+            wait_timeout=0,
+        )
+        closed = fusion_mode.finalize_fusion_takeover(
+            "no-fusion-commander",
+            reason="no active Fusion run",
+            home=self.home,
+        )
+        receipt = fusion_mode.takeover_receipt(closed, home=self.home)
+
+        self.assertEqual(manifest["items"], [])
+        self.assertEqual(closed["result_status"], "not_required")
+        self.assertEqual(receipt["status"], "not_required")
+        self.assertEqual(receipt["items"], [])
+
+    def test_commander_processes_take_over_fusion_before_main_work(self):
+        self.configure_ready_fusion()
+        project = self.home / "project"
+        project.mkdir()
+        run = fusion_mode.start_fusion_run(
+            session_id="process-session",
+            workspace=project,
+            task="finish delegated cleanup",
+            tool_mode="readonly",
+            home=self.home,
+        )
+
+        def command_factory(agent):
+            takeover = bool(agent.model_config.get("fusion_takeover_phase"))
+            marker = "takeover.txt" if takeover else "main.txt"
+            script = (
+                "from pathlib import Path; "
+                f"Path({marker!r}).write_text('ok', encoding='utf-8'); "
+                f"print({'takeover complete' if takeover else 'main complete'!r})"
+            )
+            return [sys.executable, "-c", script]
+
+        try:
+            result = Orchestrator().run_commander_processes(
+                "process-commander",
+                "finish delegated cleanup and main task",
+                self.home / "commander-runtime",
+                command_factory,
+                roles=("git-audit",),
+                max_agents=1,
+                timeout=5,
+            )
+        finally:
+            fusion_mode.finish_fusion_run(run["run_id"], home=self.home)
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["takeover"]["status"], "completed")
+        self.assertEqual(
+            result["takeover"]["items"][0]["status"],
+            "completed",
+        )
+        self.assertEqual(
+            result["takeover"]["items"][0]["changed_files"],
+            ["takeover.txt"],
+        )
+        self.assertEqual(
+            result["takeover"]["items"][0]["verification"],
+            ["Commander 子 Agent 进程退出码 0"],
+        )
+        receipts = fusion_mode.commander_results(
+            home=self.home,
+            session_id="process-session",
+        )
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0]["takeover"]["status"], "completed")
+
     def test_stale_commander_lock_is_removed(self):
         self.lock_dir.mkdir(parents=True)
         stale = self.lock_dir / "commander-stale.json"
@@ -478,6 +691,17 @@ class FusionInstallTests(unittest.TestCase):
         process_source = inspect.getsource(Orchestrator.run_commander_processes)
         self.assertIn("with fusion_commander_lock(task_id):", auto_source)
         self.assertIn("with fusion_commander_lock(task_id):", process_source)
+        for source in (auto_source, process_source):
+            assign = source.index("self._assign_fusion_takeover(task_id, agents)")
+            takeover_run = source.index("runtime.run_processes(\n                        takeover_agents")
+            main_run = source.index("runtime.run_processes(agents, command_factory")
+            finalize = source.index(
+                "takeover = self._finalize_fusion_takeover(",
+                main_run,
+            )
+            self.assertLess(assign, takeover_run)
+            self.assertLess(takeover_run, main_run)
+            self.assertLess(main_run, finalize)
 
 
 if __name__ == "__main__":

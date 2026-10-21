@@ -112,8 +112,11 @@ coding 模式可以直接修改文件并执行命令，必须由用户明确确�
 - Commander 启动时写入最高优先级运行锁，并把当前活动的 Fusion run 标记为中断。
 - Fusion 在每一步模型调用和每一个工具调用前重新检查锁，不只在任务开始时检查。
 - 被抢占时 Fusion 生成 handoff 快照，记录任务、活动、改动文件和命令，并关闭旧任务。
-- Commander 结束后只写完成回执，不自动恢复旧 Fusion 任务；Fusion 回到空闲，等待主 Agent
-  的下一次明确委派。
+- Commander 子 Agent 只读取结构化 handoff，不复用 Fusion 旧会话；它先接手 Fusion 遗留
+  工作，再执行 Commander 主任务。
+- Commander 结束时会按 Fusion 会话发送 scoped 回执，明确每个遗留项是 completed 还是
+  failed，并携带报告、改动文件和可用验证证据。没有证据的遗留项不能标记为完成。
+- 旧 Fusion 任务不会自动恢复；Fusion 回到空闲，等待主 Agent 的下一次明确委派。
 - 主 Agent、Fusion、Commander 及其子 Agent 各自使用独立会话和上下文，不共享工具历史。
 - Commander 运行期间，主流程和全部 Commander 子 Agent 都不能调用或启用 Fusion。
 

@@ -542,7 +542,7 @@ function fusionGuidance(ctx) {{
       : "Readonly mode can inspect files, list directories, and search, but cannot write files or run commands.",
     "Use Fusion for delegated investigation or execution while the main agent keeps planning and final review:",
     delegate,
-    "The same workspace and session id reuse persistent context. Fusion cannot start another Fusion or Commander. If Commander starts, Fusion is preempted, writes a handoff, and must not resume the old task.",
+    "The same workspace and session id reuse persistent context. Fusion cannot start another Fusion or Commander. If Commander starts, Fusion is preempted and writes a structured handoff; Commander child agents take over those leftovers before their main work, then send a scoped completed/failed receipt. The old Fusion task never resumes automatically.",
     "Continue local work if Fusion is unavailable or fails; do not block the main task.",
   ].join("\\n");
 }}
