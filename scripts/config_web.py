@@ -10,21 +10,340 @@ def build_config_page(config: dict[str, Any]) -> str:
     page = r"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AgentRelay 配置中心</title>
+<script>
+(()=>{let theme='light';try{const saved=localStorage.getItem('agentrelay-theme');const systemLight=!window.matchMedia||window.matchMedia('(prefers-color-scheme: light)').matches;theme=saved==='light'||saved==='dark'?saved:systemLight?'light':'dark'}catch(_){}document.documentElement.dataset.theme=theme})()
+</script>
 <style>
 :root{--ink:#17212d;--muted:#647182;--paper:#ffffff;--canvas:#f3f6f8;--line:#dce4e8;--mint:#0c9b79;--coral:#e85c45;--sky:#0c6cc7;--shadow:0 18px 42px rgba(23,33,45,.08)}
 *{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--ink);font:15px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif}
 .app{max-width:1240px;margin:auto;padding:34px 24px 76px}.mast{display:flex;align-items:end;justify-content:space-between;gap:20px;margin:10px 0 30px;animation:enter .55s ease both}.brand{font-size:32px;font-weight:730;letter-spacing:0}.brand small{display:block;font-size:13px;font-weight:500;color:var(--muted);margin-top:5px}.mode{border:1px solid var(--line);background:var(--paper);padding:7px 11px;border-radius:7px;font-size:13px;color:var(--muted)}
 .layout{display:grid;grid-template-columns:215px minmax(0,1fr);gap:28px}.nav{position:sticky;top:20px;align-self:start}.nav button{display:block;width:100%;border:0;background:transparent;text-align:left;padding:10px 12px;margin:2px 0;border-radius:7px;color:var(--muted);font:inherit;cursor:pointer;transition:background .18s,color .18s,transform .18s}.nav button:hover{background:#e8f0f0;color:var(--ink);transform:translateX(2px)}.nav button.active{background:var(--ink);color:#fff}.view{display:none}.view.active{display:block;animation:enter .42s ease both}.head{display:flex;align-items:end;justify-content:space-between;gap:16px;margin-bottom:16px}.head h1{font-size:24px;margin:0;letter-spacing:0}.hint{margin:4px 0 0;color:var(--muted);font-size:13px}.card{background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:20px;box-shadow:var(--shadow);animation:rise .45s ease both}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.stat{font-size:30px;font-weight:700;margin-top:5px}.label{font-size:13px;color:var(--muted)}.stack{display:grid;gap:12px}.provider{display:flex;justify-content:space-between;align-items:center;gap:18px}.provider>div:first-child{min-width:0}.provider strong{display:block}.meta{font-size:13px;color:var(--muted);max-width:540px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.provider .ptitle{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.state{font-size:12px;margin-top:6px;color:var(--muted)}.state b{color:var(--mint)}.state .wait{color:#b16b00}.actions{display:flex;gap:8px;flex-wrap:nowrap;flex:none;align-items:center}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.btn{appearance:none;border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:8px;padding:7px 12px;font:inherit;font-size:13px;font-weight:500;cursor:pointer;box-shadow:0 1px 2px rgba(23,33,45,.05);transition:transform .16s,box-shadow .16s,border-color .16s,background .16s,color .16s}.btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(23,33,45,.12);border-color:#9fb0b7}.btn:active{transform:translateY(0) scale(.97);box-shadow:none}.btn.primary{border:0;background:linear-gradient(135deg,#1273d4,#0b5cb4);color:#fff;box-shadow:0 2px 8px rgba(12,108,199,.32)}.btn.primary:hover{box-shadow:0 5px 14px rgba(12,108,199,.4)}.btn.danger{background:transparent;border-color:transparent;color:#c0392b;box-shadow:none}.btn.danger:hover{background:#fdf1ef;border-color:#f3d4ce}.stag{font-size:11px;font-weight:600;padding:1px 7px;border-radius:6px;letter-spacing:.2px;white-space:nowrap}.stag.on{background:#e3f5ee;color:#0c9b79;border:1px solid #bfe8d8}.stag.off{background:#f1f3f5;color:#8a94a0;border:1px solid #e2e6ea}.stag.def{background:#eef2f7;color:#5a6b85;border:1px solid #dde4ec}.status{display:inline-flex;align-items:center;font-size:12px;color:var(--muted);margin-right:4px;white-space:nowrap;flex:none}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;flex:none}.dot.on{background:#0c9b79;box-shadow:0 0 0 3px rgba(12,155,121,.15)}.dot.off{background:#b7bec8;box-shadow:0 0 0 3px rgba(140,150,160,.12)}.empty{padding:26px;border:1px dashed #b9c6ca;border-radius:8px;color:var(--muted);text-align:center}.form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.field{display:flex;flex-direction:column;gap:6px}.field.full{grid-column:1/-1}.field label{font-size:13px;font-weight:600}.field input,.field select{width:100%;border:1px solid var(--line);background:#fff;border-radius:7px;padding:10px;color:var(--ink);font:inherit;outline:0}.field input:focus,.field select:focus{border-color:var(--sky);box-shadow:0 0 0 3px #0c6cc71a}.switch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid var(--line);border-radius:7px;padding:11px 12px}.switch-row small{display:block;color:var(--muted);font-size:12px}.switch{width:42px;height:24px;position:relative;flex:0 0 auto}.switch input{opacity:0;width:0;height:0}.slider{position:absolute;inset:0;background:#b7c2c7;border-radius:99px;cursor:pointer;transition:.18s}.slider:before{content:"";width:18px;height:18px;position:absolute;left:3px;top:3px;background:#fff;border-radius:50%;transition:.18s;box-shadow:0 1px 3px #0003}.switch input:checked+.slider{background:var(--mint)}.switch input:checked+.slider:before{transform:translateX(18px)}.switch input:disabled+.slider{opacity:.45;cursor:not-allowed}.notice{border-left:3px solid var(--sky);padding:10px 12px;background:#edf5fc;color:#33495c;font-size:13px;margin:14px 0}.notice.warn{border-color:#d58917;background:#fff7e8}.check-result{margin-top:14px;font-size:13px;line-height:1.8}.toast{position:fixed;right:22px;bottom:22px;max-width:min(430px,calc(100vw - 44px));padding:12px 15px;background:var(--ink);border-radius:7px;color:#fff;opacity:0;transform:translateY(12px);transition:.22s;pointer-events:none;box-shadow:var(--shadow)}.toast.show{opacity:1;transform:none}.login-state{font-size:13px;color:var(--muted);margin-top:10px}.login-state.ok{color:var(--mint)}
 @keyframes enter{from{opacity:0}to{opacity:1}}@keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}@media(max-width:780px){.app{padding:20px 14px 50px}.mast{align-items:start;flex-direction:column}.layout{display:block}.nav{position:static;display:flex;overflow:auto;gap:5px;margin-bottom:18px}.nav button{width:auto;white-space:nowrap}.grid,.form{grid-template-columns:1fr}.field.full{grid-column:auto}.provider{align-items:start;flex-direction:column}.head{align-items:start;flex-direction:column}}
-</style></head><body><main class="app"><header class="mast"><div class="brand">AgentRelay<small>本机 Provider 配置中心</small></div><span class="mode" id="mode">离线基础模式</span></header><div class="layout"><nav class="nav"><button class="active" data-tab="overview">总览</button><button data-tab="commander">Commander</button><button data-tab="web">线上模型</button><button data-tab="local">本地模型</button><button data-tab="api">API 模型</button><button data-tab="security">安全与配置</button></nav><section>
-<div id="overview" class="view active"><div class="head"><div><h1>当前状态</h1><p class="hint">环境检查确认安装链路；Provider 检查确认模型配置和登录状态。</p></div><div class="toolbar"><button class="btn" onclick="checkEnvironment()">检查环境</button><button class="btn" onclick="initializeFiles()">初始化基础文件</button><button class="btn primary" onclick="closeApp()">完成并关闭</button></div></div><div class="grid" id="stats"></div><div class="card" style="margin-top:14px"><strong>Provider 管理</strong><p class="hint">网页模型能否实际自动对话，取决于是否已接入该网站的操作规则。</p><div class="stack" id="overview-list" style="margin-top:15px"></div><div id="environment" class="check-result"></div></div><div class="card" id="targets-card" style="margin-top:14px"></div></div>
-<div id="commander" class="view"><div class="head"><div><h1>Commander</h1><p class="hint">主 Agent 按任务实际需要启动 1 到 5 个隔离子 Agent。</p></div><button class="btn primary" onclick="saveCommander()">保存</button></div><div class="card"><div class="form"><div class="field full"><div class="switch-row"><div><label>启用审查官模式</label><small id="commander-note">至少需要一个线上或本地模型。</small></div><label class="switch"><input id="commander-enabled" type="checkbox"><span class="slider"></span></label></div></div><div class="field full"><label>Codex 终端路径</label><input id="terminal-path" placeholder="codex 或 /路径/codex"></div><div class="field"><label>最多可启动的 Agent</label><select id="max-agents"><option value="1">1 个</option><option value="2">2 个</option><option value="3">3 个</option><option value="4">4 个</option><option value="5">5 个</option></select><p class="hint">这是上限；实际数量由主 Agent 按业务自动决定。</p></div></div><div class="notice">配置任意线上网页模型或本地模型后，Commander 会自动启用。API 模型只允许主 Agent 使用，不会交给子 Agent。</div></div></div>
-<div id="web" class="view"><div class="head"><div><h1>线上网页模型</h1><p class="hint">登录状态加密保存在本机。DeepSeek 已可自动对话；其他网页先完成配置和登录，接入操作规则后才可自动对话。</p></div><button class="btn primary" onclick="showForm('web')">新增线上模型</button></div><div class="stack" id="web-list"></div><div id="web-form" style="margin-top:14px"></div></div>
-<div id="local" class="view"><div class="head"><div><h1>本地模型</h1><p class="hint">支持 Ollama、LM Studio、vLLM、llama.cpp 的 OpenAI 兼容服务。</p></div><div class="toolbar"><button class="btn" onclick="scanLocal()">扫描本机服务</button><button class="btn primary" onclick="showForm('local')">新增本地模型</button></div></div><div id="local-scan" class="notice" style="display:none"></div><div class="stack" id="local-list"></div><div id="local-form" style="margin-top:14px"></div></div>
-<div id="api" class="view"><div class="head"><div><h1>API 模型</h1><p class="hint">密钥不会在页面回显，只加密保存在本机。</p></div><button class="btn primary" onclick="showForm('api')">新增 API 模型</button></div><div class="stack" id="api-list"></div><div id="api-form" style="margin-top:14px"></div><div class="card" style="margin-top:14px"><h2>协议路由</h2><p class="hint">消息格式不是 Chat 的 API 模型由内置路由做协议转换（Responses/Anthropic ↔ Chat）。默认端口 15731，与本机 cc-switch 的 15721 错开；被占用时可改。</p><div class="form"><div class="field"><label>路由端口</label><input id="router-port" type="number" min="1024" max="65535" value="15731"></div></div><div class="toolbar"><button class="btn primary" onclick="saveRouter()">保存端口</button></div></div></div>
+</style>
+<style>
+:root{
+  --bg:#04070d;--bg-soft:#07101c;--surface:rgba(8,17,30,.9);--surface-2:rgba(11,24,41,.78);
+  --ink:#e8f5ff;--muted:#7890aa;--dim:#52687f;--line:rgba(120,190,255,.16);--line-strong:rgba(77,217,255,.46);
+  --cyan:#53ddff;--cyan-bright:#a4f2ff;--teal:#3ef0c2;--amber:#ffc45d;--red:#ff758c;--violet:#a795ff;
+  --shadow:0 24px 70px rgba(0,0,0,.42);--mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;--display:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif
+}
+html{color-scheme:dark;background:var(--bg)}
+body{
+  min-height:100vh;margin:0;color:var(--ink);font:15px/1.55 var(--display);
+  background-color:var(--bg);
+  background-image:
+    linear-gradient(rgba(69,215,255,.034) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(69,215,255,.034) 1px,transparent 1px),
+    linear-gradient(180deg,rgba(11,38,66,.55),rgba(4,7,13,0) 42%);
+  background-size:44px 44px,44px 44px,100% 100%;background-attachment:fixed
+}
+body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.18;background:repeating-linear-gradient(180deg,transparent 0,transparent 3px,rgba(122,225,255,.08) 4px)}
+body::after{content:"";position:fixed;inset:0 0 auto;height:1px;z-index:3;pointer-events:none;background:linear-gradient(90deg,transparent,var(--cyan),transparent);box-shadow:0 0 22px rgba(83,221,255,.75);opacity:.7}
+.app{position:relative;z-index:1;max-width:1440px;margin:auto;padding:30px 30px 76px}
+.mast{display:flex;align-items:center;justify-content:space-between;gap:24px;margin:0 0 24px;padding:0 2px 22px;border-bottom:1px solid var(--line);animation:enter .55s ease both}
+.brand-wrap{display:flex;align-items:center;gap:15px;min-width:0}
+.brand-mark{position:relative;display:grid;place-items:center;width:42px;height:42px;flex:none;background:linear-gradient(145deg,rgba(83,221,255,.19),rgba(83,221,255,.03));border:1px solid var(--line-strong);clip-path:polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%);box-shadow:inset 0 0 18px rgba(83,221,255,.15),0 0 24px rgba(83,221,255,.1)}
+.brand-mark::before{content:"";width:15px;height:15px;border:2px solid var(--cyan);transform:rotate(45deg);box-shadow:0 0 14px rgba(83,221,255,.7)}
+.brand-mark::after{content:"";position:absolute;width:5px;height:5px;background:var(--cyan-bright);border-radius:50%;box-shadow:0 0 12px var(--cyan)}
+.brand{font-size:30px;font-weight:760;line-height:1;letter-spacing:.045em;text-transform:uppercase;text-shadow:0 0 30px rgba(83,221,255,.18)}
+.brand small{display:block;margin-top:8px;color:var(--muted);font:11px/1.2 var(--mono);font-weight:500;letter-spacing:.16em;text-transform:uppercase}
+.mode-shell{display:flex;align-items:center;gap:11px;min-height:48px;padding:8px 12px 8px 14px;border:1px solid var(--line);border-radius:6px;background:linear-gradient(135deg,rgba(11,26,44,.92),rgba(7,14,25,.78));box-shadow:inset 0 1px rgba(255,255,255,.03),0 12px 30px rgba(0,0,0,.2)}
+.mode-dot{width:8px;height:8px;flex:none;border-radius:50%;background:var(--teal);box-shadow:0 0 0 4px rgba(62,240,194,.1),0 0 14px rgba(62,240,194,.9);animation:pulse 2.2s ease-in-out infinite}
+.mode-copy{display:flex;flex-direction:column;gap:1px}
+.mode-copy small{font:9px/1.2 var(--mono);letter-spacing:.15em;color:var(--dim)}
+.mode{border:0;border-radius:0;background:transparent;padding:0;font-size:13px;font-weight:650;color:var(--ink);white-space:nowrap}
+.mode-meta{padding-left:11px;border-left:1px solid var(--line);font:10px/1 var(--mono);letter-spacing:.12em;color:var(--cyan)}
+.layout{display:grid;grid-template-columns:226px minmax(0,1fr);gap:28px;align-items:start}
+.nav{position:sticky;top:20px;align-self:start;padding:16px 10px 12px;border:1px solid var(--line);border-radius:8px;background:linear-gradient(180deg,rgba(8,17,30,.94),rgba(5,11,21,.88));box-shadow:var(--shadow);overflow:hidden}
+.nav::before{content:"CONTROL INDEX";display:block;margin:0 10px 13px;padding-bottom:11px;border-bottom:1px solid var(--line);color:var(--dim);font:9px/1 var(--mono);letter-spacing:.2em}
+.nav::after{content:"";position:absolute;left:0;top:16px;width:2px;height:30px;background:var(--cyan);box-shadow:0 0 18px var(--cyan)}
+.nav button{display:flex;align-items:center;gap:10px;width:100%;margin:3px 0;padding:10px 11px;border:1px solid transparent;border-radius:5px;background:transparent;color:var(--muted);text-align:left;font:inherit;font-size:13px;cursor:pointer;transition:color .18s,background .18s,border-color .18s,transform .18s}
+.nav button svg{width:16px;height:16px;flex:none;stroke-width:1.6;opacity:.72;transition:opacity .18s,filter .18s}
+.nav button:hover{color:var(--ink);background:rgba(83,221,255,.065);border-color:rgba(83,221,255,.12);transform:translateX(2px)}
+.nav button:hover svg{opacity:1}
+.nav button.active{color:var(--cyan-bright);background:linear-gradient(90deg,rgba(83,221,255,.16),rgba(83,221,255,.025));border-color:rgba(83,221,255,.18);box-shadow:inset 2px 0 var(--cyan)}
+.nav button.active svg{opacity:1;filter:drop-shadow(0 0 7px rgba(83,221,255,.45))}
+.nav-foot{display:flex;align-items:flex-start;gap:9px;margin:14px 5px 2px;padding:13px 9px 4px;border-top:1px solid var(--line);color:var(--muted);font:10px/1.55 var(--mono);letter-spacing:.06em}
+.nav-foot::before{content:"";width:6px;height:6px;flex:none;margin-top:4px;border-radius:50%;background:var(--teal);box-shadow:0 0 10px rgba(62,240,194,.85)}
+.view{display:none;min-width:0}
+.view.active{display:block;animation:enter .42s ease both}
+.head{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;margin:0 0 20px;padding:3px 0 19px 16px;border-left:2px solid var(--cyan);border-bottom:1px solid var(--line)}
+.head>div:first-child{min-width:0}
+.head>div:first-child::before{content:"SYSTEM MODULE // ACTIVE";display:block;margin-bottom:6px;color:var(--cyan);font:9px/1 var(--mono);letter-spacing:.18em}
+.head h1{font-size:27px;line-height:1.15;margin:0;letter-spacing:.01em;font-weight:680}
+.hint{margin:6px 0 0;color:var(--muted);font-size:12.5px;line-height:1.7}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.btn{appearance:none;display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:34px;border:1px solid var(--line);padding:7px 12px;border-radius:5px;background:rgba(9,20,35,.8);color:#c8d9eb;font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;box-shadow:inset 0 1px rgba(255,255,255,.025);transition:transform .16s,box-shadow .16s,border-color .16s,background .16s,color .16s}
+.btn svg{width:14px;height:14px;stroke-width:1.8}
+.btn:hover{transform:translateY(-1px);border-color:rgba(83,221,255,.44);background:rgba(18,38,61,.92);color:var(--ink);box-shadow:0 0 22px rgba(83,221,255,.09),inset 0 1px rgba(255,255,255,.04)}
+.btn:active{transform:translateY(0) scale(.98);box-shadow:none}
+.btn.primary{border-color:rgba(118,234,255,.8);background:linear-gradient(135deg,#79ecff,#29b9df);color:#03121b;box-shadow:0 0 24px rgba(83,221,255,.16),inset 0 1px rgba(255,255,255,.55)}
+.btn.primary:hover{background:linear-gradient(135deg,#9af3ff,#42cce9);color:#020c12;box-shadow:0 0 30px rgba(83,221,255,.3)}
+.btn.danger{border-color:transparent;background:transparent;color:#9a6570;box-shadow:none}
+.btn.danger:hover{border-color:rgba(255,117,140,.26);background:rgba(255,117,140,.075);color:#ff9cab;box-shadow:none}
+.card{position:relative;padding:20px;border:1px solid var(--line);border-radius:8px;background:linear-gradient(145deg,rgba(9,19,33,.94),rgba(5,12,22,.88));box-shadow:var(--shadow),inset 0 1px rgba(255,255,255,.025);animation:rise .45s ease both;overflow:hidden}
+.card::before{content:"";position:absolute;left:-1px;top:17px;width:2px;height:34px;background:var(--cyan);box-shadow:0 0 15px rgba(83,221,255,.65)}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.stat-card{min-height:124px;padding:17px 18px 15px;background:linear-gradient(145deg,rgba(10,23,40,.94),rgba(5,12,22,.86))}
+.stat-card::after{content:"";position:absolute;right:16px;top:16px;width:36px;height:36px;border-top:1px solid rgba(83,221,255,.26);border-right:1px solid rgba(83,221,255,.26)}
+.stat-card:nth-child(1){--stat:var(--cyan)}
+.stat-card:nth-child(2){--stat:var(--teal)}
+.stat-card:nth-child(3){--stat:var(--amber)}
+.stat-top{display:flex;align-items:center;justify-content:space-between;gap:14px;padding-right:46px}
+.stat-code{font:9px/1 var(--mono);letter-spacing:.13em;color:var(--dim)}
+.stat{font:700 42px/1 var(--mono);margin:13px 0 11px;color:var(--stat);letter-spacing:-.04em;text-shadow:0 0 24px color-mix(in srgb,var(--stat) 35%,transparent)}
+.stat-track{height:2px;background:rgba(120,190,255,.1);overflow:hidden}
+.stat-track i{display:block;height:100%;background:var(--stat);box-shadow:0 0 12px var(--stat)}
+.label{color:var(--muted);font-size:12.5px}
+.stack{display:grid;gap:10px}
+.section-block{margin-top:26px}
+.section-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:12px;padding:0 1px}
+.section-head h2{margin:3px 0 0;font-size:17px;line-height:1.25;font-weight:660}
+.section-head .hint{max-width:620px;margin:0;text-align:right}
+.section-code{display:block;color:var(--cyan);font:9px/1 var(--mono);letter-spacing:.17em}
+.provider{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:15px 16px 15px 20px;background:linear-gradient(100deg,rgba(12,26,45,.88),rgba(7,14,26,.82));border-color:rgba(120,190,255,.15)}
+.provider::before{top:16px;height:40px;width:3px;background:var(--cyan)}
+.provider-local::before{background:var(--teal)}
+.provider-api::before{background:var(--amber)}
+.provider>div:first-child{display:grid;grid-template-columns:38px minmax(0,1fr);column-gap:12px;align-items:center;min-width:0;flex:1}
+.provider-glyph{grid-row:1/4;display:grid;place-items:center;width:36px;height:36px;border:1px solid rgba(83,221,255,.26);border-radius:5px;background:rgba(83,221,255,.075);color:var(--cyan);font:700 12px/1 var(--mono);box-shadow:inset 0 0 16px rgba(83,221,255,.06)}
+.provider-local .provider-glyph{border-color:rgba(62,240,194,.25);background:rgba(62,240,194,.07);color:var(--teal)}
+.provider-api .provider-glyph{border-color:rgba(255,196,93,.26);background:rgba(255,196,93,.07);color:var(--amber)}
+.provider strong{display:block;font-size:15px;font-weight:650;line-height:1.35}
+.meta{max-width:620px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim);font:10.5px/1.5 var(--mono);letter-spacing:.015em}
+.provider .ptitle{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.state{max-width:720px;margin-top:5px;color:var(--muted);font-size:12px;line-height:1.55}
+.state b{color:var(--teal);font-weight:620}
+.state .wait{color:var(--amber)}
+.actions{display:flex;align-items:center;justify-content:flex-end;gap:6px;flex:none;flex-wrap:wrap}
+.provider .btn{min-height:31px;padding:6px 9px;border-color:rgba(120,190,255,.14);background:rgba(7,15,27,.56);color:#9fb6cc;font-size:11.5px}
+.provider .btn:hover{color:var(--ink)}
+.status{display:inline-flex;align-items:center;gap:6px;margin-right:4px;padding:4px 7px;border:1px solid rgba(120,190,255,.13);border-radius:4px;color:var(--muted);font:10px/1 var(--mono);white-space:nowrap;flex:none}
+.dot{display:inline-block;width:6px;height:6px;border-radius:50%;flex:none}
+.dot.on{background:var(--teal);box-shadow:0 0 0 3px rgba(62,240,194,.08),0 0 9px rgba(62,240,194,.9)}
+.dot.off{background:#5d6a78;box-shadow:0 0 0 3px rgba(120,130,140,.08)}
+.stag{font-size:10px;font-weight:650;padding:2px 6px;border-radius:3px;letter-spacing:.04em;white-space:nowrap}
+.stag.on{border:1px solid rgba(62,240,194,.23);background:rgba(62,240,194,.075);color:var(--teal)}
+.stag.off{border:1px solid rgba(120,140,160,.16);background:rgba(120,140,160,.06);color:#8294a6}
+.stag.def{border:1px solid rgba(83,221,255,.22);background:rgba(83,221,255,.075);color:var(--cyan)}
+.empty{padding:28px;border:1px dashed rgba(120,190,255,.2);border-radius:6px;background:rgba(8,18,31,.48);color:var(--muted);text-align:center;font-size:12.5px}
+.target-panel{margin-top:24px}
+.target-panel::before{background:var(--violet);box-shadow:0 0 15px rgba(167,149,255,.6)}
+.form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.field{display:flex;flex-direction:column;gap:7px;min-width:0}
+.field.full{grid-column:1/-1}
+.field label{color:#b5c9dd;font-size:12px;font-weight:620;letter-spacing:.025em}
+.field input,.field select{width:100%;min-height:39px;border:1px solid rgba(120,190,255,.17);border-radius:5px;padding:9px 11px;background:rgba(4,10,19,.82);color:var(--ink);font:inherit;font-size:13px;outline:0;transition:border-color .18s,box-shadow .18s,background .18s}
+.field input::placeholder{color:#4e6378}
+.field input:focus,.field select:focus{border-color:rgba(83,221,255,.6);background:rgba(5,13,24,.95);box-shadow:0 0 0 3px rgba(83,221,255,.08),0 0 20px rgba(83,221,255,.07)}
+.field select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--cyan) 50%),linear-gradient(135deg,var(--cyan) 50%,transparent 50%);background-position:calc(100% - 17px) 16px,calc(100% - 12px) 16px;background-size:5px 5px;background-repeat:no-repeat}
+.switch-row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:11px 12px;border:1px solid rgba(120,190,255,.14);border-radius:5px;background:rgba(8,18,31,.55)}
+.switch-row small{display:block;margin-top:2px;color:var(--muted);font-size:11.5px;line-height:1.5}
+.switch{position:relative;width:42px;height:23px;flex:0 0 auto}
+.switch input{opacity:0;width:0;height:0}
+.slider{position:absolute;inset:0;border:1px solid rgba(120,190,255,.2);border-radius:99px;background:#162131;cursor:pointer;transition:.18s}
+.slider:before{content:"";position:absolute;left:3px;top:3px;width:15px;height:15px;border-radius:50%;background:#718399;transition:.18s;box-shadow:0 1px 3px #0006}
+.switch input:checked+.slider{border-color:rgba(62,240,194,.52);background:rgba(62,240,194,.17);box-shadow:0 0 16px rgba(62,240,194,.12)}
+.switch input:checked+.slider:before{transform:translateX(19px);background:var(--teal);box-shadow:0 0 10px rgba(62,240,194,.8)}
+.switch input:disabled+.slider{opacity:.35;cursor:not-allowed}
+.notice{margin:14px 0;padding:11px 13px;border:1px solid rgba(83,221,255,.17);border-left:3px solid var(--cyan);border-radius:4px;background:rgba(25,88,118,.13);color:#a8c9df;font-size:12.5px;line-height:1.65}
+.notice.warn{border-color:rgba(255,196,93,.18);border-left-color:var(--amber);background:rgba(118,78,12,.16);color:#dfc58f}
+.check-result{margin-top:14px;color:var(--muted);font:11.5px/1.85 var(--mono);overflow-wrap:anywhere}
+.toast{position:fixed;right:22px;bottom:22px;z-index:20;max-width:min(430px,calc(100vw - 44px));padding:12px 15px;border:1px solid rgba(83,221,255,.38);border-radius:5px;background:rgba(6,16,28,.96);color:var(--ink);font-size:12.5px;opacity:0;transform:translateY(12px);transition:.22s;pointer-events:none;box-shadow:0 18px 50px rgba(0,0,0,.5),0 0 28px rgba(83,221,255,.1)}
+.toast.show{opacity:1;transform:none}
+.login-state{margin-top:10px;color:var(--muted);font:11.5px/1.6 var(--mono)}
+.login-state.ok{color:var(--teal)}
+h2{font-size:18px;line-height:1.3;margin:0 0 10px;letter-spacing:.01em}
+code{color:var(--cyan-bright);font-family:var(--mono);font-size:12px;word-break:break-all}
+@keyframes enter{from{opacity:0}to{opacity:1}}
+@keyframes rise{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+@media(max-width:1120px){.app{padding:24px 22px 64px}.layout{grid-template-columns:206px minmax(0,1fr);gap:20px}.provider{align-items:flex-start}.provider>div:first-child{flex-basis:100%}.actions{justify-content:flex-start}.head{gap:16px}}
+@media(max-width:900px){.layout{display:block}.nav{position:static;display:flex;gap:4px;padding:9px;margin-bottom:20px;overflow:auto;scrollbar-width:none}.nav::-webkit-scrollbar{display:none}.nav::before,.nav::after,.nav-foot{display:none}.nav button{width:auto;min-width:max-content;margin:0;padding:9px 11px}.nav button.active{box-shadow:inset 0 -2px var(--cyan)}.grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:760px){.app{padding:20px 15px 52px}.mast{align-items:flex-start;flex-direction:column;gap:15px}.brand{font-size:27px}.mode-shell{width:100%;justify-content:flex-start}.mode-meta{margin-left:auto}.head{align-items:flex-start;flex-direction:column;gap:14px;padding-left:13px}.head h1{font-size:24px}.section-head{align-items:flex-start;flex-direction:column;gap:5px}.section-head .hint{max-width:none;text-align:left}.grid,.form{grid-template-columns:1fr}.field.full{grid-column:auto}.provider{align-items:flex-start;flex-direction:column}.provider>div:first-child{width:100%}.actions{width:100%;justify-content:flex-start}.toolbar{width:100%}.head .toolbar .btn{flex:1}.stat-card{min-height:106px}.stat{margin:9px 0 8px;font-size:36px}}
+@media(max-width:460px){.app{padding:17px 11px 42px}.brand-wrap{gap:11px}.brand-mark{width:36px;height:36px}.brand{font-size:23px}.brand small{font-size:9px;letter-spacing:.11em}.mode-shell{padding:8px 10px}.mode-meta{display:none}.head{padding-right:0}.toolbar{display:grid;grid-template-columns:1fr;width:100%}.head .toolbar .btn{width:100%}.provider{padding:14px 12px 14px 16px}.provider>div:first-child{grid-template-columns:34px minmax(0,1fr);column-gap:10px}.provider-glyph{width:32px;height:32px}.actions .btn{flex:1;min-width:80px}.status{width:100%;justify-content:center}.card{padding:16px 14px}.section-head .hint{font-size:11.5px}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.01ms!important}}
+/* Dual-theme layout, motion, and spacing */
+html{background:var(--bg);transition:background-color .42s ease}
+body{transition:background-color .42s ease,color .32s ease}
+body::before,body::after{transition:opacity .42s ease,background .42s ease}
+body::after{background-size:220% 100%;animation:topSignal 7s linear infinite}
+.app{max-width:1500px;padding:38px 38px 100px}
+.mast{gap:28px;margin-bottom:32px;padding-bottom:26px}
+.mast-actions{display:flex;align-items:center;gap:14px;margin-left:auto}
+.theme-switch{display:inline-flex;align-items:center;gap:3px;padding:4px;border:1px solid var(--line);border-radius:7px;background:rgba(6,15,27,.76);box-shadow:inset 0 1px rgba(255,255,255,.025)}
+.theme-btn{position:relative;display:grid;place-items:center;width:36px;height:34px;border:1px solid transparent;border-radius:4px;background:transparent;color:var(--muted);cursor:pointer;transition:color .22s,background .22s,border-color .22s,transform .22s,box-shadow .22s}
+.theme-btn svg{width:16px;height:16px;stroke-width:1.75;transition:transform .32s cubic-bezier(.2,.8,.2,1),filter .22s}
+.theme-btn:hover{color:var(--ink);background:rgba(83,221,255,.07);transform:translateY(-1px)}
+.theme-btn:hover svg{transform:rotate(-8deg) scale(1.06)}
+.theme-btn.active{color:var(--cyan-bright);border-color:rgba(83,221,255,.22);background:rgba(83,221,255,.11);box-shadow:inset 0 0 14px rgba(83,221,255,.08)}
+.theme-btn.active svg{filter:drop-shadow(0 0 7px rgba(83,221,255,.5))}
+.layout{grid-template-columns:244px minmax(0,1fr);gap:36px}
+.nav{padding:18px 12px 14px;border-radius:10px}
+.nav::before{margin:0 11px 16px;padding-bottom:13px}
+.nav button{gap:12px;margin:4px 0;padding:12px 13px}
+.nav button.active svg{animation:navIconPulse 2.8s ease-in-out infinite}
+.nav-foot{margin:17px 6px 2px;padding:15px 10px 4px}
+.head{gap:28px;margin-bottom:32px;padding:8px 0 26px 18px}
+.head h1{font-size:29px}
+.head .toolbar{gap:10px}
+.hint{line-height:1.75}
+.grid{gap:20px}
+.card{padding:24px;border-radius:10px;animation-name:cardIn;animation-duration:.58s;animation-timing-function:cubic-bezier(.16,.8,.24,1);animation-fill-mode:backwards;transition:translate .24s ease,border-color .24s ease,box-shadow .24s ease,background .36s ease}
+.stat-card{min-height:142px;padding:20px 21px 18px}
+.stat-top{padding-right:50px}
+.stat{margin:16px 0 14px}
+.stat-track i{background-size:180% 100%;animation:trackFlow 3.8s ease-in-out infinite}
+.stack{gap:18px}
+.section-block{margin-top:44px}
+.section-head{gap:28px;margin-bottom:18px}
+.provider{gap:24px;padding:20px 20px 20px 24px;transition:translate .24s ease,border-color .24s ease,box-shadow .24s ease,background .36s ease}
+.provider:hover,.stat-card:hover{translate:0 -3px;border-color:rgba(83,221,255,.34);box-shadow:0 18px 46px rgba(0,0,0,.32),0 0 24px rgba(83,221,255,.055)}
+.provider>div:first-child{column-gap:14px}
+.actions{gap:8px}
+.form{gap:24px}
+.field{gap:8px}
+.switch-row{gap:16px;padding:14px 15px}
+.notice{margin:18px 0;padding:13px 15px}
+.check-result{margin-top:18px}
+.card>.form+.toolbar,.card>.notice+.toolbar,.card>.form+.notice,.card>.check-result+.toolbar{margin-top:22px}
+.form-slot:not(:empty){margin-top:24px}
+.router-card{margin-top:24px}
+.target-panel{margin-top:32px}
+.view.active{animation:viewReveal .5s cubic-bezier(.16,.8,.24,1) both}
+@keyframes cardIn{from{opacity:0;transform:translateY(16px) scale(.992)}to{opacity:1;transform:none}}
+@keyframes viewReveal{from{opacity:0;transform:translateY(12px);filter:blur(2px)}to{opacity:1;transform:none;filter:none}}
+@keyframes navIconPulse{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-1px) scale(1.08)}}
+@keyframes trackFlow{0%,100%{background-position:0 0;opacity:.78}50%{background-position:100% 0;opacity:1}}
+@keyframes topSignal{0%{background-position:100% 0}100%{background-position:-120% 0}}
+::view-transition-old(root),::view-transition-new(root){animation-duration:.42s;animation-timing-function:cubic-bezier(.2,.8,.2,1)}
+::view-transition-group(root){animation-duration:.42s}
+
+/* GitHub-inspired light theme */
+html[data-theme="light"]{
+  color-scheme:light;
+  --bg:#f6f8fa;--bg-soft:#ffffff;--surface:#ffffff;--surface-2:#f6f8fa;
+  --ink:#1f2328;--muted:#656d76;--dim:#8c959f;--line:#d0d7de;--line-strong:#afb8c1;
+  --cyan:#0969da;--cyan-bright:#0550ae;--teal:#1a7f37;--amber:#9a6700;--red:#cf222e;--violet:#8250df;
+  --shadow:0 1px 3px rgba(31,35,40,.06),0 8px 24px rgba(140,149,159,.12)
+}
+html[data-theme="light"] body{
+  color:var(--ink);background-color:#f6f8fa;
+  background-image:radial-gradient(circle at 1px 1px,rgba(140,149,159,.25) 1px,transparent 1.2px),linear-gradient(180deg,#fff 0,#f6f8fa 360px);
+  background-size:24px 24px,100% 100%;
+}
+html[data-theme="light"] body::before{opacity:0}
+html[data-theme="light"] body::after{display:none}
+html[data-theme="light"] .brand-mark{clip-path:none;border-radius:9px;border-color:#afb8c1;background:linear-gradient(145deg,#f6f8fa,#fff);box-shadow:0 1px 3px rgba(31,35,40,.1),inset 0 1px #fff}
+html[data-theme="light"] .brand-mark::before{width:13px;height:13px;border:2px solid #0969da;border-radius:3px;transform:none;box-shadow:none}
+html[data-theme="light"] .brand-mark::after{width:5px;height:5px;background:#1f883d;box-shadow:none}
+html[data-theme="light"] .brand{color:#1f2328;font-weight:700;letter-spacing:-.025em;text-transform:none;text-shadow:none}
+html[data-theme="light"] .brand small{color:#656d76;letter-spacing:.08em;text-transform:none}
+html[data-theme="light"] .mast{border-bottom-color:#d8dee4}
+html[data-theme="light"] .theme-switch{border-color:#d0d7de;background:#fff;box-shadow:0 1px 2px rgba(31,35,40,.04)}
+html[data-theme="light"] .theme-btn{color:#656d76}
+html[data-theme="light"] .theme-btn:hover{color:#24292f;background:#f6f8fa}
+html[data-theme="light"] .theme-btn.active{color:#0969da;border-color:#b6d7ff;background:#ddf4ff;box-shadow:none}
+html[data-theme="light"] .theme-btn.active svg{filter:none}
+html[data-theme="light"] .mode-shell{border-color:#d0d7de;background:#fff;box-shadow:0 1px 3px rgba(31,35,40,.06)}
+html[data-theme="light"] .mode-dot{background:#1a7f37;box-shadow:0 0 0 3px rgba(26,127,55,.1);animation:none}
+html[data-theme="light"] .mode-copy small{color:#8c959f}
+html[data-theme="light"] .mode{background:transparent;color:#1f2328}
+html[data-theme="light"] .mode-meta{border-left-color:#d8dee4;color:#0969da}
+html[data-theme="light"] .nav{border-color:#d0d7de;border-radius:8px;background:#fff;box-shadow:0 1px 3px rgba(31,35,40,.06),0 8px 24px rgba(140,149,159,.08)}
+html[data-theme="light"] .nav::before{content:"NAVIGATION";border-bottom-color:#d8dee4;color:#8c959f;letter-spacing:.12em}
+html[data-theme="light"] .nav::after{display:none}
+html[data-theme="light"] .nav button{color:#57606a}
+html[data-theme="light"] .nav button:hover{color:#24292f;background:#f6f8fa;border-color:#d0d7de;transform:translateX(1px)}
+html[data-theme="light"] .nav button.active{color:#0969da;background:#ddf4ff;border-color:#b6d7ff;box-shadow:inset 2px 0 #0969da}
+html[data-theme="light"] .nav button.active svg{filter:none}
+html[data-theme="light"] .nav-foot{border-top-color:#d8dee4;color:#8c959f}
+html[data-theme="light"] .nav-foot::before{background:#1a7f37;box-shadow:none}
+html[data-theme="light"] .head{border-left-color:#0969da;border-bottom-color:#d8dee4}
+html[data-theme="light"] .head>div:first-child::before{content:"CONFIGURATION // READY";color:#656d76}
+html[data-theme="light"] .head h1{color:#1f2328}
+html[data-theme="light"] .hint{color:#656d76}
+html[data-theme="light"] .btn{border-color:#d0d7de;background:#f6f8fa;color:#24292f;box-shadow:0 1px 0 rgba(31,35,40,.04);transition:transform .18s,box-shadow .18s,border-color .18s,background .18s,color .18s}
+html[data-theme="light"] .btn:hover{border-color:#8c959f;background:#f3f4f6;color:#24292f;box-shadow:0 3px 8px rgba(31,35,40,.08)}
+html[data-theme="light"] .btn.primary{border-color:rgba(31,136,61,.9);background:#1f883d;color:#fff;box-shadow:0 1px 0 rgba(31,35,40,.1)}
+html[data-theme="light"] .btn.primary:hover{border-color:#1a7f37;background:#1a7f37;color:#fff;box-shadow:0 4px 12px rgba(26,127,55,.2)}
+html[data-theme="light"] .btn.danger{color:#cf222e;background:transparent}
+html[data-theme="light"] .btn.danger:hover{border-color:rgba(207,34,46,.3);background:#ffebe9;color:#a40e26;box-shadow:none}
+html[data-theme="light"] .card{border-color:#d0d7de;background:#fff;box-shadow:0 1px 3px rgba(31,35,40,.06),0 8px 24px rgba(140,149,159,.08)}
+html[data-theme="light"] .card::before,html[data-theme="light"] .provider::before,html[data-theme="light"] .stat-card::after,html[data-theme="light"] .target-panel::before{display:none}
+html[data-theme="light"] .stat-card{background:linear-gradient(145deg,#fff,#f6f8fa)}
+html[data-theme="light"] .stat-card:nth-child(1){--stat:#0969da}
+html[data-theme="light"] .stat-card:nth-child(2){--stat:#1a7f37}
+html[data-theme="light"] .stat-card:nth-child(3){--stat:#9a6700}
+html[data-theme="light"] .stat{text-shadow:none}
+html[data-theme="light"] .stat-track{background:#eaeef2}
+html[data-theme="light"] .stat-track i{box-shadow:none}
+html[data-theme="light"] .label{color:#656d76}
+html[data-theme="light"] .section-code{color:#656d76}
+html[data-theme="light"] .section-head h2,html[data-theme="light"] h2{color:#1f2328}
+html[data-theme="light"] .provider{border-color:#d0d7de;background:#fff}
+html[data-theme="light"] .provider:hover,html[data-theme="light"] .stat-card:hover{border-color:#afb8c1;box-shadow:0 8px 24px rgba(140,149,159,.16);translate:0 -2px}
+html[data-theme="light"] .provider-glyph{border-color:#b6d7ff;background:#ddf4ff;color:#0969da;box-shadow:none}
+html[data-theme="light"] .provider-local .provider-glyph{border-color:#aceebb;background:#dafbe1;color:#1a7f37}
+html[data-theme="light"] .provider-api .provider-glyph{border-color:#eac54f;background:#fff8c5;color:#9a6700}
+html[data-theme="light"] .provider strong{color:#1f2328}
+html[data-theme="light"] .meta{color:#8c959f}
+html[data-theme="light"] .state{color:#656d76}
+html[data-theme="light"] .state b{color:#1a7f37}
+html[data-theme="light"] .state .wait{color:#9a6700}
+html[data-theme="light"] .provider .btn{border-color:#d0d7de;background:#f6f8fa;color:#24292f}
+html[data-theme="light"] .provider .btn:hover{color:#0969da}
+html[data-theme="light"] .status{border-color:#d0d7de;background:#fff;color:#656d76}
+html[data-theme="light"] .dot.on{background:#1a7f37;box-shadow:0 0 0 3px rgba(26,127,55,.1)}
+html[data-theme="light"] .dot.off{background:#afb8c1;box-shadow:0 0 0 3px rgba(175,184,193,.12)}
+html[data-theme="light"] .stag.on{border-color:#aceebb;background:#dafbe1;color:#1a7f37}
+html[data-theme="light"] .stag.off{border-color:#d0d7de;background:#f6f8fa;color:#656d76}
+html[data-theme="light"] .stag.def{border-color:#b6d7ff;background:#ddf4ff;color:#0969da}
+html[data-theme="light"] .empty{border-color:#d0d7de;background:#f6f8fa;color:#656d76}
+html[data-theme="light"] .field label{color:#24292f}
+html[data-theme="light"] .field input,html[data-theme="light"] .field select{border-color:#d0d7de;background:#fff;color:#1f2328}
+html[data-theme="light"] .field input::placeholder{color:#8c959f}
+html[data-theme="light"] .field input:focus,html[data-theme="light"] .field select:focus{border-color:#0969da;background:#fff;box-shadow:0 0 0 3px rgba(9,105,218,.15)}
+html[data-theme="light"] .field select{background-image:linear-gradient(45deg,transparent 50%,#656d76 50%),linear-gradient(135deg,#656d76 50%,transparent 50%)}
+html[data-theme="light"] .switch-row{border-color:#d0d7de;background:#f6f8fa}
+html[data-theme="light"] .switch-row small{color:#656d76}
+html[data-theme="light"] .slider{border-color:#d0d7de;background:#eaeef2}
+html[data-theme="light"] .slider:before{background:#fff;box-shadow:0 1px 2px rgba(31,35,40,.18)}
+html[data-theme="light"] .switch input:checked+.slider{border-color:#1f883d;background:#1f883d;box-shadow:none}
+html[data-theme="light"] .switch input:checked+.slider:before{background:#fff;box-shadow:0 1px 2px rgba(31,35,40,.2)}
+html[data-theme="light"] .notice{border-color:#b6d7ff;border-left-color:#0969da;background:#ddf4ff;color:#24292f}
+html[data-theme="light"] .notice.warn{border-color:#eac54f;border-left-color:#9a6700;background:#fff8c5;color:#3d2c00}
+html[data-theme="light"] .check-result,html[data-theme="light"] .login-state{color:#656d76}
+html[data-theme="light"] .login-state.ok{color:#1a7f37}
+html[data-theme="light"] .toast{border-color:#424a53;background:#24292f;color:#fff;box-shadow:0 12px 32px rgba(31,35,40,.24)}
+html[data-theme="light"] code{color:#0550ae}
+@media(max-width:1120px){
+  .app{padding:30px 25px 78px}.layout{grid-template-columns:218px minmax(0,1fr);gap:24px}.head{gap:18px}.head h1{font-size:26px}.provider{padding:18px}
+}
+@media(max-width:900px){
+  .nav{padding:10px}.nav button{padding:10px 12px}.mast-actions{gap:10px}.head{padding-left:15px}
+}
+@media(max-width:760px){
+  .app{padding:22px 16px 58px}.mast{gap:18px;margin-bottom:28px;padding-bottom:21px}.mast-actions{width:100%;align-items:stretch}.mode-shell{width:auto;flex:1}.head{gap:16px;margin-bottom:26px;padding-bottom:20px}.head h1{font-size:25px}.grid,.form{gap:18px}.stack{gap:16px}.section-block{margin-top:36px}.provider{padding:18px 17px 18px 20px}.card{padding:20px 18px}.switch-row{padding:13px 14px}.actions{gap:7px}.card>.form+.toolbar,.card>.notice+.toolbar,.card>.form+.notice,.card>.check-result+.toolbar{margin-top:20px}.form-slot:not(:empty),.router-card{margin-top:20px}.target-panel{margin-top:26px}
+}
+@media(max-width:460px){
+  .app{padding:18px 12px 46px}.mast-actions{gap:8px}.theme-switch{padding:3px}.theme-btn{width:34px;height:32px}.mode-shell{padding:7px 9px}.head h1{font-size:23px}.card{padding:17px 15px}.provider{padding:16px 13px 16px 17px}.section-block{margin-top:30px}.grid,.form{gap:16px}.stack{gap:14px}
+}
+</style></head><body><main class="app"><header class="mast"><div class="brand-wrap"><span class="brand-mark" aria-hidden="true"></span><div class="brand">AgentRelay<small>Local Provider Nexus · 本机配置中心</small></div></div><div class="mast-actions"><div class="theme-switch" role="group" aria-label="界面主题"><button class="theme-btn active" type="button" data-theme-choice="light" title="浅色 GitHub 主题" aria-label="浅色 GitHub 主题" aria-pressed="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.42 1.42"/></svg></button><button class="theme-btn" type="button" data-theme-choice="dark" title="深色科幻主题" aria-label="深色科幻主题" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></button></div><div class="mode-shell"><span class="mode-dot" aria-hidden="true"></span><span class="mode-copy"><small>RUNTIME STATUS</small><span class="mode" id="mode">离线基础模式</span></span><span class="mode-meta">LOCAL</span></div></div></header><div class="layout"><nav class="nav" aria-label="配置中心导航"><button class="active" data-tab="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg><span>总览</span></button><button data-tab="commander"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg><span>Commander</span></button><button data-tab="web"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg><span>线上模型</span></button><button data-tab="local"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01"/></svg><span>本地模型</span></button><button data-tab="api"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m8 9-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"/></svg><span>API 模型</span></button><button data-tab="security"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg><span>安全与配置</span></button><div class="nav-foot">ENCRYPTED LOCAL LINK<br>127.0.0.1 · SESSION ACTIVE</div></nav><section>
+<div id="overview" class="view active"><div class="head"><div><h1>当前状态</h1><p class="hint">环境检查确认安装链路；Provider 检查确认模型配置和登录状态。</p></div><div class="toolbar"><button class="btn" onclick="checkEnvironment()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></svg><span>检查环境</span></button><button class="btn" onclick="initializeFiles()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg><span>初始化文件</span></button><button class="btn primary" onclick="closeApp()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg><span>完成并关闭</span></button></div></div><div class="grid" id="stats"></div><section class="section-block"><div class="section-head"><div><span class="section-code">PROVIDER MATRIX // LIVE</span><h2>Provider 管理</h2></div><p class="hint">网页模型能否实际自动对话，取决于是否已接入该网站的操作规则。</p></div><div class="stack" id="overview-list"></div><div id="environment" class="check-result"></div></section><div class="card target-panel" id="targets-card"></div></div>
+<div id="commander" class="view"><div class="head"><div><h1>Commander</h1><p class="hint">主 Agent 按任务实际需要启动 1 到 5 个隔离子 Agent。</p></div><button class="btn primary" onclick="saveCommander()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg><span>保存</span></button></div><div class="card"><div class="form"><div class="field full"><div class="switch-row"><div><label>启用审查官模式</label><small id="commander-note">至少需要一个线上或本地模型。</small></div><label class="switch"><input id="commander-enabled" type="checkbox"><span class="slider"></span></label></div></div><div class="field full"><label>Codex 终端路径</label><input id="terminal-path" placeholder="codex 或 /路径/codex"></div><div class="field"><label>最多可启动的 Agent</label><select id="max-agents"><option value="1">1 个</option><option value="2">2 个</option><option value="3">3 个</option><option value="4">4 个</option><option value="5">5 个</option></select><p class="hint">这是上限；实际数量由主 Agent 按业务自动决定。</p></div></div><div class="notice">配置任意线上网页模型或本地模型后，Commander 会自动启用。API 模型只允许主 Agent 使用，不会交给子 Agent。</div></div></div>
+<div id="web" class="view"><div class="head"><div><h1>线上网页模型</h1><p class="hint">登录状态加密保存在本机。DeepSeek 已可自动对话；其他网页先完成配置和登录，接入操作规则后才可自动对话。</p></div><button class="btn primary" onclick="showForm('web')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新增线上模型</span></button></div><div class="stack" id="web-list"></div><div id="web-form" class="form-slot"></div></div>
+<div id="local" class="view"><div class="head"><div><h1>本地模型</h1><p class="hint">支持 Ollama、LM Studio、vLLM、llama.cpp 的 OpenAI 兼容服务。</p></div><div class="toolbar"><button class="btn" onclick="scanLocal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg><span>扫描本机服务</span></button><button class="btn primary" onclick="showForm('local')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新增本地模型</span></button></div></div><div id="local-scan" class="notice" style="display:none"></div><div class="stack" id="local-list"></div><div id="local-form" class="form-slot"></div></div>
+<div id="api" class="view"><div class="head"><div><h1>API 模型</h1><p class="hint">密钥不会在页面回显，只加密保存在本机。</p></div><button class="btn primary" onclick="showForm('api')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新增 API 模型</span></button></div><div class="stack" id="api-list"></div><div id="api-form" class="form-slot"></div><div class="card router-card"><h2>协议路由</h2><p class="hint">消息格式不是 Chat 的 API 模型由内置路由做协议转换（Responses/Anthropic ↔ Chat）。默认端口 15731，与本机 cc-switch 的 15721 错开；被占用时可改。</p><div class="form"><div class="field"><label>路由端口</label><input id="router-port" type="number" min="1024" max="65535" value="15731"></div></div><div class="toolbar"><button class="btn primary" onclick="saveRouter()">保存端口</button></div></div></div>
 <div id="security" class="view"><div class="head"><div><h1>安全与配置</h1><p class="hint">Cookie、登录状态和 API Key 均不显示在页面中。</p></div></div><div class="card"><p>统一配置文件：<code id="config-path"></code></p><p>登录状态和配置由本机密钥加密，页面只监听 127.0.0.1。</p><button class="btn primary" onclick="closeApp()">保存并关闭</button></div></div>
 </section></div></main><div class="toast" id="toast"></div><script>
 const state=__CONFIG__;const $=id=>document.getElementById(id);let loginPoll=null;
+const THEME_KEY='agentrelay-theme';let themeManuallySelected=false;
+const prefersReducedMotion=()=>window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+function syncThemeControls(theme){document.querySelectorAll('[data-theme-choice]').forEach(button=>{const active=button.dataset.themeChoice===theme;button.classList.toggle('active',active);button.setAttribute('aria-pressed',String(active))})}
+function applyTheme(theme,animate=false,persistTheme=true){const next=theme==='light'?'light':'dark';const current=document.documentElement.dataset.theme||'light';if(current===next){syncThemeControls(next);return}const commit=()=>{document.documentElement.dataset.theme=next;syncThemeControls(next);if(persistTheme){themeManuallySelected=true;try{localStorage.setItem(THEME_KEY,next)}catch(_){}}};if(animate&&document.startViewTransition&&!prefersReducedMotion())document.startViewTransition(commit);else commit()}
+function initTheme(){try{themeManuallySelected=!!localStorage.getItem(THEME_KEY)}catch(_){}document.querySelectorAll('[data-theme-choice]').forEach(button=>button.onclick=()=>applyTheme(button.dataset.themeChoice,true,true));const saved=document.documentElement.dataset.theme||'light';syncThemeControls(saved);const media=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)');if(media){const syncSystemTheme=event=>{if(!themeManuallySelected)applyTheme(event.matches?'dark':'light',true,false)};if(media.addEventListener)media.addEventListener('change',syncSystemTheme);else if(media.addListener)media.addListener(syncSystemTheme)}}
+function animateView(view){if(!view||prefersReducedMotion()||typeof view.querySelectorAll!=='function')return;const items=[...view.querySelectorAll('.head,.grid > *,.section-head,.stack > *,.notice,.empty')];items.forEach((element,index)=>{if(typeof element.animate!=='function')return;element.animate([{opacity:.18,transform:'translateY(11px)'},{opacity:1,transform:'translateY(0)'}],{duration:440,delay:Math.min(index*34,238),easing:'cubic-bezier(.16,.8,.24,1)',fill:'backwards'})})}
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function toast(message){$('toast').textContent=message;$('toast').classList.add('show');setTimeout(()=>$('toast').classList.remove('show'),3300)}
 async function api(path,options={}){const response=await fetch(path,{headers:{'Content-Type':'application/json'},...options});const data=await response.json();if(!response.ok)throw Error(data.error||'请求失败');return data}
@@ -33,12 +352,12 @@ function autoTitles(alias){const root='AgentRelay-'+titleStem(alias);return {fla
 function providers(kind){return state[kind+'_providers']||[]}
 function available(){return providers('web').some(p=>p.enabled!==false)||providers('local').some(p=>p.enabled!==false)}
 function providerStatus(kind,p){const fmtMap={chat:'Chat',responses:'Responses',anthropic:'Anthropic Messages'};if(kind==='web'){const modes=' · 模式：'+modeSummary(p);if(p.adapter==='deepseek')return '<b>DeepSeek 已接通</b>：专属适配器，可自动发送问题并读取回复'+modes;if(p.adapter==='generic')return '<b>通用兜底适配器</b>：会尝试自动对话；个别网站不稳定时可再补专属适配器'+modes;return '<span class="wait">已保存网页登录配置</span>：目前还不能自动操作这个网站的对话页面'+modes}if(kind==='local')return '<b>本地单并发</b>：只服务一个 Agent，其他请求排队等待';return `<b>仅主 Agent</b> · 消息格式 ${fmtMap[p.format]||'Chat'}`}
-function card(kind,p,actions=true){const checkLabel=kind==='web'?'就绪检查':'测试';const dot=p.enabled!==false?'<span class="dot on"></span>':'<span class="dot off"></span>';const status=p.enabled!==false?'启用':'已停用';return `<article class="card provider"><div><div class="ptitle"><strong>${esc(p.name||p.id)}</strong>${p.id===state.default_provider?'<span class="stag def">默认</span>':''}</div><div class="meta">${esc(p.id)} · ${esc(p.base_url||p.endpoint||'')}</div><div class="state">${providerStatus(kind,p)}</div></div>${actions?`<div class="actions"><span class="status">${dot}${status}</span><button class="btn" onclick="testProvider('${kind}','${esc(p.id)}')">${checkLabel}</button><button class="btn" onclick="showForm('${kind}','${esc(p.id)}')">编辑</button><button class="btn" onclick="toggleProvider('${kind}','${esc(p.id)}')">${p.enabled!==false?'停用':'启用'}</button>${kind==='web'?`<button class="btn" onclick="setDefault('${esc(p.id)}')">设为默认</button>`:''}<button class="btn danger" onclick="deleteProvider('${kind}','${esc(p.id)}')">删除</button></div>`:`<div class="actions"><span class="status">${dot}${status}</span></div>`}</article>`}
-function render(){const c=state.commander||{};$('mode').textContent=c.enabled?'Commander 已启用':'离线基础模式';$('config-path').textContent=state.config_path||'本机加密目录';const ok=available();$('commander-enabled').checked=!!c.enabled;$('commander-enabled').disabled=!ok;$('commander-note').textContent=ok?'已检测到线上或本地模型，默认启用；可手动关闭。':'尚未配置线上或本地模型，暂时无法开启。';$('terminal-path').value=c.terminal_path||c.terminal||'codex';$('max-agents').value=c.max_agents||5;if($('router-port'))$('router-port').value=(state.api_router||{}).port||15731;const types=[['线上模型',providers('web').length],['本地模型',providers('local').length],['API 模型',providers('api').length]];$('stats').innerHTML=types.map(([name,count])=>`<div class="card"><div class="label">${name}</div><div class="stat">${count}</div></div>`).join('');const list=[['web',providers('web')],['local',providers('local')],['api',providers('api')]].flatMap(([kind,items])=>items.map(p=>card(kind,p,false)));$('overview-list').innerHTML=list.join('')||'<div class="empty">还没有 Provider，离线基础能力仍可使用。</div>';['web','local','api'].forEach(kind=>$(kind+'-list').innerHTML=providers(kind).map(p=>card(kind,p)).join('')||'<div class="empty">暂无配置。</div>');renderTargets();stagger()}
-function stagger(){document.querySelectorAll('.stack').forEach(stack=>{[...stack.children].forEach((el,i)=>{if(el.classList&&el.classList.contains('card'))el.style.animationDelay=Math.min(i*40,360)+'ms'})})}
-function renderTargets(){const card=$('targets-card');if(!card)return;const saved=state.install_targets||['codex'];const rows=Object.values(state.agents||{}).map(a=>{const checked=saved.includes(a.id)?'checked':'';const cli=a.detected?'<span class="stag on">本机已装</span>':'<span class="stag off">本机未装</span>';const relay=a.relay_installed?'<span class="stag on">已接入 AgentRelay</span>':'<span class="stag off">未接入</span>';return `<div class="switch-row"><div><label>${esc(a.label)}</label><small>${esc(a.level_note)}</small><div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">${cli}${relay}</div></div><label class="switch"><input type="checkbox" class="target-box" value="${a.id}" ${checked}><span class="slider"></span></label></div>`}).join('');const unsupported=(state.unsupported_agents||[]).map(a=>`<div class="notice warn">${esc(a.label)}：${esc(a.reason)}</div>`).join('');card.innerHTML=`<strong>安装目标 Agent</strong><p class="hint">开关 = 是否把 AgentRelay 装进该 Agent；点击“应用并验证”后立即注册 Hook 并逐项验证。<br>“本机已装”指检测到你电脑上装有该 Agent 的命令行工具；“已接入 AgentRelay”指 Skill 和 Hook 已装进它——两者含义不同，别混淆。Codex 始终安装。AgentRelay 没有后台常驻服务：Hook 只在对应 Agent 会话运行时被拉起，本页面关闭不影响 Hook。</p><div class="stack" style="margin-top:12px">${rows}</div>${unsupported}<div class="toolbar" style="margin-top:12px"><button class="btn primary" onclick="applyTargets()">应用并验证</button></div><div id="target-results" class="check-result"></div>`}
+function card(kind,p,actions=true){const checkLabel=kind==='web'?'就绪检查':'测试';const dot=p.enabled!==false?'<span class="dot on"></span>':'<span class="dot off"></span>';const status=p.enabled!==false?'启用':'已停用';const glyph=kind==='web'?'W':kind==='local'?'L':'A';return `<article class="card provider provider-${kind}"><div><span class="provider-glyph" aria-hidden="true">${glyph}</span><div class="ptitle"><strong>${esc(p.name||p.id)}</strong>${p.id===state.default_provider?'<span class="stag def">默认</span>':''}</div><div class="meta">${esc(p.id)} · ${esc(p.base_url||p.endpoint||'')}</div><div class="state">${providerStatus(kind,p)}</div></div>${actions?`<div class="actions"><span class="status">${dot}${status}</span><button class="btn" onclick="testProvider('${kind}','${esc(p.id)}')">${checkLabel}</button><button class="btn" onclick="showForm('${kind}','${esc(p.id)}')">编辑</button><button class="btn" onclick="toggleProvider('${kind}','${esc(p.id)}')">${p.enabled!==false?'停用':'启用'}</button>${kind==='web'?`<button class="btn" onclick="setDefault('${esc(p.id)}')">设为默认</button>`:''}<button class="btn danger" onclick="deleteProvider('${kind}','${esc(p.id)}')">删除</button></div>`:`<div class="actions"><span class="status">${dot}${status}</span></div>`}</article>`}
+function render(){const c=state.commander||{};$('mode').textContent=c.enabled?'Commander 已启用':'离线基础模式';$('config-path').textContent=state.config_path||'本机加密目录';const ok=available();$('commander-enabled').checked=!!c.enabled;$('commander-enabled').disabled=!ok;$('commander-note').textContent=ok?'已检测到线上或本地模型，默认启用；可手动关闭。':'尚未配置线上或本地模型，暂时无法开启。';$('terminal-path').value=c.terminal_path||c.terminal||'codex';$('max-agents').value=c.max_agents||5;if($('router-port'))$('router-port').value=(state.api_router||{}).port||15731;const types=[['线上模型','WEB NODES',providers('web').length],['本地模型','LOCAL NODES',providers('local').length],['API 模型','API LINKS',providers('api').length]];$('stats').innerHTML=types.map(([name,code,count],i)=>`<article class="card stat-card"><div class="stat-top"><span class="label">${name}</span><span class="stat-code">0${i+1} / ${code}</span></div><div class="stat">${String(count).padStart(2,'0')}</div><div class="stat-track"><i style="width:${count?Math.min(100,28+count*24):8}%"></i></div></article>`).join('');const list=[['web',providers('web')],['local',providers('local')],['api',providers('api')]].flatMap(([kind,items])=>items.map(p=>card(kind,p,false)));$('overview-list').innerHTML=list.join('')||'<div class="empty">还没有 Provider，离线基础能力仍可使用。</div>';['web','local','api'].forEach(kind=>$(kind+'-list').innerHTML=providers(kind).map(p=>card(kind,p)).join('')||'<div class="empty">暂无配置。</div>');renderTargets();stagger()}
+function stagger(){document.querySelectorAll('.stack').forEach(stack=>{[...stack.children].forEach((el,i)=>{if(el.classList&&el.classList.contains('card'))el.style.animationDelay=Math.min(i*55,440)+'ms'})})}
+function renderTargets(){const card=$('targets-card');if(!card)return;const saved=state.install_targets||['codex'];const rows=Object.values(state.agents||{}).map(a=>{const checked=saved.includes(a.id)?'checked':'';const cli=a.detected?'<span class="stag on">本机已装</span>':'<span class="stag off">本机未装</span>';const relay=a.relay_installed?'<span class="stag on">已接入 AgentRelay</span>':'<span class="stag off">未接入</span>';return `<div class="switch-row"><div><label>${esc(a.label)}</label><small>${esc(a.level_note)}</small><div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">${cli}${relay}</div></div><label class="switch"><input type="checkbox" class="target-box" value="${a.id}" ${checked}><span class="slider"></span></label></div>`}).join('');const unsupported=(state.unsupported_agents||[]).map(a=>`<div class="notice warn">${esc(a.label)}：${esc(a.reason)}</div>`).join('');card.innerHTML=`<div class="section-head"><div><span class="section-code">AGENT BRIDGE // INSTALL</span><h2>安装目标 Agent</h2></div></div><p class="hint">开关 = 是否把 AgentRelay 装进该 Agent；点击“应用并验证”后立即注册 Hook 并逐项验证。<br>“本机已装”指检测到你电脑上装有该 Agent 的命令行工具；“已接入 AgentRelay”指 Skill 和 Hook 已装进它——两者含义不同，别混淆。Codex 始终安装。AgentRelay 没有后台常驻服务：Hook 只在对应 Agent 会话运行时被拉起，本页面关闭不影响 Hook。</p><div class="stack" style="margin-top:12px">${rows}</div>${unsupported}<div class="toolbar" style="margin-top:12px"><button class="btn primary" onclick="applyTargets()">应用并验证</button></div><div id="target-results" class="check-result"></div>`}
 async function applyTargets(){const boxes=[...document.querySelectorAll('.target-box:checked')];const targets=boxes.map(x=>x.value);if(!targets.includes('codex'))targets.push('codex');const box=$('target-results');box.innerHTML='正在安装并验证，请稍候…（Hook 干跑需要几秒）';try{const data=await api('/api/targets',{method:'POST',body:JSON.stringify({targets})});Object.assign(state,data.config);const sections=Object.entries(data.results||{}).map(([id,checks])=>`<strong>${esc((state.agents[id]||{}).label||id)}</strong><br>`+checks.map(c=>`${c.ok?'✓':'!'} ${esc(c.name)}：${esc(c.detail)}${c.ok?'':'（'+esc(c.reason||'')+'）'}`).join('<br>')).join('<br><br>');const errors=Object.entries(data.errors||{});box.innerHTML=sections+(errors.length?'<br><br><strong>失败目标</strong><br>'+errors.map(([k,v])=>`! ${esc(k)}：${esc(v)}`).join('<br>'):'');toast(errors.length?'部分目标安装失败，请查看详情':'安装与验证完成')}catch(error){box.innerHTML='';toast(error.message)}}
-document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{document.querySelectorAll('[data-tab],.view').forEach(el=>el.classList.remove('active'));button.classList.add('active');$(button.dataset.tab).classList.add('active')});
+document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{document.querySelectorAll('[data-tab],.view').forEach(el=>el.classList.remove('active'));button.classList.add('active');const view=$(button.dataset.tab);view.classList.add('active');requestAnimationFrame(()=>animateView(view))});
 function switchRow(id,title,detail,checked,wrapId){return `<div class="switch-row"${wrapId?' id="'+wrapId+'"':''}><div><label>${title}</label><small>${detail}</small></div><label class="switch"><input id="${id}" type="checkbox" ${checked?'checked':''} onchange="updateModes()"><span class="slider"></span></label></div>`}
 function modeSummary(p){const c=p.conversation||{};const modes=Array.isArray(c.modes)&&c.modes.length?c.modes:['hybrid'];const names={flash:'极速',expert:'专家',hybrid:'混合'};const list=modes.map(m=>names[m]||m).join(' + ');const pics=(c.images&&Object.keys(c.images).some(k=>c.images[k]))?' · 可识图':'';return list+pics}
 function collectConversation(){const modes=[];['hybrid','flash','expert'].forEach(m=>{const box=$('f-'+m);if(box&&box.checked)modes.push(m)});if(!modes.length)modes.push('hybrid');const images={};modes.forEach(m=>{const box=$('f-img-'+m);images[m]=!!(box&&box.checked)});return {modes,images,create_if_missing:true,titles:{flash:$('f-flash-title').value.trim(),expert:$('f-expert-title').value.trim(),hybrid:$('f-hybrid-title').value.trim()}}}
@@ -54,6 +373,6 @@ async function saveRouter(){try{const data=await api('/api/settings',{method:'PO
 async function toggleProvider(kind,id){try{const data=await api('/api/providers/action',{method:'POST',body:JSON.stringify({kind,id,action:'toggle'})});Object.assign(state,data.config);render()}catch(error){toast(error.message)}}async function setDefault(id){try{const data=await api('/api/providers/action',{method:'POST',body:JSON.stringify({kind:'web',id,action:'default'})});Object.assign(state,data.config);render();toast('默认网页模型已更新')}catch(error){toast(error.message)}}async function deleteProvider(kind,id){if(!confirm('确定删除这个 Provider？'))return;try{const data=await api('/api/providers?kind='+kind+'&id='+encodeURIComponent(id),{method:'DELETE'});Object.assign(state,data.config);render()}catch(error){toast(error.message)}}
 async function testProvider(kind,id){try{const data=await api('/api/test',{method:'POST',body:JSON.stringify({kind,id})});toast(data.message)}catch(error){toast(error.message)}}async function testApiForm(){try{const data=await api('/api/test',{method:'POST',body:JSON.stringify({kind:'api',endpoint:$('f-endpoint').value,model:$('f-model').value,api_key:$('f-key').value,format:($('f-format')||{}).value||'chat'})});toast(data.message)}catch(error){toast(error.message)}}
 async function scanLocal(){try{const data=await api('/api/scan-local');const box=$('local-scan');box.style.display='block';box.innerHTML=data.found.length?'检测到本地服务：'+data.found.map(x=>`<button class="btn" onclick="useLocal('${esc(x.endpoint)}','${esc(x.models[0]||'')}')">${esc(x.name)} · ${esc(x.endpoint)} · ${esc(x.models.join('、')||'未返回模型')}</button>`).join(' '):'没有发现 Ollama、LM Studio、vLLM 或 llama.cpp。llama.cpp 默认常见端口为 8080；请确认它启动了 OpenAI 兼容服务器（/v1/models）。';toast(data.found.length?'扫描完成':'未发现兼容本地服务')}catch(error){toast(error.message)}}function useLocal(endpoint,model){showForm('local');$('f-endpoint').value=endpoint;$('f-model').value=model}
-async function checkEnvironment(){try{const data=await api('/api/environment');const fail=data.checks.filter(x=>!x.ok);$('environment').innerHTML='<strong>环境检查检查的是安装链路，不检查模型登录。</strong><br>'+data.checks.map(x=>`${x.ok?'✓':'!'} ${esc(x.name)}：${esc(x.detail)}（${esc(x.reason)}）`).join('<br>');toast(fail.length?'未找到：'+fail.map(x=>x.name).join('、'):'环境检查通过')}catch(error){toast(error.message)}}async function initializeFiles(){try{const data=await api('/api/initialize',{method:'POST'});toast(data.message)}catch(error){toast(error.message)}}async function closeApp(){try{await api('/api/close',{method:'POST'});document.body.innerHTML='<main class="app"><div class="card"><h1>配置已完成</h1><p>本地配置服务已关闭，可以安全关闭这个页面。</p></div></main>'}catch(error){toast(error.message)}}render();
+async function checkEnvironment(){try{const data=await api('/api/environment');const fail=data.checks.filter(x=>!x.ok);$('environment').innerHTML='<strong>环境检查检查的是安装链路，不检查模型登录。</strong><br>'+data.checks.map(x=>`${x.ok?'✓':'!'} ${esc(x.name)}：${esc(x.detail)}（${esc(x.reason)}）`).join('<br>');toast(fail.length?'未找到：'+fail.map(x=>x.name).join('、'):'环境检查通过')}catch(error){toast(error.message)}}async function initializeFiles(){try{const data=await api('/api/initialize',{method:'POST'});toast(data.message)}catch(error){toast(error.message)}}async function closeApp(){try{await api('/api/close',{method:'POST'});document.body.innerHTML='<main class="app"><div class="card"><h1>配置已完成</h1><p>本地配置服务已关闭，可以安全关闭这个页面。</p></div></main>'}catch(error){toast(error.message)}}initTheme();render();
 </script></body></html>"""
     return page.replace("__CONFIG__", state)
