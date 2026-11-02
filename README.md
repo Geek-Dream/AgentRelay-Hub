@@ -29,8 +29,8 @@ AgentRelay 是一个运行在本机的 **Agent 外援与协作系统**。
 
 ```text
 主 Agent = 项目负责人
-Hook     = 观察员，发现卡住后提醒
-Skill    = 协作规则，决定该不该找外援
+Hook     = 本地预检员，发现大任务、危险命令和卡住迹象
+Skill    = 协作规则，决定是否需要确认或找外援
 Fusion   = 独立副手，适合调查、批量阅读和局部实现
 Commander = 临时项目组，按任务拆分多个隔离 Agent
 ```
@@ -49,6 +49,13 @@ Commander = 临时项目组，按任务拆分多个隔离 Agent
 | 🔔 **AgentRelay** | 观察 Agent 会话，在失败、超时或你明确要求时给出外援提醒 | 同一个问题反复失败、改了半小时还没进展 |
 | 🖼️ **AgentImage** | 让支持识图的在线或本地模型先描述图片 | 当前模型不能看图 |
 | ⚡ **AgentFusion** | 启动独立持久会话，执行调查、批量阅读、独立复现或局部实现 | 日志很多、搜索范围很大、需要一个独立副手 |
+
+### 🚦 Hook 门禁
+
+- 🧾 你提交消息后，Hook 先用本地规则判断是不是中大型任务；不会额外请求模型。
+- 🛑 需要确认时，Agent 必须先展示需求卡/确认卡，批准前不能写文件。
+- ⚠️ 遇到删除、破坏性 Git、依赖安装、数据库迁移、部署等高风险命令时直接拦下。
+- ✅ 批准只对当前方案生效；危险命令只允许完全相同的输入重试一次。
 
 ### 👑 AgentRelay 里还有 Commander
 
@@ -77,24 +84,30 @@ Commander 适合跨模块或高风险任务：
 
 ## 🚦 什么时候会触发？
 
-AgentRelay 不会每个问题都弹外援，也不会直接替你调用模型。
+采用和 Pi 类似的两层方式：Hook 做轻量预检，主 Agent 做最终语义判断。
 
 | 触发场景 | 系统会做什么 |
 |---|---|
+| 📝 你提交一个中大型任务 | `UserPromptSubmit` 注入任务门禁，要求先展示确认卡 |
+| 🧱 任务尚未批准但要写文件 | `PreToolUse` 硬阻断写入，只读检查和安全测试仍可继续 |
+| ⚠️ 即将执行高风险命令 | 硬阻断并给出安全门禁，要求先解释影响、等待确认 |
 | 🔁 同一问题重复失败 | 生成“可以找外援”的候选提醒 |
 | ⏱️ 单问题有效处理时间过长 | 达到门槛后生成候选提醒 |
 | 🗣️ 你明确说“现在调用 DeepSeek”“让 Fusion 看一下” | 进入显式协作流程 |
 | 🗂️ 本地归档命中相似问题 | 先推荐历史结论，不直接调用在线模型 |
 
-Hook 只负责观察和提醒，真正的调用由 Agent 结合当前上下文决定。
+Hook 不会因为看到“AgentRelay”“模型”几个字就替 Agent 认定你在下命令。是否调用外援、
+调用哪个 Provider，仍由主 Agent 结合完整语境判断。
 
 ### ⚡ AgentFusion 的触发方式
 
-Fusion 默认开启，但 **不会自动猜 Provider**：
+Fusion 能力默认开启，但 **不等于每轮都会自动干活，也不会自动选择 Provider**：
 
 - ✅ 已配置可用 Provider，且状态为 `delegable=true`：主 Agent 可以委派
 - ⏸️ 未配置 Provider、Fusion 已关闭或正在忙：立即跳过，不等待、不探网
 - 👑 Commander 运行时：Fusion 强制暂停，避免两个调度器互相抢占
+- 🎯 Provider 必须显式指定，例如 `web:deepseek-web`、`local:local-llm` 或
+  `api:kimi-api`；没有 `provider_id` 时不会偷偷借用 Codex 主模型
 
 Fusion 适合“输出很多、边界清楚、可以独立完成”的工作，例如：
 
@@ -141,6 +154,10 @@ py install.py
 - 🔐 加密保存 Provider 配置
 - 🔗 注册 Agent Hook
 - ✅ 自动检查 Skill、Hook、Tracker 和合成事件
+
+如果你以前装过旧版，重新运行 `python3 install.py` 即可。安装器会识别旧的
+`agent_relay_hook.sh` 命令，升级为新版 `.py` 入口，清理重复的旧 AgentRelay Hook，
+同时保留你自己已有的 Hook。
 
 安装完成后，重启正在使用的 Agent，让 Hook 重新加载。
 
@@ -326,7 +343,9 @@ $CODEX_HOME/agent_relay_tracker/logs/error.log
 ## 🛡️ 安全边界
 
 - 🚫 不绕过 CAPTCHA，不保存账号密码
-- 🔒 Hook 不直接连接在线模型，只生成候选提醒
+- 🔒 任务门禁只做本地规则预检，不额外调用第二个模型
+- 🛑 Codex 当前不支持 Hook 原生 `ask` 选项卡；AgentRelay 用 `deny + 确认卡 + 原输入重试`
+  实现安全确认
 - 🧠 外部模型建议必须由主 Agent 验证，不能直接当作最终答案
 - 🧰 Fusion 只能访问指定 workspace
 - 👑 Commander 使用隔离 workspace，默认不会覆盖主工作区
@@ -335,6 +354,29 @@ $CODEX_HOME/agent_relay_tracker/logs/error.log
 ---
 
 ## ⚙️ 它是怎么实现的？
+
+### 🪝 五个 Hook 各做什么
+
+| Hook 事件 | AgentRelay 用来做什么 |
+|---|---|
+| `SessionStart` | 初始化会话状态，恢复安全边界 |
+| `UserPromptSubmit` | 本地预检任务大小，注入任务门禁和确认要求 |
+| `PreToolUse` | 检查危险命令和未批准写入，必要时直接 `deny` |
+| `PostToolUse` | 记录工具结果、失败次数和处理耗时 |
+| `Stop` | 判断本轮是否结束，必要时注入后续提醒 |
+
+Codex 的 Hook schema 虽然列出了 `permissionDecision: ask`，但当前官方解析器明确拒绝它。
+因此 AgentRelay 不依赖这个无效选项，而是使用可验证的：
+
+```text
+PreToolUse deny
+   ↓
+Agent 展示确认卡
+   ↓
+用户明确批准
+   ↓
+只重试完全相同的工具输入一次
+```
 
 ### 🔁 一次外援请求的完整链路
 
@@ -410,7 +452,7 @@ AgentRelay 使用简单的时间与失败阶梯，不靠无限轮询：
 运行主要测试：
 
 ```bash
-python3 -m unittest tests.test_fusion tests.test_agent_targets -v
+python3 -m unittest discover -s tests -v
 ```
 
 检查差异格式：

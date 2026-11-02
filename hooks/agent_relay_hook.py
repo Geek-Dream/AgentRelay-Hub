@@ -207,6 +207,8 @@ def valid_hook_output(value: str, event_name: str | None = None) -> bool:
         payload = json.loads(value)
     except json.JSONDecodeError:
         return False
+    if not isinstance(payload, dict):
+        return False
     if event_name == "Stop":
         return (
             payload.get("decision") == "block"
@@ -214,11 +216,34 @@ def valid_hook_output(value: str, event_name: str | None = None) -> bool:
             and bool(payload.get("reason", "").strip())
         )
     output = payload.get("hookSpecificOutput")
-    return (
-        isinstance(output, dict)
-        and output.get("hookEventName") == "PostToolUse"
-        and isinstance(output.get("additionalContext"), str)
+    if not isinstance(output, dict):
+        return False
+
+    output_event = output.get("hookEventName")
+    if event_name is None:
+        event_name = output_event
+    expected_output_event = (
+        "PostToolUse"
+        if event_name == "PostToolUseFailure"
+        else event_name
     )
+    if output_event != expected_output_event:
+        return False
+
+    if event_name in {"PostToolUse", "PostToolUseFailure", "UserPromptSubmit"}:
+        return (
+            isinstance(output.get("additionalContext"), str)
+            and bool(output["additionalContext"].strip())
+        )
+
+    if event_name == "PreToolUse":
+        return (
+            output.get("permissionDecision") == "deny"
+            and isinstance(output.get("permissionDecisionReason"), str)
+            and bool(output["permissionDecisionReason"].strip())
+        )
+
+    return False
 
 
 def main() -> int:
@@ -276,7 +301,9 @@ def main() -> int:
         sys.stdout.write(result.stdout.rstrip() + "\n")
         sys.stdout.flush()
     elif result.stdout.strip():
-        log_error("Tracker output was not valid PostToolUse hook JSON")
+        log_error(
+            f"Tracker output was not valid {event_name or 'unknown'} hook JSON"
+        )
     return 0
 
 

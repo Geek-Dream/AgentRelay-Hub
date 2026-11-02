@@ -4,6 +4,7 @@ import unittest
 import json
 import subprocess
 import os
+import shlex
 from unittest import mock
 from types import SimpleNamespace
 from scripts.task_scheduler import TaskAnalyzer, TaskPlan, TaskScheduler, ModelRegistry as SchedulerRegistry, TaskDecisionEngine
@@ -24,6 +25,10 @@ from scripts import commander_provider_pool, fusion_mode, orchestrator_core
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def shlex_command(*parts):
+    return shlex.join([str(part) for part in parts])
 
 
 def load_module(name, path):
@@ -694,14 +699,128 @@ class CrossPlatformHookTests(unittest.TestCase):
         )
         self.assertIn("'/Users/test user/", command)
 
-    def test_hook_only_forwards_valid_post_tool_output(self):
-        valid = (
+    def test_installer_upgrades_old_script_hook_and_preserves_user_hooks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            hooks_json = Path(directory) / "hooks.json"
+            old_command = "/bin/sh /Users/test/.codex/hooks/agent_relay_hook.sh"
+            user_command = "/usr/local/bin/user-hook.sh"
+            hooks_json.write_text(json.dumps({
+                "hooks": {
+                    "SessionStart": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": old_command,
+                                    "timeout": 3,
+                                },
+                                {
+                                    "type": "command",
+                                    "command": old_command,
+                                    "timeout": 3,
+                                },
+                            ],
+                        },
+                    ],
+                    "PostToolUse": [
+                        {
+                            "matcher": ".*",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": old_command,
+                                    "timeout": 3,
+                                },
+                                {
+                                    "type": "command",
+                                    "command": user_command,
+                                    "timeout": 20,
+                                },
+                                {
+                                    "type": "command",
+                                    "command": old_command,
+                                    "timeout": 3,
+                                },
+                            ],
+                        },
+                    ],
+                },
+            }), encoding="utf-8")
+            replacement = shlex_command(
+                "/Users/test/.codex/agentrelay-env/bin/python",
+                "/Users/test/.codex/hooks/agent_relay_hook.py",
+            )
+
+            with mock.patch.object(self.installer, "HOOKS_JSON", hooks_json), \
+                    mock.patch.object(
+                        self.installer,
+                        "hook_command",
+                        return_value=replacement,
+                    ), redirect_stdout(StringIO()):
+                self.installer.merge_hooks_json()
+
+            config = json.loads(hooks_json.read_text(encoding="utf-8"))
+            events = config["hooks"]
+            self.assertEqual(set(events), set(self.installer.TRACKED_EVENTS))
+
+            for event in self.installer.TRACKED_EVENTS:
+                agent_hooks = [
+                    hook
+                    for entry in events[event]
+                    if isinstance(entry, dict)
+                    for hook in entry.get("hooks", [])
+                    if "agent_relay_hook" in str(hook.get("command", ""))
+                ]
+                self.assertEqual(len(agent_hooks), 1, event)
+                self.assertEqual(agent_hooks[0]["type"], "command")
+                self.assertEqual(agent_hooks[0]["command"], replacement)
+                self.assertEqual(agent_hooks[0]["timeout"], 10)
+
+            commands = [
+                hook.get("command")
+                for entry in events["PostToolUse"]
+                for hook in entry.get("hooks", [])
+            ]
+            self.assertIn(user_command, commands)
+            self.assertNotIn(old_command, commands)
+
+    def test_hook_forwards_supported_context_outputs(self):
+        post_tool = (
             '{"hookSpecificOutput":{"hookEventName":"PostToolUse",'
             '"additionalContext":"ready"}}'
         )
-        self.assertTrue(self.hook.valid_hook_output(valid))
+        user_prompt = (
+            '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit",'
+            '"additionalContext":"confirm first"}}'
+        )
+        self.assertTrue(self.hook.valid_hook_output(post_tool))
+        self.assertTrue(self.hook.valid_hook_output(user_prompt))
         self.assertFalse(self.hook.valid_hook_output('{"value": 1}'))
         self.assertFalse(self.hook.valid_hook_output("not-json"))
+        self.assertFalse(self.hook.valid_hook_output(
+            '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit"}}'
+        ))
+
+    def test_hook_forwards_valid_pre_tool_deny(self):
+        value = (
+            '{"hookSpecificOutput":{"hookEventName":"PreToolUse",'
+            '"permissionDecision":"deny",'
+            '"permissionDecisionReason":"confirm the command"}}'
+        )
+        self.assertTrue(
+            self.hook.valid_hook_output(value, event_name="PreToolUse")
+        )
+        self.assertFalse(self.hook.valid_hook_output(
+            '{"hookSpecificOutput":{"hookEventName":"PreToolUse",'
+            '"permissionDecision":"ask",'
+            '"permissionDecisionReason":"confirm"}}',
+            event_name="PreToolUse",
+        ))
+        self.assertFalse(self.hook.valid_hook_output(
+            '{"hookSpecificOutput":{"hookEventName":"PreToolUse",'
+            '"permissionDecision":"deny"}}',
+            event_name="PreToolUse",
+        ))
 
     def test_hook_forwards_valid_stop_block(self):
         value = '{"decision":"block","reason":"call AgentRelay"}'

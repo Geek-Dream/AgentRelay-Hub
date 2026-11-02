@@ -242,6 +242,13 @@ def load_hooks_config() -> dict:
     return config
 
 
+def is_agent_relay_hook(hook) -> bool:
+    return (
+        isinstance(hook, dict)
+        and "agent_relay_hook" in str(hook.get("command", ""))
+    )
+
+
 def find_agent_relay_hook(entries: list):
     for entry in entries:
         if not isinstance(entry, dict):
@@ -250,12 +257,50 @@ def find_agent_relay_hook(entries: list):
         if not isinstance(nested, list):
             continue
         for hook in nested:
-            if (
-                isinstance(hook, dict)
-                and "agent_relay_hook" in str(hook.get("command", ""))
-            ):
+            if is_agent_relay_hook(hook):
                 return hook
     return None
+
+
+def deduplicate_agent_relay_hooks(entries: list) -> tuple[dict | None, bool]:
+    """Keep one AgentRelay hook per event and preserve unrelated hooks."""
+
+    existing = None
+    changed = False
+    normalized_entries = []
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            normalized_entries.append(entry)
+            continue
+        nested = entry.get("hooks")
+        if not isinstance(nested, list):
+            normalized_entries.append(entry)
+            continue
+
+        normalized_hooks = []
+        removed_from_entry = False
+        for hook in nested:
+            if not is_agent_relay_hook(hook):
+                normalized_hooks.append(hook)
+                continue
+            if existing is None:
+                existing = hook
+                normalized_hooks.append(hook)
+            else:
+                removed_from_entry = True
+                changed = True
+
+        if removed_from_entry:
+            if normalized_hooks:
+                entry["hooks"] = normalized_hooks
+                normalized_entries.append(entry)
+            continue
+        normalized_entries.append(entry)
+
+    if changed:
+        entries[:] = normalized_entries
+    return existing, changed
 
 
 def atomic_write_json(path: Path, value: dict) -> None:
@@ -290,7 +335,8 @@ def merge_hooks_json() -> None:
             raise InstallError(
                 f"{HOOKS_JSON} 中的 hooks.{event} 必须是 JSON 数组"
             )
-        existing_hook = find_agent_relay_hook(entries)
+        existing_hook, removed_duplicates = deduplicate_agent_relay_hooks(entries)
+        changed = changed or removed_duplicates
         if existing_hook is not None:
             if (
                 existing_hook.get("command") != command

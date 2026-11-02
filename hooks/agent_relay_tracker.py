@@ -25,11 +25,13 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
 import traceback
 import unicodedata
+from collections import namedtuple
 from datetime import datetime
 from pathlib import Path
 
@@ -316,6 +318,176 @@ EXPLICIT_RELAY_META_TERMS = [
     r"(?:这句话|这个词|关键词|关键字|字样|触发规则|触发机制|误触发)",
 ]
 
+TASK_APPROVAL_PATTERNS = [
+    r"^(?:确认|批准|同意)(?:执行|修改|继续|这个方案|该方案|上述方案|方案|计划|需求|确认卡|并|[,，。.!！]|$)",
+    r"^(?:可以|好的|行|继续|开始|执行|动手|做吧)(?:执行|修改|开始|继续|按|做|吧|[,，。.!！]|$)",
+    r"^(?:按|按照)(?:这个|上述|该|刚才的|以下)?(?:方案|计划|需求|确认卡|步骤)"
+    r"(?:执行|实施|做|修改|继续|吧)",
+    r"^(?:无需|不用|不必|跳过)(?:再次|再)?确认(?:[,，。.!！\s]|$)",
+    r"^(?:approve|approved|proceed|go\s+ahead|continue|yes|do\s+it)(?:[,，。.!！\s]|$)",
+]
+
+TASK_APPROVAL_NEGATIONS = [
+    r"(?:先别|暂时别|不要|不能|不允许|不批准|不同意|拒绝|等等|稍等)",
+    r"(?:但是|但|不过|然而|如果|假如)",
+    r"(?:do\s+not|don't|dont|wait|not\s+yet|reject)",
+]
+
+TASK_APPROVAL_QUESTIONS = [
+    r"[?？]$",
+    r"(?:吗|呢|么|是否|为什么|为何|怎么|如何|什么|风险|影响|区别)[?？。.!！]?$",
+]
+
+TASK_WRITE_ACTION_PATTERNS = [
+    r"(?:修改|新增|删除|重构|迁移|升级|替换|改造|修复|接入|集成|实现|搭建|部署|发布|安装|配置|调整)",
+    r"\b(?:implement|add|remove|delete|refactor|migrate|upgrade|replace|fix|integrate|build|deploy|install)\b",
+]
+
+TASK_LARGE_PATTERNS = [
+    r"(?:大型任务|大工程|完整实现|从零实现|整体重构|全面重构|系统性改造)",
+    r"(?:整个项目|全项目|跨模块|全链路|端到端|前后端|系统架构|架构重构)",
+    r"(?:数据库迁移|迁移数据|数据迁移|消息队列迁移|鉴权体系|权限体系)",
+    r"(?:部署上线|上线部署|重启服务|升级依赖|安装多个依赖)",
+]
+
+TASK_MEDIUM_PATTERNS = [
+    r"(?:重构|迁移|安装依赖|升级依赖|改配置|修改配置|新增服务|重启服务|部署)",
+    r"(?:表结构|鉴权流程|权限模型|消息协议|并发模型|数据模型)",
+]
+
+TASK_MULTI_REQUEST_PATTERNS = [
+    r"(?:并且|同时|另外|然后|接着|还要|还需要|以及|最后)",
+    r"(?:^|[;；])\s*(?:再|然后|接着|另外|最后)?(?:修改|新增|删除|实现|补|加|改)",
+    r"(?:^|\n)\s*(?:\d+[.)、]|[-*])\s+",
+]
+
+TASK_FILE_REFERENCE_PATTERN = re.compile(
+    r"(?<![\w.-])(?:[\w.-]+/)*[\w.-]+"
+    r"\.(?:py|pyi|ts|tsx|js|jsx|mjs|cjs|json|ya?ml|toml|md|css|scss|sass|"
+    r"less|html|rs|go|java|kt|kts|sql|sh|bash|zsh|swift|c|cc|cpp|h|hpp|"
+    r"xml|gradle|properties|env)\b",
+    re.IGNORECASE,
+)
+
+TASK_DOMAIN_PATTERNS = [
+    r"(?:前端|frontend|ui|页面)",
+    r"(?:后端|backend|服务端|api|接口)",
+    r"(?:数据库|database|db|sql|表结构)",
+    r"(?:缓存|cache|redis|消息队列|mq|kafka|rabbitmq)",
+    r"(?:部署|deploy|docker|kubernetes|k8s|服务器)",
+    r"(?:测试|test|pytest|jest|vitest|playwright)",
+]
+
+TASK_DANGEROUS_REQUEST_PATTERNS = [
+    r"(?:rm\s+-rf|删除全部|清空数据库|drop\s+(?:database|table))",
+    r"(?:git\s+reset\s+--hard|git\s+clean\s+-[a-z]*f|强制推送|force\s+push)",
+    r"(?:sudo|管理员权限|关闭系统|重启系统|删除分支|删库)",
+]
+
+WRITE_TOOL_NAMES = {
+    "apply_patch",
+    "applypatch",
+    "edit",
+    "edit_file",
+    "write",
+    "write_file",
+    "multiedit",
+    "multi_edit",
+    "notebookedit",
+    "notebook_edit",
+    "create_file",
+    "delete_file",
+    "str_replace_editor",
+    "search_replace",
+    "replace_file_content",
+}
+
+SHELL_TOOL_NAMES = {
+    "bash",
+    "shell",
+    "exec",
+    "exec_command",
+    "local_shell",
+    "shell_command",
+    "run_command",
+    "terminal",
+    "command",
+}
+
+SHELL_INTERPRETERS = {
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+}
+
+SHELL_WRITE_COMMANDS = {
+    "cp",
+    "install",
+    "mkdir",
+    "mv",
+    "patch",
+    "rm",
+    "rmdir",
+    "tee",
+    "touch",
+    "truncate",
+    "unlink",
+}
+
+SHELL_CONTROL_OPERATORS = {
+    ";",
+    "&&",
+    "||",
+    "|",
+    "|&",
+    "&",
+}
+
+SHELL_OUTPUT_REDIRECT_OPERATORS = {
+    ">",
+    ">>",
+    ">|",
+    "&>",
+    "&>>",
+    "<>",
+    ">&",
+}
+
+SHELL_TOKEN_OPERATORS = (
+    "<<<",
+    "<<-",
+    "&>>",
+    ";;",
+    "&&",
+    "||",
+    "|&",
+    ">>",
+    ">|",
+    "&>",
+    ">&",
+    "<>",
+    "<<",
+    ";",
+    "&",
+    "|",
+    ">",
+    "<",
+    "(",
+    ")",
+)
+
+_ShellToken = namedtuple(
+    "_ShellToken",
+    ("value", "kind", "quoted"),
+)
+
+_ShellSegment = namedtuple(
+    "_ShellSegment",
+    ("tokens", "joiner"),
+)
+
 # ============================================================
 # 默认状态
 # ============================================================
@@ -437,6 +609,27 @@ def default_state(session_id=None, agent_id=None):
         # Hook 从当前用户消息中发现了疑似直接调用句式。
         # 这只是交给 Agent 审核的候选，不是已经确认的显式请求。
         "explicit_relay_candidate": False,
+
+        # UserPromptSubmit 的本地任务预检。它只使用确定性规则，
+        # 不调用第二个模型；中大型任务和涉及多个修改点的任务会要求
+        # 主 Agent 先展示确认卡，等待用户明确批准。
+        "task_gate": {
+            "level": "small",
+            "requires_confirmation": False,
+            "status": "clear",
+            "reasons": [],
+            "request_sha256": None,
+            "notified_sha256": None,
+            "requested_at": None,
+            "approved_at": None,
+        },
+
+        # PreToolUse 的逐工具审批。高风险命令保存的是不可逆指纹，
+        # 不保存原始命令；批准只对完全相同的工具输入生效一次。
+        "tool_approval": {
+            "pending_keys": [],
+            "approved_keys": [],
+        },
 
         # 当前正在执行的工具。
         #
@@ -957,6 +1150,910 @@ def matches_any_pattern(text, patterns):
     )
 
 
+def strip_prompt_examples(prompt):
+    """移除代码块和引用行，避免把说明文字误判成当前任务。"""
+
+    text = str(prompt or "")
+    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    text = "\n".join(
+        line for line in text.splitlines()
+        if not line.lstrip().startswith(">")
+    )
+    return normalize_text(text)
+
+
+def is_explicit_task_approval(prompt):
+    """识别用户对需求卡或危险工具确认卡的明确批准。"""
+
+    candidate = strip_prompt_examples(prompt)
+    if not candidate or len(candidate) > 240:
+        return False
+
+    if matches_any_pattern(candidate, TASK_APPROVAL_NEGATIONS):
+        return False
+
+    if matches_any_pattern(candidate, TASK_APPROVAL_QUESTIONS):
+        return False
+
+    # 允许“好的，确认执行”一类自然表达，但保留单独的“好的/可以”。
+    without_greeting = re.sub(
+        r"^(?:嗯+|好的|好|okay|ok)(?:\s*[,，。.!！]\s*|\s+)",
+        "",
+        candidate,
+        flags=re.IGNORECASE,
+    ).strip()
+    if without_greeting:
+        candidate = without_greeting
+
+    return matches_any_pattern(candidate, TASK_APPROVAL_PATTERNS)
+
+
+def classify_task_request(prompt):
+    """用确定性规则判断是否需要先展示任务确认卡。"""
+
+    text = strip_prompt_examples(prompt)
+    if not text:
+        return {
+            "level": "small",
+            "requires_confirmation": False,
+            "reasons": [],
+        }
+
+    write_requested = matches_any_pattern(text, TASK_WRITE_ACTION_PATTERNS)
+    large_scope = matches_any_pattern(text, TASK_LARGE_PATTERNS)
+    medium_scope = matches_any_pattern(text, TASK_MEDIUM_PATTERNS)
+    multi_request = matches_any_pattern(text, TASK_MULTI_REQUEST_PATTERNS)
+    file_references = {
+        value.lower()
+        for value in TASK_FILE_REFERENCE_PATTERN.findall(text)
+    }
+    domains = {
+        value.lower()
+        for value in re.findall(
+            "|".join(f"(?:{pattern})" for pattern in TASK_DOMAIN_PATTERNS),
+            text,
+            flags=re.IGNORECASE,
+        )
+    }
+
+    reasons = []
+    if large_scope and write_requested:
+        reasons.append("属于大型、跨模块或全链路任务")
+    if write_requested and multi_request:
+        reasons.append("包含多个连续修改目标")
+    if write_requested and len(file_references) >= 2:
+        reasons.append("涉及多个代码文件")
+    if write_requested and len(domains) >= 2:
+        reasons.append("同时涉及多个技术领域")
+    if write_requested and medium_scope:
+        reasons.append("包含重构、迁移、配置、依赖或部署操作")
+
+    if reasons:
+        level = "large" if large_scope and write_requested else "medium"
+        return {
+            "level": level,
+            "requires_confirmation": True,
+            "reasons": reasons,
+        }
+
+    return {
+        "level": "small",
+        "requires_confirmation": False,
+        "reasons": [],
+    }
+
+
+def shell_command_text(tool_name, tool_input):
+    """从不同 Agent 的 shell 工具输入中提取可检查的命令文本。"""
+
+    if not tool_is_shell(tool_name):
+        return ""
+
+    if isinstance(tool_input, str):
+        return str(tool_input).replace("\r\n", "\n").strip()
+
+    if isinstance(tool_input, (list, tuple)):
+        try:
+            return shlex.join(str(item) for item in tool_input)
+        except (TypeError, ValueError):
+            return " ".join(str(item) for item in tool_input).strip()
+
+    if not isinstance(tool_input, dict):
+        return ""
+
+    for key in (
+        "command",
+        "cmd",
+        "script",
+        "shell_command",
+        "shellCommand",
+    ):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.replace("\r\n", "\n").strip()
+
+    argv = tool_input.get("argv")
+    if isinstance(argv, (list, tuple)):
+        try:
+            return shlex.join(str(item) for item in argv)
+        except (TypeError, ValueError):
+            return " ".join(str(item) for item in argv).strip()
+
+    return ""
+
+
+def tool_is_shell(tool_name):
+    normalized = re.sub(
+        r"[^a-z0-9_.-]+",
+        "_",
+        normalize_text(tool_name).lower(),
+    )
+    if normalized in SHELL_TOOL_NAMES:
+        return True
+    tail = normalized.rsplit(".", 1)[-1]
+    return tail in SHELL_TOOL_NAMES
+
+
+def _shell_tokens(command):
+    """保留引号语义，区分真实 shell 操作符和搜索文本。"""
+
+    text = str(command or "").replace("\r\n", "\n").replace("\r", "\n")
+    tokens = []
+    pending_heredocs = []
+    heredoc_operator = None
+    index = 0
+    length = len(text)
+
+    while index < length:
+        char = text[index]
+        if char.isspace():
+            if char == "\n":
+                if pending_heredocs and heredoc_operator is None:
+                    index += 1
+                    for delimiter, strip_tabs in pending_heredocs:
+                        while index < length:
+                            line_end = text.find("\n", index)
+                            if line_end < 0:
+                                line_end = length
+                            line = text[index:line_end]
+                            index = min(line_end + 1, length)
+                            if strip_tabs:
+                                line = line.lstrip("\t")
+                            if line == delimiter:
+                                break
+                    pending_heredocs = []
+                tokens.append(_ShellToken(";", "operator", False))
+            index += 1
+            continue
+
+        if char == "#":
+            while index < length and text[index] != "\n":
+                index += 1
+            continue
+
+        operator = next(
+            (
+                candidate for candidate in SHELL_TOKEN_OPERATORS
+                if text.startswith(candidate, index)
+            ),
+            None,
+        )
+        if operator:
+            tokens.append(_ShellToken(operator, "operator", False))
+            if operator in {"<<", "<<-"}:
+                heredoc_operator = operator
+            index += len(operator)
+            continue
+
+        value = []
+        quoted = False
+        word_started = False
+        while index < length:
+            char = text[index]
+            if char.isspace() or char in ";&|<>()":
+                break
+
+            if char == "\\":
+                word_started = True
+                quoted = True
+                index += 1
+                if index < length:
+                    if text[index] != "\n":
+                        value.append(text[index])
+                    index += 1
+                continue
+
+            if char in {"'", '"'}:
+                quote = char
+                word_started = True
+                quoted = True
+                index += 1
+                while index < length and text[index] != quote:
+                    if quote == '"' and text[index] == "\\":
+                        index += 1
+                        if index < length:
+                            value.append(text[index])
+                            index += 1
+                        continue
+                    value.append(text[index])
+                    index += 1
+                if index < length:
+                    index += 1
+                continue
+
+            word_started = True
+            value.append(char)
+            index += 1
+
+        if word_started:
+            token = _ShellToken("".join(value), "word", quoted)
+            tokens.append(token)
+            if heredoc_operator is not None:
+                pending_heredocs.append((
+                    token.value,
+                    heredoc_operator == "<<-",
+                ))
+                heredoc_operator = None
+        elif index < length:
+            # Unknown punctuation still belongs to a word and must not trap
+            # the lexer in an infinite loop.
+            tokens.append(_ShellToken(text[index], "word", False))
+            index += 1
+
+    return tokens
+
+
+def _shell_command_segments(command):
+    """按未加引号的控制操作符切分命令，并保留每一段的连接方式。"""
+
+    segments = []
+    current = []
+    current_joiner = None
+    pending_joiner = None
+
+    for token in _shell_tokens(command):
+        if token.kind == "operator" and token.value in SHELL_CONTROL_OPERATORS:
+            if current:
+                segments.append(_ShellSegment(
+                    tuple(current),
+                    current_joiner,
+                ))
+                current = []
+            pending_joiner = token.value
+            current_joiner = pending_joiner
+            continue
+        current.append(token)
+
+    if current:
+        segments.append(_ShellSegment(
+            tuple(current),
+            current_joiner,
+        ))
+    return segments
+
+
+def _segment_words(segment):
+    return [
+        token.value
+        for token in segment.tokens
+        if token.kind == "word"
+    ]
+
+
+def _command_name(value):
+    return os.path.basename(str(value or "")).lower()
+
+
+def _skip_options(words, options_with_values=()):
+    index = 0
+    while index < len(words) and words[index].startswith("-"):
+        option = words[index]
+        index += 1
+        if option in options_with_values and index < len(words):
+            index += 1
+    return words[index:]
+
+
+def _unwrap_shell_words(words, strip_sudo=True):
+    """去掉环境变量、env/command 等执行包装，返回真正命令。"""
+
+    value = list(words)
+    wrappers = {
+        "builtin",
+        "command",
+        "env",
+        "exec",
+        "nice",
+        "nohup",
+        "time",
+    }
+    if strip_sudo:
+        wrappers.add("sudo")
+
+    while value:
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", value[0]):
+            value.pop(0)
+            continue
+
+        command = _command_name(value[0])
+        if command not in wrappers:
+            break
+
+        value = value[1:]
+        if command == "env":
+            while value:
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", value[0]):
+                    value.pop(0)
+                    continue
+                if value[0].startswith("-"):
+                    option = value.pop(0)
+                    if option in {"-u", "--unset", "-C", "--chdir"} and value:
+                        value.pop(0)
+                    continue
+                break
+            continue
+
+        if command in {"command", "builtin"} and "-v" in value[:1]:
+            return []
+
+        if command == "nice":
+            value = _skip_options(value, {"-n"})
+        elif command == "sudo":
+            value = _skip_options(
+                value,
+                {
+                    "-C",
+                    "-D",
+                    "-g",
+                    "-h",
+                    "-p",
+                    "-r",
+                    "-t",
+                    "-u",
+                },
+            )
+        else:
+            value = _skip_options(value)
+
+    return value
+
+
+def _shell_wrapper_script(words):
+    """返回 shell -c 后面的脚本；没有 -c 时返回 None。"""
+
+    for index, option in enumerate(words[1:], start=1):
+        if option == "--command":
+            return words[index + 1] if index + 1 < len(words) else None
+        if option.startswith("--command="):
+            return option.split("=", 1)[1]
+        if option.startswith("-") and not option.startswith("--") and "c" in option[1:]:
+            return words[index + 1] if index + 1 < len(words) else None
+    return None
+
+
+def _redirects_to_file(segment):
+    tokens = segment.tokens
+    for index, token in enumerate(tokens):
+        if (
+            token.kind != "operator"
+            or token.value not in SHELL_OUTPUT_REDIRECT_OPERATORS
+        ):
+            continue
+
+        target = next(
+            (
+                candidate.value
+                for candidate in tokens[index + 1:]
+                if candidate.kind == "word"
+            ),
+            "",
+        )
+        if token.value == ">&" and (
+            target in {"-", "&"}
+            or target.startswith("&")
+            or target.isdigit()
+        ):
+            continue
+        if target in {"/dev/null", "/dev/fd/2", "/dev/stderr"}:
+            continue
+        return True
+    return False
+
+
+def _segment_write_command(words):
+    words = _unwrap_shell_words(words)
+    if not words:
+        return False
+
+    command = _command_name(words[0])
+    arguments = words[1:]
+
+    if command in SHELL_WRITE_COMMANDS:
+        return True
+    if command == "sed":
+        return any(
+            argument == "--in-place"
+            or argument.startswith("--in-place=")
+            or (
+                argument.startswith("-")
+                and not argument.startswith("--")
+                and "i" in argument[1:]
+            )
+            for argument in arguments
+        )
+    if command == "perl":
+        return any(
+            argument.startswith("-")
+            and not argument.startswith("--")
+            and "i" in argument[1:]
+            for argument in arguments
+        )
+    if command == "dd":
+        return any(argument.startswith("of=") for argument in arguments)
+    if command == "git":
+        return bool(arguments) and arguments[0] in {"am", "apply", "checkout", "restore"}
+    return False
+
+
+def _shell_text_writes_files(command, depth=0):
+    if depth > 6:
+        return False
+
+    for segment in _shell_command_segments(command):
+        if _redirects_to_file(segment):
+            return True
+
+        words = _segment_words(segment)
+        if _segment_write_command(words):
+            return True
+
+        unwrapped = _unwrap_shell_words(words, strip_sudo=False)
+        if not unwrapped:
+            continue
+
+        command_name = _command_name(unwrapped[0])
+        if command_name in SHELL_INTERPRETERS:
+            script = _shell_wrapper_script(unwrapped)
+            if script and _shell_text_writes_files(script, depth + 1):
+                return True
+        elif command_name == "eval":
+            script = " ".join(unwrapped[1:])
+            if script and _shell_text_writes_files(script, depth + 1):
+                return True
+
+    return False
+
+
+def _git_dangerous(arguments):
+    if not arguments:
+        return False
+    command = arguments[0]
+    tail = arguments[1:]
+    if command == "reset" and "--hard" in tail:
+        return True
+    if command == "clean" and any(
+        option.startswith("-") and "f" in option
+        for option in tail
+    ):
+        return True
+    if command == "checkout" and "--" in tail:
+        return True
+    if command == "restore" and any(
+        option == "--source" or option.startswith("--source=")
+        for option in tail
+    ):
+        return True
+    if command == "branch" and "-D" in tail:
+        return True
+    if command == "stash" and tail and tail[0] in {"drop", "clear"}:
+        return True
+    if command == "push" and any(
+        option in {"--force", "-f"} or option.startswith("--force=")
+        for option in tail
+    ):
+        return True
+    return False
+
+
+def _segment_dangerous_reason(words, depth=0):
+    if depth > 6 or not words:
+        return None
+
+    command = _command_name(words[0])
+    if command == "sudo":
+        return "权限或系统级操作"
+
+    words = _unwrap_shell_words(words)
+    if not words:
+        return None
+    command = _command_name(words[0])
+    arguments = words[1:]
+
+    if command in SHELL_INTERPRETERS:
+        script = _shell_wrapper_script(words)
+        if script:
+            return _dangerous_shell_text(script, depth + 1)
+        return None
+    if command == "eval":
+        return _dangerous_shell_text(" ".join(arguments), depth + 1)
+
+    if command in {"rm", "rmdir", "unlink"}:
+        return "删除文件或目录"
+    if command == "find" and any(
+        argument == "-delete"
+        or (
+            argument == "-exec"
+            and index + 1 < len(arguments)
+            and _command_name(arguments[index + 1]) == "rm"
+        )
+        for index, argument in enumerate(arguments)
+    ):
+        return "删除文件或目录"
+
+    if command == "git" and _git_dangerous(arguments):
+        return "Git 破坏性操作"
+
+    if (
+        command in {"chmod", "chown"} and "-R" in arguments
+        or command in {"systemctl", "launchctl"}
+        and arguments
+        and arguments[0] in {"restart", "stop", "unload", "bootout"}
+        or command == "kill" and "-9" in arguments
+        or command == "pkill"
+    ):
+        return "权限或系统级操作"
+
+    if (
+        command in {"pip", "pip3"}
+        and arguments[:1] == ["install"]
+        or command in {"python", "python3"}
+        and arguments[:3] == ["-m", "pip", "install"]
+        or command in {"uv"}
+        and arguments[:2] == ["pip", "install"]
+        or command == "conda" and arguments[:1] == ["install"]
+        or command in {"npm", "pnpm", "yarn"}
+        and arguments[:1] in (["install"], ["add"])
+        or command in {"brew", "apt", "apt-get", "dnf", "yum"}
+        and arguments[:1] == ["install"]
+    ):
+        return "安装或升级依赖"
+
+    if (
+        command in {"drop", "truncate"}
+        and arguments[:1] in (["database"], ["table"])
+        or command == "delete" and arguments[:1] == ["from"]
+        or command == "alembic" and arguments[:1] == ["upgrade"]
+        or command == "prisma" and arguments[:1] == ["migrate"]
+        or command in {"django-admin", "rails"}
+        and arguments[:2] in (["migrate"], ["db:migrate"])
+    ):
+        return "数据库或迁移操作"
+
+    if (
+        command == "docker"
+        and arguments
+        and arguments[0] in {"rm", "rmi", "prune", "push"}
+        or command == "kubectl" and arguments[:1] == ["delete"]
+        or command == "terraform"
+        and arguments[:1] in (["apply"], ["destroy"])
+        or command in {"npm", "cargo", "docker"}
+        and arguments[:1] == ["publish"]
+    ):
+        return "部署、重启或容器破坏性操作"
+
+    return None
+
+
+def _remote_pipe_reason(segments):
+    previous = None
+    for segment in segments:
+        if segment.joiner in {"|", "|&"} and previous is not None:
+            previous_words = _unwrap_shell_words(
+                _segment_words(previous),
+                strip_sudo=True,
+            )
+            current_words = _unwrap_shell_words(
+                _segment_words(segment),
+                strip_sudo=True,
+            )
+            if previous_words and current_words:
+                previous_command = _command_name(previous_words[0])
+                current_command = _command_name(current_words[0])
+                if (
+                    previous_command in {"curl", "wget"}
+                    and current_command in SHELL_INTERPRETERS
+                ):
+                    return "远程脚本直接执行"
+        previous = segment
+    return None
+
+
+def _dangerous_shell_text(command, depth=0):
+    if depth > 6:
+        return None
+    segments = _shell_command_segments(command)
+    remote_reason = _remote_pipe_reason(segments)
+    if remote_reason:
+        return remote_reason
+    for segment in segments:
+        reason = _segment_dangerous_reason(
+            _segment_words(segment),
+            depth,
+        )
+        if reason:
+            return reason
+    return None
+
+
+def dangerous_command_reason(tool_name, tool_input):
+    """返回危险命令类别；只保存调用指纹，不把原命令写入审批状态。"""
+
+    command = shell_command_text(tool_name, tool_input)
+    if not command:
+        return None
+    return _dangerous_shell_text(command)
+
+
+def tool_writes_files(tool_name, tool_input):
+    """判断工具是否会修改工作区文件；只读搜索和测试命令不算写入。"""
+
+    normalized = re.sub(
+        r"[^a-z0-9_]+",
+        "_",
+        normalize_text(tool_name).lower(),
+    )
+    if normalized in WRITE_TOOL_NAMES:
+        return True
+
+    command = shell_command_text(tool_name, tool_input)
+    if not command:
+        return False
+    return _shell_text_writes_files(command)
+
+
+def emit_hook_context(event_name, context):
+    """输出 Codex 支持的 additionalContext JSON。"""
+
+    if not context:
+        return
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": event_name,
+            "additionalContext": context,
+        },
+    }, ensure_ascii=False), flush=True)
+
+
+def emit_pre_tool_deny(reason):
+    """安全降级为 deny；当前 Codex parser 不接受原生 ask。"""
+
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        },
+    }, ensure_ascii=False), flush=True)
+
+
+def approval_controls_snapshot(state, prompt):
+    """保存待审批门禁，避免创建新问题时丢失用户刚提交的批准。"""
+
+    if not is_explicit_task_approval(prompt):
+        return None
+
+    gate = state.get("task_gate")
+    approvals = state.get("tool_approval")
+    pending_keys = (
+        approvals.get("pending_keys", [])
+        if isinstance(approvals, dict)
+        else []
+    )
+    task_is_pending = (
+        isinstance(gate, dict)
+        and gate.get("status") == "awaiting_confirmation"
+    )
+    if not task_is_pending and not pending_keys:
+        return None
+
+    return {
+        "task_gate": dict(gate) if isinstance(gate, dict) else {},
+        "tool_approval": {
+            "pending_keys": [
+                item for item in pending_keys
+                if isinstance(item, str) and item
+            ],
+            "approved_keys": [
+                item for item in (
+                    approvals.get("approved_keys", [])
+                    if isinstance(approvals, dict)
+                    else []
+                )
+                if isinstance(item, str) and item
+            ],
+        },
+    }
+
+
+def restore_approval_controls(state, snapshot):
+    """把未完成审批恢复到 handle_user_prompt 可能新建的状态。"""
+
+    if not snapshot:
+        return
+    state["task_gate"] = dict(snapshot.get("task_gate") or {})
+    approvals = snapshot.get("tool_approval") or {}
+    state["tool_approval"] = {
+        "pending_keys": list(approvals.get("pending_keys") or []),
+        "approved_keys": list(approvals.get("approved_keys") or []),
+    }
+
+
+def _append_unique(values, value, limit):
+    result = [
+        item for item in (values or [])
+        if isinstance(item, str) and item and item != value
+    ]
+    if value:
+        result.append(value)
+    return result[-limit:]
+
+
+def update_task_gate_for_prompt(state, prompt):
+    """更新任务门禁并返回需要注入给主 Agent 的说明。"""
+
+    gate = state.get("task_gate")
+    if not isinstance(gate, dict):
+        gate = {}
+        state["task_gate"] = gate
+    gate.setdefault("status", "clear")
+    gate.setdefault("level", "small")
+    gate.setdefault("requires_confirmation", False)
+    gate.setdefault("reasons", [])
+
+    approvals = state.get("tool_approval")
+    if not isinstance(approvals, dict):
+        approvals = {}
+        state["tool_approval"] = approvals
+    approvals.setdefault("pending_keys", [])
+    approvals.setdefault("approved_keys", [])
+
+    pending_danger = [
+        item for item in approvals.get("pending_keys", [])
+        if isinstance(item, str) and item
+    ]
+    approving = is_explicit_task_approval(prompt)
+    task_was_pending = gate.get("status") == "awaiting_confirmation"
+
+    if approving and (task_was_pending or pending_danger):
+        if task_was_pending:
+            gate["status"] = "approved"
+            gate["requires_confirmation"] = True
+            gate["approved_at"] = iso_now()
+        for key in pending_danger:
+            approvals["approved_keys"] = _append_unique(
+                approvals.get("approved_keys", []),
+                key,
+                20,
+            )
+        approvals["pending_keys"] = []
+
+        scope = []
+        if task_was_pending:
+            scope.append("当前任务的方案")
+        if pending_danger:
+            scope.append("已展示的危险命令，且仅限完全相同的输入执行一次")
+        return (
+            "[AgentRelay 审批已记录]\n"
+            f"用户已明确批准：{'；'.join(scope)}。\n"
+            "大型任务可以继续执行已展示方案；危险工具重试时必须保持完全"
+            "相同的工具输入。不要把这次批准扩展到其他命令或新的修改范围。"
+        )
+
+    if gate.get("status") == "awaiting_confirmation":
+        reasons = "；".join(str(value) for value in gate.get("reasons", []))
+        if not reasons:
+            reasons = "本地规则判定任务范围较大"
+        return (
+            "[AgentRelay 任务门禁]\n"
+            f"本次请求需要先确认：{reasons}。\n"
+            "先读取并遵循 AgentRelay Skill，向用户展示简短的需求卡/确认卡，"
+            "说明修改范围、关键风险和验证方式。用户明确批准前，不要写入文件，"
+            "也不要调用 Fusion、Commander 或其他协作模型。只读检查可以继续。"
+        )
+
+    classification = classify_task_request(prompt)
+    if (
+        gate.get("status") == "approved"
+        and not classification["requires_confirmation"]
+    ):
+        return ""
+
+    gate["level"] = classification["level"]
+    gate["requires_confirmation"] = classification["requires_confirmation"]
+    gate["reasons"] = classification["reasons"]
+    gate["request_sha256"] = hashlib.sha256(
+        normalize_text(prompt).encode("utf-8")
+    ).hexdigest() if prompt else None
+    gate["requested_at"] = iso_now() if classification["requires_confirmation"] else None
+    gate["approved_at"] = None
+
+    if not classification["requires_confirmation"]:
+        gate["status"] = "clear"
+        gate["notified_sha256"] = None
+        return ""
+
+    gate["status"] = "awaiting_confirmation"
+    gate["notified_sha256"] = gate["request_sha256"]
+    reasons = "；".join(classification["reasons"])
+    return (
+        "[AgentRelay 任务门禁]\n"
+        f"本地规则先要求确认：{reasons}。\n"
+        "先读取并遵循 AgentRelay Skill，向用户展示简短的需求卡/确认卡，说明"
+        "修改范围、关键风险和验证方式。用户明确批准前，只允许读取、搜索和"
+        "安全测试，不要写入文件，也不要调用 Fusion、Commander 或其他协作模型。"
+    )
+
+
+def evaluate_pre_tool_gate(tool_name, tool_input, session_id):
+    """原子检查危险命令和任务门禁，返回是否放行及拒绝原因。"""
+
+    lock = acquire_lock()
+    try:
+        state = read_state(session_id=session_id)
+        approvals = state.get("tool_approval")
+        if not isinstance(approvals, dict):
+            approvals = {}
+            state["tool_approval"] = approvals
+        approvals.setdefault("pending_keys", [])
+        approvals.setdefault("approved_keys", [])
+
+        solution_key = build_solution_key(tool_name, tool_input)
+        danger_reason = dangerous_command_reason(tool_name, tool_input)
+        if danger_reason and solution_key:
+            approved = [
+                item for item in approvals.get("approved_keys", [])
+                if isinstance(item, str) and item
+            ]
+            if solution_key in approved:
+                approved.remove(solution_key)
+                approvals["approved_keys"] = approved
+                write_state(state, session_id=session_id)
+                return True, None
+
+            approvals["pending_keys"] = _append_unique(
+                approvals.get("pending_keys", []),
+                solution_key,
+                16,
+            )
+            write_state(state, session_id=session_id)
+            return False, (
+                "[AgentRelay 安全门禁]\n"
+                f"检测到高风险操作：{danger_reason}。\n"
+                "该工具调用尚未获得用户批准，已硬阻断。请向用户展示确认卡，"
+                "说明命令用途、影响范围和验证方式。用户明确批准后，只允许"
+                "完全相同的工具输入重试一次；修改命令或参数需要重新确认。"
+            )
+
+        gate = state.get("task_gate")
+        if not isinstance(gate, dict):
+            gate = {}
+        if (
+            gate.get("status") == "awaiting_confirmation"
+            and tool_writes_files(tool_name, tool_input)
+        ):
+            write_state(state, session_id=session_id)
+            return False, (
+                "[AgentRelay 任务门禁]\n"
+                "当前中大型任务尚未获得用户批准，不能写入代码或修改文件。\n"
+                "请先按 AgentRelay Skill 展示需求卡/确认卡；只读检查、搜索和"
+                "安全测试可以继续。"
+            )
+    finally:
+        release_lock(lock)
+
+    return True, None
+
+
 def contains_explicit_relay_candidate(text):
     """
     保守识别“现在调用外援”的行动句式。
@@ -1037,6 +2134,22 @@ def prompt_belongs_to_current_problem(state, prompt):
 
     if matches_any_pattern(prompt, PAUSE_PROBLEM_PATTERNS):
         return False
+
+    task_gate = state.get("task_gate")
+    waiting_for_task = (
+        isinstance(task_gate, dict)
+        and task_gate.get("status") == "awaiting_confirmation"
+    )
+    approvals = state.get("tool_approval")
+    waiting_for_tool = (
+        isinstance(approvals, dict)
+        and bool(approvals.get("pending_keys"))
+    )
+    if (
+        (waiting_for_task or waiting_for_tool)
+        and is_explicit_task_approval(prompt)
+    ):
+        return True
 
     if matches_any_pattern(prompt, NEW_PROBLEM_PATTERNS):
         return False
@@ -2920,7 +4033,7 @@ def handle_user_prompt(
     1. 没有当前问题 -> 创建新问题
     2. 当前问题已经解决 -> 创建新问题
     3. 当前问题继续对话 -> 更新 turn_count
-    4. 显式 AgentRelay 请求留给 Agent 做语义判断，Hook 不扫描关键词
+    4. 显式 AgentRelay 请求由 Hook 做保守候选预检，最终仍由 Agent 判断
     """
 
     prompt = normalize_text(prompt)
@@ -4288,19 +5401,43 @@ def handle_hook_event(
         )
 
     if event_name == "UserPromptSubmit":
-        return handle_user_prompt(
-            extract_prompt(data),
+        prompt = extract_prompt(data)
+        approval_controls = approval_controls_snapshot(
+            read_state(session_id=session_id),
+            prompt,
+        )
+        state = handle_user_prompt(
+            prompt,
             session_id=session_id,
         )
+        restore_approval_controls(state, approval_controls)
+        notice = update_task_gate_for_prompt(
+            state,
+            prompt,
+        )
+        write_state(state, session_id=session_id)
+        emit_hook_context("UserPromptSubmit", notice)
+        return state
 
     if event_name == "PreToolUse":
+        tool_name = extract_tool_name(
+            data
+        )
+        tool_input = extract_tool_input(
+            data
+        )
+        allowed, deny_reason = evaluate_pre_tool_gate(
+            tool_name,
+            tool_input,
+            session_id,
+        )
+        if not allowed:
+            emit_pre_tool_deny(deny_reason)
+            return read_state(session_id=session_id)
+
         return handle_pre_tool_use(
-            tool_name=extract_tool_name(
-                data
-            ),
-            tool_input=extract_tool_input(
-                data
-            ),
+            tool_name=tool_name,
+            tool_input=tool_input,
             tool_use_id=extract_tool_use_id(
                 data
             ),

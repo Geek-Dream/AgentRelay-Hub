@@ -86,11 +86,26 @@ fi
 # deciding whether an online Provider is worth calling.
 if [ -n "$TRACKER_OUTPUT" ] &&
     printf '%s' "$TRACKER_OUTPUT" |
-        EVENT_TYPE="$EVENT_TYPE" "$PYTHON" -c 'import json, os, sys; data=json.load(sys.stdin); event=os.environ.get("EVENT_TYPE"); output=data.get("hookSpecificOutput"); valid=(event == "Stop" and data.get("decision") == "block" and bool(str(data.get("reason") or "").strip())) or (event == "PostToolUse" and isinstance(output, dict) and output.get("hookEventName") == "PostToolUse" and isinstance(output.get("additionalContext"), str)); assert valid' \
+        EVENT_TYPE="$EVENT_TYPE" "$PYTHON" -c 'import json, os, sys
+data = json.load(sys.stdin)
+event = os.environ.get("EVENT_TYPE")
+if event == "Stop":
+    valid = data.get("decision") == "block" and bool(str(data.get("reason") or "").strip())
+else:
+    output = data.get("hookSpecificOutput")
+    expected = "PostToolUse" if event == "PostToolUseFailure" else event
+    valid = isinstance(output, dict) and output.get("hookEventName") == expected
+    if valid and event in ("PostToolUse", "PostToolUseFailure", "UserPromptSubmit"):
+        valid = bool(str(output.get("additionalContext") or "").strip())
+    elif valid and event == "PreToolUse":
+        valid = output.get("permissionDecision") == "deny" and bool(str(output.get("permissionDecisionReason") or "").strip())
+    else:
+        valid = False
+assert valid' \
         >/dev/null 2>>"$ERROR_LOG"; then
     printf '%s\n' "$TRACKER_OUTPUT"
 elif [ -n "$TRACKER_OUTPUT" ]; then
-    log_error "Tracker output was not valid PostToolUse hookSpecificOutput JSON"
+    log_error "Tracker output was not valid ${EVENT_TYPE} hook JSON"
 fi
 
 exit 0
