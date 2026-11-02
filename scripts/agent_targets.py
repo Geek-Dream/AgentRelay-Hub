@@ -376,15 +376,17 @@ def register_hermes(config_path: Path, venv_python: Path, shim_path: Path) -> bo
 
 
 PI_EXTENSION_TEMPLATE = """// AgentRelay 上下文注入扩展（由 AgentRelay 安装器生成，重新安装会覆盖此文件）
-import {{ spawnSync }} from "node:child_process";
+import {{ execFile, spawnSync }} from "node:child_process";
 import {{ existsSync }} from "node:fs";
 import {{ homedir }} from "node:os";
 import {{ dirname, join }} from "node:path";
 import {{ fileURLToPath }} from "node:url";
+import {{ Type }} from "typebox";
 
 const IS_WIN = process.platform === "win32";
 const HOME = homedir();
 const CODEX_HOME = process.env.CODEX_HOME || join(HOME, ".codex");
+const FUSION_TOOL_NAME = "agent_fusion_delegate";
 const VENV = join(CODEX_HOME, "agentrelay-env");
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const PI_AGENT_DIR = dirname(EXTENSION_DIR);
@@ -429,6 +431,18 @@ const PYTHON_CANDIDATES = [
   IS_WIN ? "py" : "python3",
   IS_WIN ? "python" : "python",
 ].filter(Boolean);
+
+const fusionDelegateSchema = Type.Object({{
+  task: Type.String({{
+    description: "Self-contained unit of work: what to do, and where.",
+  }}),
+  context: Type.Optional(Type.String({{
+    description: "Plan, constraints, and decisions the sidekick cannot see.",
+  }})),
+  expect: Type.Optional(Type.String({{
+    description: "What to report back.",
+  }})),
+}});
 
 let resolvedPython;
 
@@ -497,7 +511,15 @@ function fusion(args) {{
   if (!res) {{
     return {{ result: null, status: null, error: "未找到可用的 AgentRelay Python" }};
   }}
-  const stdout = String(res?.stdout ?? "").trim();
+  return {{
+    result: parseFusionOutput(res?.stdout),
+    status: res?.status ?? null,
+    error: String(res?.stderr ?? "").trim(),
+  }};
+}}
+
+function parseFusionOutput(output) {{
+  const stdout = String(output ?? "").trim();
   const line = stdout.split(/\\r?\\n/).find((item) => item.startsWith("AGENT_FUSION_RESULT="));
   let result = null;
   if (line) {{
@@ -507,44 +529,122 @@ function fusion(args) {{
       result = null;
     }}
   }}
-  return {{
-    result,
-    status: res?.status ?? null,
-    error: String(res?.stderr ?? "").trim(),
-  }};
+  return result;
+}}
+
+function runPythonAsync(script, args, options = {{}}) {{
+  return new Promise((resolve) => {{
+    if (!script || !existsSync(script)) {{
+      resolve({{ result: null, status: null, error: "Agent Fusion 文件未安装" }});
+      return;
+    }}
+    const python = pythonCommand();
+    if (!python) {{
+      resolve({{ result: null, status: null, error: "未找到可用的 AgentRelay Python" }});
+      return;
+    }}
+    try {{
+      execFile(
+        python,
+        [script, ...args],
+        {{
+          encoding: "utf-8",
+          maxBuffer: 32 * 1024 * 1024,
+          signal: options.signal,
+        }},
+        (error, stdout, stderr) => {{
+          const status = typeof error?.code === "number" ? error.code : (error ? 1 : 0);
+          resolve({{
+            result: parseFusionOutput(stdout),
+            status,
+            error: String(stderr || error?.message || "").trim(),
+            cancelled: error?.name === "AbortError",
+          }});
+        }},
+      );
+    }} catch (error) {{
+      resolve({{
+        result: null,
+        status: 1,
+        error: String(error?.message || error),
+      }});
+    }}
+  }});
+}}
+
+async function fusionAsync(args, signal) {{
+  if (!FUSION) {{
+    return {{ result: null, status: null, error: "Agent Fusion 文件未安装" }};
+  }}
+  return runPythonAsync(FUSION, args, {{ signal }});
 }}
 
 function fusionStatus() {{
   return fusion(["status", "--json"]).result?.state ?? null;
 }}
 
-function fusionGuidance(ctx) {{
-  const state = fusionStatus();
+function syncFusionTool(pi, state) {{
+  try {{
+    const active = pi.getActiveTools();
+    const present = active.includes(FUSION_TOOL_NAME);
+    const available = Boolean(state?.delegable && FUSION && pythonCommand());
+    if (available && !present) {{
+      pi.setActiveTools([...active, FUSION_TOOL_NAME]);
+    }} else if (!available && present) {{
+      pi.setActiveTools(active.filter((tool) => tool !== FUSION_TOOL_NAME));
+    }}
+  }} catch {{
+    // Extension tools may not be bound yet during initial loading.
+  }}
+}}
+
+function fusionGuidance(state) {{
   if (!state?.delegable) return "";
-  const python = pythonCommand();
-  if (!python || !FUSION) return "";
-  const provider = state.provider?.ref ?? state.provider_id ?? "";
   const toolMode = String(state.tool_mode || "readonly");
-  const sessionId = ctx?.sessionId ?? ctx?.session_id ?? "";
-  const workspace = ctx?.cwd ?? process.cwd();
-  const command = JSON.stringify(python) + " " + JSON.stringify(FUSION);
-  const delegate = command
-    + " delegate \\"the concrete task\\""
-    + " --workspace " + JSON.stringify(workspace)
-    + (sessionId ? " --session-id " + JSON.stringify(sessionId) : "")
-    + " --context \\"relevant context\\"";
   return [
-    "AgentRelay Fusion is available as a persistent sidekick with its own session and tool loop.",
-    "Selected provider: " + provider,
-    "Tool mode: " + toolMode + " (maximum " + String(state.max_steps || 8) + " model steps).",
+    "You are the main agent in a two-agent harness. `agent_fusion_delegate` hands work to AgentRelay Fusion, a persistent sidekick with its own tools and context. It cannot see this conversation, so put what it needs in `context`.",
+    "Take minimal actions yourself. Default to delegating and monitoring, and keep the decisions that matter: the plan, the interpretation of ambiguity, and the final review.",
+    "Use the sidekick before repeating bulky or isolated execution work locally: a test suite, a wide search, batch reading, a mechanical sweep, independent reproduction or verification, or a well-scoped implementation.",
+    "When the deliverable is the judgment itself, do the work yourself.",
+    "Delegate by how much output the work produces, not how many steps it takes: one command printing hundreds of lines belongs with the sidekick; a lookup answered in a line or two does not.",
     toolMode === "coding"
-      ? "WARNING: coding mode can modify workspace files and execute shell commands."
-      : "Readonly mode can inspect files, list directories, and search, but cannot write files or run commands.",
-    "Use Fusion for delegated investigation or execution while the main agent keeps planning and final review:",
-    delegate,
-    "The same workspace and session id reuse persistent context. Fusion cannot start another Fusion or Commander. If Commander starts, Fusion is preempted and writes a structured handoff; Commander child agents take over those leftovers before their main work, then send a scoped completed/failed receipt. The old Fusion task never resumes automatically.",
+      ? "The sidekick edits files and runs commands unattended; review its changes and verification before accepting them."
+      : "The sidekick is read-only: it investigates and verifies, while you apply every change.",
     "Continue local work if Fusion is unavailable or fails; do not block the main task.",
   ].join("\\n");
+}}
+
+function contextSessionId(ctx) {{
+  const managed = typeof ctx?.sessionManager?.getSessionId === "function"
+    ? ctx.sessionManager.getSessionId()
+    : "";
+  return String(
+    managed
+      || ctx?.sessionId
+      || ctx?.session_id
+      || process.env.PI_SESSION_ID
+      || ""
+  ).trim();
+}}
+
+function fusionDelegateContext(params) {{
+  const context = String(params?.context || "").trim();
+  const expect = String(params?.expect || "").trim();
+  if (!expect) return context;
+  const expected = "Expected return:\\n" + expect;
+  return context ? context + "\\n\\n" + expected : expected;
+}}
+
+function fusionEvidence(result) {{
+  const parts = ["Fusion evidence"];
+  if (result?.session_id) parts.push("session=" + String(result.session_id));
+  if (result?.tool_mode) parts.push("mode=" + String(result.tool_mode));
+  if (result?.steps !== undefined) parts.push("steps=" + String(result.steps));
+  if (Array.isArray(result?.tools_used)) {{
+    parts.push("tools_used=" + String(result.tools_used.length));
+  }}
+  if (result?.handoff_path) parts.push("handoff=" + String(result.handoff_path));
+  return parts.join("; ");
 }}
 
 const FUSION_REASONS = {{
@@ -788,22 +888,136 @@ async function fusionCommand(args, ctx) {{
 }}
 
 export default function agentRelay(pi) {{
+  pi.registerTool({{
+    name: FUSION_TOOL_NAME,
+    label: "Delegate to AgentRelay Fusion",
+    description:
+      "Hand a unit of execution work to AgentRelay Fusion, a persistent sidekick with its own tools and context.",
+    promptSnippet: "Delegate slow, bulky, or isolated execution work to AgentRelay Fusion.",
+    promptGuidelines: [
+      "Default to delegating and monitoring bulky or repetitive work: test suites, wide searches, batch reading, mechanical sweeps, independent reproduction or verification, and well-scoped implementations.",
+      "Keep the plan, interpretation of ambiguity, and final review in the main agent. When the judgment itself is the deliverable, do the work yourself.",
+      "Delegate by output volume, not step count. A command printing hundreds of lines belongs with the sidekick; a lookup answered in a line or two does not.",
+      "Fusion cannot see this conversation. Put the plan and constraints in `context`, state the expected return in `expect`, and review what comes back.",
+    ],
+    parameters: fusionDelegateSchema,
+    executionMode: "sequential",
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {{
+      const state = fusionStatus();
+      syncFusionTool(pi, state);
+      if (!state?.delegable) {{
+        const reason = state?.reason || "FUSION_UNAVAILABLE";
+        return {{
+          content: [{{
+            type: "text",
+            text: "AgentRelay Fusion is not available (" + fusionReasonText(state)
+              + "). Continue this task locally.",
+          }}],
+          details: {{ status: "skipped", reason, state }},
+        }};
+      }}
+
+      const task = String(params?.task || "").trim();
+      if (!task) {{
+        return {{
+          content: [{{
+            type: "text",
+            text: "Fusion delegation requires a non-empty task. Continue locally.",
+          }}],
+          details: {{ status: "skipped", reason: "FUSION_TASK_EMPTY", state }},
+        }};
+      }}
+
+      const workspace = String(ctx?.cwd || process.cwd());
+      const sessionId = contextSessionId(ctx);
+      const context = fusionDelegateContext(params);
+      const args = ["delegate", task, "--workspace", workspace];
+      if (sessionId) args.push("--session-id", sessionId);
+      args.push("--context", context);
+
+      onUpdate?.({{
+        content: [{{
+          type: "text",
+          text: "Delegating to AgentRelay Fusion"
+            + (state.provider?.ref ? " via " + String(state.provider.ref) : "")
+            + "...",
+        }}],
+        details: {{ status: "running", task, session_id: sessionId }},
+      }});
+
+      const outcome = await fusionAsync(args, signal);
+      const result = outcome.result;
+      if (!result) {{
+        const error = outcome.error || "AgentRelay Fusion returned no readable result";
+        return {{
+          content: [{{
+            type: "text",
+            text: "Fusion delegation failed: " + error + ". Continue this task locally.",
+          }}],
+          details: {{
+            status: "failed",
+            error,
+            exit_status: outcome.status,
+            cancelled: Boolean(outcome.cancelled),
+            state,
+          }},
+        }};
+      }}
+      if (result.status !== "success") {{
+        const error = String(result.message || result.error || "AgentRelay Fusion failed");
+        return {{
+          content: [{{
+            type: "text",
+            text: "Fusion delegation did not complete: " + error
+              + ". Continue this task locally.",
+          }}],
+          details: result,
+        }};
+      }}
+
+      const answer = String(result.answer || "").trim()
+        || "Fusion completed without a final text answer.";
+      return {{
+        content: [{{
+          type: "text",
+          text: answer + "\\n\\n[" + fusionEvidence(result) + "]",
+        }}],
+        details: result,
+      }};
+    }},
+  }});
+
   pi.registerCommand("agent-fusion", {{
     description: "管理 AgentRelay Fusion；无参数进入中文选择菜单",
     handler: fusionCommand,
   }});
 
+  pi.on("session_start", () => {{
+    syncFusionTool(pi, fusionStatus());
+  }});
+
   pi.on("before_agent_start", (event, ctx) => {{
+    const fusionState = fusionStatus();
+    syncFusionTool(pi, fusionState);
     const relayContent = relay({{
       hook_event_name: "UserPromptSubmit",
-      session_id: ctx?.sessionId ?? ctx?.session_id ?? "",
+      session_id: contextSessionId(ctx),
       cwd: ctx?.cwd ?? process.cwd(),
       prompt: event?.prompt ?? event?.message ?? "",
     }});
-    const fusionContent = fusionGuidance(ctx);
-    const content = [relayContent, fusionContent].filter(Boolean).join("\\n\\n");
-    if (!content) return;
-    return {{ message: {{ customType: "agent-relay", content, display: false }} }};
+    const fusionContent = fusionGuidance(fusionState);
+    const result = {{}};
+    if (fusionContent) {{
+      result.systemPrompt = String(event?.systemPrompt || "") + "\\n\\n" + fusionContent;
+    }}
+    if (relayContent) {{
+      result.message = {{
+        customType: "agent-relay",
+        content: relayContent,
+        display: false,
+      }};
+    }}
+    return Object.keys(result).length > 0 ? result : undefined;
   }});
 }}
 """

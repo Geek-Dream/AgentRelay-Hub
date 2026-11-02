@@ -17,6 +17,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 import agent_fusion  # noqa: E402
 import api_format_router  # noqa: E402
 import config_manager  # noqa: E402
+import config_web  # noqa: E402
 import fusion_mode  # noqa: E402
 import fusion_runner  # noqa: E402
 import research_commander  # noqa: E402
@@ -647,6 +648,17 @@ class FusionProviderCallTests(unittest.TestCase):
         self.assertEqual(payload["model"], "fusion-model")
         self.assertIn("input", payload)
         self.assertNotIn("messages", payload)
+
+
+class ConfigWebTests(unittest.TestCase):
+    def test_local_and_api_forms_warn_against_using_the_main_model(self):
+        page = config_web.build_config_page({})
+
+        self.assertIn("这里只配置独立的协作模型", page)
+        self.assertIn("这里配置的是协作模型，不是当前 Codex 主会话的主模型", page)
+        self.assertIn("请求只能排队或串行执行", page)
+        self.assertIn("可能出现超时", page)
+        self.assertGreaterEqual(page.count("仅填写协作模型"), 2)
 
 
 class FusionInstallTests(unittest.TestCase):

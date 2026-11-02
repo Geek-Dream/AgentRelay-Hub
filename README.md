@@ -1,278 +1,125 @@
-# AgentRelay 🔀
+<div align="center">
 
-**AgentRelay - A local AI relay layer for Codex CLI, connecting your coding agent with external expert models.**
+# 🔀 AgentRelay
 
-AgentRelay 是面向多种 coding Agent 的自动专家代理中继系统（Codex、Claude Code、Pi、Hermes 完整支持；
-OpenCode 仅 Skill）。它通过 Agent 的 Hook 观察问题处理过程，
-在重复失败或长时间调试时向 Agent 提供触发上下文，由 Agent 决定是否请求在线专家模型的
-第二意见。
+### 给你的 coding Agent 配一个会提醒、会找外援、还能分工协作的调度台
 
-当前内置的首个 Provider 示例为 **DeepSeek**。公开 Skill、Hook、Tracker 和命令均使用
-AgentRelay 通用命名；未来可以在同一中继流程下增加其他 Provider。
+**Codex · Claude Code · Kimi Code · Pi · Hermes 完整支持**
 
-AgentRelay 不把 Hook 直接连接到在线模型：Hook 根据重试次数、有效处理时间，或保守识别到的
-直接调用句式产生候选 `additionalContext`。Codex Agent 必须先核对当前问题、用户真实意图和
-求援价值，审核通过后才按 Skill 发起调用；Agent 的语义判断优先级高于 Hook 提醒。
+[🚀 快速开始](#-快速开始) · [✨ 能做什么](#-能做什么) · [🧭 怎么使用](#-怎么使用) · [🛠️ 实现原理](#️-它是怎么实现的)
 
-Tracker 先按 Codex Session 隔离，再在每个 Session 内按问题隔离。每个问题拥有自己的有效
-处理时间、权重、重试次数和 AgentRelay 触发状态；暂停、解决或切换问题后，旧问题只保留为
-历史快照，不再参与当前问题的触发判断。
+</div>
 
-权重有两个来源：有效处理时间，以及新问题是否在当前项目归档中保守命中了同一问题。
-每级只对应一个动作，不越级：
+---
 
-```text
-weight = 1   0 ~ 5 分钟，且未命中归档复发    正常处理
-weight = 2   5 ~ 15 分钟，或归档复发命中      先查本机归档，复用以前验证过的结论
-weight = 3   15 分钟及以上                    才进入“是否调用支援模型”的判断
-```
+## 🎯 这是什么东西？
 
-Tracker 创建新问题时会只读检查当前项目的本地归档；保守命中同一问题时把权重下限设为 2，
-让流程先进入归档查询。归档匹配不会把起始权重设为 3，也不会直接调用支援模型。
+AgentRelay 是一个运行在本机的 **Agent 外援与协作系统**。
 
-Hook 到达 `weight = 2` 时每个问题只发一次“本地归档提醒”，提示先运行
-`agent_relay_archive.py search` 查同类问题；到 `weight = 3`，或 `retry_count >= 3`
-时才发出候选求援提醒。两类提醒都只是候选材料，最终仍由 Agent 判断；归档匹配同样需要在当前
-环境重新验证，不能直接照抄旧结论。
+它不替代你的主 Agent，而是在主 Agent 卡住、任务太耗时，或者你明确要求外援时，提供：
 
-候选求援提醒按升级阶梯重发，避免模型放弃后陷入死循环却无人介入：
+- 🔔 重复失败和耗时过长提醒
+- 🌐 网页、API、本地模型三类外援
+- 🗂️ 本地经验归档
+- 🖼️ 图片识别中继
+- ⚡ 可并行工作的 AgentFusion
+- 👑 最多 1 到 5 个隔离子 Agent 的 Commander
+
+可以把它理解成：
 
 ```text
-第 1 次提醒（retry >= 3 或有效时间 >= 15 分钟） -> 等待 10 分钟
-第 2 次提醒（第 1 次被放弃）                     -> 等待 5 分钟
-第 3 次提醒（最后一次）                          -> 等待 5 分钟
-强制执行（第 3 次仍无响应）                      -> Hook 直接代为调用
+主 Agent = 项目负责人
+Hook     = 观察员，发现卡住后提醒
+Skill    = 协作规则，决定该不该找外援
+Fusion   = 独立副手，适合调查、批量阅读和局部实现
+Commander = 临时项目组，按任务拆分多个隔离 Agent
 ```
 
-“放弃”指问题仍未解决且未进入外援协作；期间重试回落（模型已换方向取得进展）、问题
-解决或已发起协作都会中断阶梯。强制执行由 Hook 后台启动 `agent_relay.py`（Playwright
-打开浏览器调用在线模型），结果就绪后自动注入后续上下文；每个问题只强制执行一次。
+> 🧠 **一句话记住：**<br>
+> 主 Agent 负责判断和验收，AgentRelay 负责在合适的时候找到额外帮手。
 
-### Commander 与模型配置 🧠
+---
 
-Commander 的默认 Worker 是当前配置路径指向的 `codex` CLI，通过多个隔离的
-`codex exec` 子进程协同工作，不要求 DeepSeek、本地 9B 或 GPT API。它会按任务动态规划
-1 到 5 个角色，例如前端样式、前端脚本、后端数据库、后端代码和 Git 审计；只需要一个角色
-时不会强行启动三个。每个角色使用独立 workspace，结果由主 Agent 审查，未经确认卡批准不会
-合并回用户工作区。
+## ✨ 能做什么？
 
-某个角色提前完成后，如果另一个角色仍在处理、超时或触发升级条件，Commander 可以让已完成
-的角色再跑一轮协助任务。协助者保留自己的原角色和原结果，只提交分析、验证或补充修改；困难
-角色仍是主力，不会被协助者替代。
+### 🎁 三个核心能力
 
-显式运行示例：
+| 能力 | 一句话说明 | 你什么时候会用到 |
+|---|---|---|
+| 🔔 **AgentRelay** | 观察 Agent 会话，在失败、超时或你明确要求时给出外援提醒 | 同一个问题反复失败、改了半小时还没进展 |
+| 🖼️ **AgentImage** | 让支持识图的在线或本地模型先描述图片 | 当前模型不能看图 |
+| ⚡ **AgentFusion** | 启动独立持久会话，执行调查、批量阅读、独立复现或局部实现 | 日志很多、搜索范围很大、需要一个独立副手 |
 
-```bash
-PYTHONPATH=. python3 scripts/agentrelay_console.py commander task-1 \
-  "大型跨模块重构" --workspace /path/to/project --max-agents 5
-```
+### 👑 AgentRelay 里还有 Commander
 
-真实子 Agent 执行前，必须先通过 `task create` 生成确认卡，再执行
-`task approve task-1`；未批准时只能使用 `--offline-plan` 查看角色规划。
+Commander 适合跨模块或高风险任务：
 
-线上网页模型或本地模型至少配置一个后，Commander 才会自动开启；用户可以在网页配置中心手动关闭。
-DeepSeek、本地模型和 GPT API 是可选的角色 Provider；配置后可以按角色覆盖当前 Codex，
-但没有这些 Provider 不会使 Commander 退化为空任务。
+- 👥 按任务实际需要启动 1 到 5 个隔离子 Agent
+- 🧩 前端、后端、数据库、测试、Git 审计可以分别处理
+- 🔒 每个 Agent 使用隔离 workspace
+- 🙅 未经确认不会直接合并回你的工作区
+- 🔁 某个角色提前完成时，可以继续协助其他角色
 
-Provider 按接入方式分类，而不是按品牌分类：任意网页会话模型都属于 `web`，任意
-OpenAI-compatible 或中转站接口都属于 `api`，本地服务属于 `local`。DeepSeek、千问、Kimi、
-GPT 只是 Provider ID 的示例。新增网页模型仍需为该网站提供真实浏览器 Adapter；仅登记名称
-不会伪造可用性。新增 API 模型可设置 `AGENTRELAY_API_PROVIDERS_JSON`，例如：
+### 🌐 三种外援 Provider
 
-```json
-[{"id":"kimi-api","endpoint":"https://gateway.example/v1","api_key_env":"KIMI_API_KEY","model":"model-name"}]
-```
+| 类型 | 适合什么 | 例子 |
+|---|---|---|
+| 🌐 `web` | 已有网页账号，希望直接使用网页模型 | DeepSeek、千问、Kimi |
+| 🔌 `api` | 有 OpenAI 兼容 API 或中转接口 | Kimi API、其他兼容网关 |
+| 💻 `local` | 希望数据留在本机 | Ollama、LM Studio、vLLM、llama.cpp |
 
-Commander 子 Agent 的 Provider 规则：同一个网页会话或本地模型进程全局一次只允许一个角色
-使用；角色第一次选择的网页 Provider 会持续复用其会话。子 Agent 可以通过受控入口使用网页
-模型或本地模型，但不能使用 GPT/API Provider，也不能递归启动 Commander。Cookie 失效或代理
-不可用会熔断 Provider，并最多提示三次登录脚本/代理端口；重新认证后，主 Commander 按已记录
-质量决定恢复原 Provider 还是继续临时替代 Provider。这里的比较不会另造无关测试题：会复用
-当前真实任务的原始问题（例如“下载并配置 Redis”），分别取得两个 Provider 对这个任务的回答，
-再由主 Agent 判断谁的方案更准确、更完整、更能执行。
+> ⚠️ **配置提醒：**<br>
+> 配置中心里的 `local` 和 `api` 是**协作模型**，不是正在驱动 Codex 的主模型。<br>
+> 不要把主模型本身，或者与主模型共用同一个服务、endpoint、API 的模型填进去。<br>
+> 否则两边会争用同一个资源，出现排队、串行、超时，也会失去独立复核的价值。
 
-Provider 选择会按角色记忆：前端角色之前验证过 DeepSeek，后续前端任务仍优先复用它；如果它
-Cookie 失效，Commander 会在提醒用户的同时使用可用备用 Provider。恢复登录后，可以用同一道
-真实问题分别重新取得两个 Provider 的回答，由主 Agent 按准确性、完整性、可执行性和废话多少进行比较，
-把两份回答、分数、最终选择和备用期间的上下文摘要一起记下来；不会为了比较额外制造“测试模型”问题。
-如果备用 Provider 当时不可用，会保留熔断期间对同一问题的回答并记录失败原因。多个 Agent 同时需要本地模型时会排队，
-最多只留一个等待者；如果线上 Provider 有空闲，会立即使用线上 Provider，不会傻等本地队列。
-只有所有候选都忙时才进入等待位，超时后才失败或切换，不会并发启动多个本地模型进程。
+---
 
-每个子 Agent 的 `retry_count` 和有效处理时间独立追踪，不与其他角色或父任务相加。达到自己的
-三次重试或 15 分钟阈值时，Commander 只收到一次“需要决策、子 Agent 继续工作”的通知；外部
-Provider 失败也不会暂停其本地工作。
+## 🚦 什么时候会触发？
 
-Commander 完成子任务后，主审查官会读取每个隔离 workspace 的基线差异、报告和验证状态，生成
-合并计划、冲突列表、修改文件清单和进度摘要。主工作区不会自动写入；批准生成的合并确认卡后，
-才执行逐文件合并。命令示例：
+AgentRelay 不会每个问题都弹外援，也不会直接替你调用模型。
 
-```bash
-python3 scripts/agentrelay_console.py commander-merge task-1 \
-  --workspace /path/to/project --runtime-root .agentrelay/commander
-```
+| 触发场景 | 系统会做什么 |
+|---|---|
+| 🔁 同一问题重复失败 | 生成“可以找外援”的候选提醒 |
+| ⏱️ 单问题有效处理时间过长 | 达到门槛后生成候选提醒 |
+| 🗣️ 你明确说“现在调用 DeepSeek”“让 Fusion 看一下” | 进入显式协作流程 |
+| 🗂️ 本地归档命中相似问题 | 先推荐历史结论，不直接调用在线模型 |
 
-如果主工作区在审查期间被用户修改，或两个角色对同一文件给出不同内容，合并会暂停并报告冲突，
-不会覆盖用户文件。
+Hook 只负责观察和提醒，真正的调用由 Agent 结合当前上下文决定。
 
-工作流分为三档：单一低风险修改直接处理；多个普通修改点生成一张汇总执行确认卡；跨模块或
-高风险任务先显示需求卡，用户确认需求后再显示执行卡。若评估建议 Commander，第二张卡会改为
-“启用审查官模式”，未批准前不会启动子 Agent。CLI 默认使用文本确认；`--json` 输出可供支持
-勾选项/自定义输入的宿主界面渲染，普通终端仍安全回退为默认确认卡。
+### ⚡ AgentFusion 的触发方式
 
-这三档怎么分不由固定表格决定：用户指派工作后，由当前任务的审查官（主 Agent，进入 Commander
-后是主审查官）根据真实范围判断——要动几个文件几个模块、是否跨前端后端数据库消息队列、是否
-要装依赖迁移数据重启服务、失败好不好回滚。判断权在审查官，不在用户有没有说“重构”这类字眼；
-拿不准时按低一档处理并说明理由。需要启用 Commander 时默认仍先征求用户确认。
+Fusion 默认开启，但 **不会自动猜 Provider**：
 
-任务完成后会写入本地归档，归档永远和 Skill 放在同一个文件夹：
+- ✅ 已配置可用 Provider，且状态为 `delegable=true`：主 Agent 可以委派
+- ⏸️ 未配置 Provider、Fusion 已关闭或正在忙：立即跳过，不等待、不探网
+- 👑 Commander 运行时：Fusion 强制暂停，避免两个调度器互相抢占
 
-```text
-<skill>/归档/<项目名>/已完成任务.jsonl
-<skill>/归档/<项目名>/归档.md
-```
+Fusion 适合“输出很多、边界清楚、可以独立完成”的工作，例如：
 
-例如项目叫 `de` 就是 `<skill>/归档/de/`。模型判断任务已完成并通过验证时自己回写；用户说
-“归档”“记录一下”时也会回写并标记为用户要求。未完成、已回滚、被取消的任务按对应状态记录，
-不会写成“已完成”。归档只保存在 Skill 目录内，不写进用户项目仓库，也不保存 Cookie、密钥、
-登录状态或原始对话。命令：
+- 跑完整测试并汇总数百行日志
+- 跨多个文件搜索、批量阅读和整理
+- 独立复现一个 bug
+- 按主 Agent 已确定的方案修改局部代码
 
-```bash
-python3 scripts/agent_relay_archive.py add --title "MQ 换 Kafka" --project de \
-  --summary "生产者消费者切到 Kafka，测试通过" --file src/MqSender.java
-python3 scripts/agent_relay_archive.py list --project de
-python3 scripts/agent_relay_archive.py search Kafka --project de
-python3 scripts/agent_relay_archive.py projects
-```
+需求仍然模糊、涉及密钥、必须由主 Agent 做最终判断的工作，不会交给 Fusion。
 
-## 架构 🏗️
+---
 
-```text
-Codex
-  ↓
-Hook
-  ↓
-Tracker
-  ↓
-additionalContext
-  ↓
-AgentRelay Skill
-  ↓
-Provider Adapter
-  ↓
-DeepSeek（当前示例）
-```
+## 🚀 快速开始
 
-Hook 的候选提醒依据可机械验证的重复失败和有效处理时间，也会保守预筛选“现在调用
-DeepSeek”“你触发一下 DeepSeek”“`$agent-relay` 帮我测试”等行动句式，因此显式测试请求
-不受权重和重试门槛限制。单纯出现 DeepSeek/AgentRelay 关键词不会提醒；讨论规则、引用日志、
-举例、假设和否定表达也会被排除。用户是否真的要求当前调用最终由 Agent 结合完整语境判断。
+### 1️⃣ 准备环境
 
-当前问题首次求援成功后进入连续外援协作：Agent 应自行实施并验证建议；如果失败、出现同一
-目标下的新错误，或在线模型要求更多信息，Agent 收集新事实后可以直接继续追问，不必重新等待
-权重或重试门槛。问题解决、暂停、放弃或切换后，该问题的外援资格结束，新问题重新独立判定。
+需要：
 
-## Provider 兼容性
+- 🐍 Python 3.10 或更高版本
+- 📦 Python `venv`
+- 🤖 至少一个支持的 Agent，例如 Codex CLI
+- 🌐 首次安装时可访问 PyPI 和 Playwright 下载源
+- 🔐 对应网页、API 或本地模型的访问权限
 
-AgentRelay 的 Hook、Tracker、触发状态和 Skill 是模型无关的。DeepSeek 只是当前已经实现并
-可用的首个 Provider 适配器；后续可以增加千问、OpenAI、Grok 或其他在线模型，而不改变
-AgentRelay 的核心触发链路。
-
-对话模式由用户在配置中心按网站真实能力勾选，不是按品牌名写死的：
-
-```text
-混合模式     极速和专家合并成一套会话，只有一个识图开关（DeepSeek 网页就是这种）
-极速 + 专家  两套独立会话
-识图能力     每个模式单独勾选，例如 kimi 可能只有极速能发图片、专家不能
-```
-
-默认路由规则：同时启用极速和专家时默认走极速；同一个问题的第二次尝试且本次不带图片时自动
-升级专家；用户说“问专家模式”走专家，说“快速问一下”走极速。指定模式不支持图片时脚本会自动
-换到支持图片的模式，并打印 `[模式]` 回退说明，Agent 必须如实转述。`-m 1`、`-m 2`、
-`-m flash|expert|hybrid` 和 `--attempt 2` 都可以显式指定。只配置混合模式的网站（例如没有
-极速/专家区分的 GPT 网页）不勾识图就不能发图片。
-
-AgentRelay 会优先使用持久化的 `session_id/href`；首次运行或绑定失效时扫描左侧对话栏，兼容
-旧的“极速/图片/专家/思考”标题。仍未找到时发送本次真实问题创建新会话，并按配置重命名后绑定。
-
-通用 Provider Adapter 仍保留独立的会话作用域和能力接口。未来接入千问等网站时，只需新增
-对应 Adapter、Provider 配置及侧栏链接解析规则；不需要修改主调用流程。
-
-## AgentImage 图片识别中继 🖼️
-
-AgentImage（`agent-image`）是 AgentRelay 的图片识别中继，和 agent-relay 平级的第二个
-Skill。本地 Agent 模型不支持图片识别时，用户输入 `agent-image`，Agent 会把图片文件发给
-当前已配置、支持识图的在线模型（默认 DeepSeek），把拿到的详细描述转述给用户。
-纯用户主动触发，不做 Hook 集成。
-
-```bash
-python3 scripts/agent_image.py /path/to/image1.png /path/to/image2.jpg
-```
-
-Provider 选择顺序：
-
-```text
-1. --provider 显式指定且支持识图的网页 Provider
-2. 默认网页 Provider（支持识图时，例如 DeepSeek 混合模式）
-3. 任意已启用且支持识图的网页 Provider
-4. 安装时标记 vision=true 的本地模型（OpenAI 兼容接口直接调用）
-5. 都不支持：打印说明并正常退出，由调用方 Agent 自行处理
-```
-
-能力约定：
-
-- **网页模型**：识图能力按站点真实能力在配置中心按模式勾选。DeepSeek 混合模式默认支持
-  图片；GPT 网页版识图限时限量，默认按不支持处理，显式勾选后才启用。
-- **本地模型**：install.py 配置本地模型时按模型名保守猜测并询问用户是否支持图片识别，
-  结果以 `vision` 字段保存；未标记的本地模型不会被 agent-image 调用。
-- 调用失败或未配置时脚本始终正常退出（exit 0）并说明原因，图片不会被静默丢弃或误发。
-
-## AgentFusion 持久 sidekick ⚡
-
-AgentFusion（`agent-fusion`）默认开启，但不会自动选择默认 Provider。只有用户明确配置了
-`web`、`local` 或 `api` Provider 后才会进入可调用状态；未配置时本地状态检查立即返回，
-不探网、不检查登录、不打开浏览器，也不让主模型等待。Fusion 默认使用 `readonly` 工具模式，
-拥有独立持久会话和多步工具循环，可以和主 Agent 并行处理调查、批量阅读、局部实现等委派工作。
-
-Pi 中直接输入 `/agent-fusion` 会进入中文选择菜单，每个选项都带有用途说明。显式命令仍然
-保留，便于脚本化和高级操作。Codex 中可用 `$agent-fusion` 提及本 Skill：
-
-```text
-/agent-fusion
-/agent-fusion status
-/agent-fusion on
-/agent-fusion off
-/agent-fusion mode readonly
-/agent-fusion mode coding
-/agent-fusion reset
-/agent-fusion provider web:deepseek-web
-/agent-fusion provider local:local-llm
-/agent-fusion provider api:kimi-api
-/agent-fusion provider none
-```
-
-Fusion 的 `readonly` 模式只能使用 `read_file`、`list_files` 和 `grep`，不能写文件或执行
-命令。`local`/`api` Provider 可切换到 `coding`，切换前必须确认，因为该模式允许 Fusion
-修改工作区文件并执行 shell 命令；网页 Provider 不具备工具协议，只能保持文本只读协作。
-持久会话按 workspace 与 session ID 隔离，Provider 或工具模式变化时会自动重置，避免污染
-上下文。主 Agent 可以多次向同一 Fusion 会话委派连续工作。
-
-Commander 启动后拥有最高优先级：无论 Fusion 的保存开关是开启还是关闭，主流程和 Commander
-的全部子 Agent 都不能调用 Fusion。正在运行的 Fusion 会在下一次模型或工具调用前停住，
-生成交接快照并关闭旧任务。Commander 子 Agent 会先接手 Fusion 遗留工作，再执行 Commander
-主任务；结束时按 Fusion 会话返回明确回执，逐项标记完成或失败，并记录报告、改动文件和可用
-验证证据。旧任务不会自动恢复，Fusion 等待主 Agent 的下一次明确委派。这个互斥只影响运行态，
-不会改写用户保存的 on/off 偏好。
-
-## Requirements 🛠️
-
-- Codex CLI（当前稳定版本）
-- Python >= 3.10
-- Python `venv` 支持（Ubuntu/Debian 通常由 `python3-venv` 提供）
-- 可访问 PyPI 和 Playwright 浏览器下载源的网络
-- 当前 Provider 对应的账号（现阶段为 DeepSeek account）
-
-## 安装
+### 2️⃣ 安装
 
 ```bash
 git clone git@github.com:Geek-Dream/AgentRelay-Hub.git
@@ -280,223 +127,306 @@ cd AgentRelay-Hub
 python3 install.py
 ```
 
-直接在终端运行 `python3 install.py`，打开后**会立即在终端弹出安装目标清单**：每个 Agent
-显示 `[x]` 勾选框、“本机已装/未装”和“已接入/未接入 AgentRelay”状态；输入编号切换勾选。
-确认方式两种：**回车** = 按当前勾选安装（已接入过的目标会再问一层：全部重装（默认，
-覆盖现有 Hook 和 Skill）、跳过已接入的、或逐个选择——跳过的目标不会被覆盖）并打开网页配置中心；
-**输入 0 或 web** = 跳过一切安装提示，直接打开网页配置中心。选完后安装器会为每个目标安装
-Skill、注册 Hook，并立即逐项验证（Skill 就位、Hook 配置已注册、Hook 干跑一个合成事件、
-Tracker 可读），验证结果直接打印在终端。随后自动打开网页配置中心，完成模型登录等后续配置；
-网页总览页的“安装目标 Agent”卡片也可以随时补装或调整目标。非交互环境（脚本/CI）可用
-`python3 install.py --targets codex,claude,pi,hermes` 跳过提示。Codex 始终安装。
-
-| Agent | 支持级别 | Hook 注册位置 |
-|---|---|---|
-| Codex CLI | 完整（Hook 计时、提醒、上下文注入） | `$CODEX_HOME/hooks.json` |
-| Claude Code | 完整 | `~/.claude/settings.json` 的 hooks 块 |
-| Kimi Code | 完整（提醒经 Stop 事件注入，失败重试经 PostToolUseFailure 计数） | `$KIMI_CODE_HOME/config.toml` 的 `[[hooks]]` |
-| Pi | 完整 | `~/.pi/agent/extensions/agent-relay.ts` |
-| Hermes | 完整（首次触发 Hook 时需在终端确认 consent） | `~/.hermes/config.yaml` 的 hooks 块 |
-| OpenCode | 仅 Skill（OpenCode 没有 prompt 提交时注入上下文的 Hook 事件，自动提醒不可用） | 无 |
-| deepseek-cli | 不支持（没有任何 Hook、插件或 Skill 机制） | 无 |
-
-配置中心页面分为总览、Commander、线上模型、
-本地模型、API 模型和安全配置几个区域，可以初始化环境、检查 Codex/Skill/Hook、扫描本地服务、增删启停多个 Provider、设置默认
-网页模型、测试接口，以及配置网页模型的混合/极速/专家会话名称和图片能力。会话名会由别名自动生成，例如 `qianwen` 会生成
-`AgentRelay-Qianwen-Flash` 和 `AgentRelay-Qianwen-Expert`；混合模式使用一套统一会话，名称默认为
-`AgentRelay-品牌名`（例如 `AgentRelay-DeepSeek`），同时处理极速和专家提问。网页登录完成后，关闭登录的对话标签页即可自动加密保存 Cookie，配置页会显示“登录状态已保存”。本地扫描支持 Ollama、LM Studio、vLLM 和 llama.cpp。配置完成后点击“完成并关闭”，
-本地配置网页服务会立即停止——**AgentRelay 没有任何后台常驻进程**：Hook 只在对应 Agent 会话运行时被
-Agent 自身拉起执行，在线模型也只在被调用那一刻临时打开浏览器。需要纯终端入口时运行 `python3 install.py --menu`。
-
-网页配置中心是手动 Provider 管理平台：已保存 Provider 会明确显示“已经可以自动对话”或“只保存了网页登录状态，暂时不能自动对话”，
-不会因为填了网址就假装千问、Kimi 等网站已经接通。DeepSeek 当前已内置自动操作规则，默认作为混合模型，支持极速、
-专家和图片；其他网页 Provider 通过通用兜底适配器尝试自动对话，遇到人机验证会提示人工处理。
-三类 Provider 都可以跳过，跳过后仍可使用离线基础模式。
-旧版只保存 DeepSeek 登录状态的安装会在首次打开配置中心或运行 Skill 时自动迁移到统一加密 Provider 配置；
-迁移成功后会删除旧明文状态文件，不需要重新登录。
-
-安装器支持 `CODEX_HOME`；未设置时使用 `$HOME/.codex`（虚拟环境、Tracker 状态和加密配置
-始终保存在这个目录，多目标共享）。它会：
-
-- 安装 Hook 到 `$CODEX_HOME/hooks/`
-- 安装 Skill 和脚本到 `$CODEX_HOME/skills/agent-relay/`，并按选择复制到其他 Agent 的
-  skills 目录（如 `~/.claude/skills/agent-relay`）；同时安装平级的 `agent-image` 和
-  `agent-fusion` Skill
-- 向所选 Agent 注册 Hook：Codex 合并 `hooks.json`，Claude 合并 `~/.claude/settings.json`，
-  Hermes 合并 `~/.hermes/config.yaml`，Pi 生成 `~/.pi/agent/extensions/agent-relay.ts`
-- 创建独立环境 `$CODEX_HOME/agentrelay-env/`
-- 在独立环境中自动安装 requirements 和完整 Chromium
-- 保留用户已有文件
-- 备份并原子合并现有 `hooks.json` / `settings.json` / `config.yaml`，不删除任何已有 Hook
-- 检查 Codex CLI、Python、虚拟环境、Playwright 和 Chromium
-
-Pi 扩展文件不会写入当前用户的绝对路径。运行时优先读取 `AGENTRELAY_PYTHON`、
-`AGENTRELAY_SHIM`、`AGENTRELAY_FUSION`，随后从扩展所在目录和 `CODEX_HOME` 查找 Skill；
-独立 Python 在 macOS/Linux 使用 `agentrelay-env/bin/python`，在 Windows 使用
-`agentrelay-env\Scripts\python.exe`，缺失时才依次尝试系统的 `python3`/`python` 或 `py`。
-因此同一个 Pi Skill 目录可以跨平台使用，不依赖 `wl` 或某台 Mac 的用户目录。
-
-Provider、Commander 和队列设置会保存到 `$CODEX_HOME/skills/agent-relay/config/` 下的加密文件，
-密钥也只在该目录保存并限制当前用户读取。API Key 和网页登录状态不会写进项目目录、日志或 Git；
-安装器也不会把它们打印出来。运行时会自动读取本地配置，显式环境变量优先。
-
-安装器不会向 Homebrew、系统 Python 或其他全局环境执行 `pip install`，因此不需要
-`--break-system-packages`，也不会触发 PEP 668 的 externally-managed-environment 限制。
-
-## 首次登录
-
-安装后运行：
-
-```bash
-"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" \
-  "${CODEX_HOME:-$HOME/.codex}/skills/agent-relay/scripts/agent_relay_login.py"
-```
-
-Windows PowerShell：
+Windows 可以使用：
 
 ```powershell
-$CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME ".codex" }
-& "$CodexHome\agentrelay-env\Scripts\python.exe" `
-  "$CodexHome\skills\agent-relay\scripts\agent_relay_login.py"
+py install.py
 ```
 
-脚本会打开一个可见的 Chromium 浏览器。请在浏览器中手动登录 DeepSeek，并自行完成人机
-验证。登录状态会保存到：
+安装器会：
+
+- 📦 安装 `agent-relay`、`agent-image`、`agent-fusion`
+- 🐍 创建独立环境 `$CODEX_HOME/agentrelay-env/`
+- 🌐 安装 Playwright Chromium
+- 🔐 加密保存 Provider 配置
+- 🔗 注册 Agent Hook
+- ✅ 自动检查 Skill、Hook、Tracker 和合成事件
+
+安装完成后，重启正在使用的 Agent，让 Hook 重新加载。
+
+### 3️⃣ 打开网页配置中心
+
+```bash
+python3 install.py --menu
+```
+
+选择“打开本地网页配置”，或者安装时直接输入：
 
 ```text
-$CODEX_HOME/skills/agent-relay/agent_relay_login_state.json.enc
+0
 ```
 
-登录需要人工浏览器认证，因为 DeepSeek CAPTCHA 不能也不会被 AgentRelay 绕过。请勿将
-登录状态文件、Cookie 或浏览器数据提交到版本库。
-
-菜单中的“自定义网页模型”可以打开用户提供的 HTTPS 登录地址并把会话状态加密保存；但只有已经
-实现浏览器 Adapter 的网页 Provider 才能直接对话。千问、Kimi 和其他自定义网站目前会完成安全
-登录状态保存并提示适配器状态，不会伪造成已经可调用。
-
-> AgentRelay uses a user-provided authenticated browser session. It does not bypass CAPTCHA or automate credential input.
-
-登录完成后重启 Codex，使其重新加载 `hooks.json`。
-
-## 安装验证
-
-点击“应用并验证”后，安装器会对每个选中的 Agent 自动执行并展示结果：Skill 文件就位、
-Hook 已写入该 Agent 的配置文件、Hook 干跑一个合成事件确认命令能被正常拉起、Tracker
-`status` 可读。终端菜单模式同样在安装后打印逐项验证结果。
-
-安装完成、登录之前，Skill 目录应包含：
+也可以输入：
 
 ```text
-SKILL.md
-scripts/agent_relay.py
-scripts/agent_relay_login.py
+web
 ```
 
-用户完成首次浏览器登录后，才会生成 `agent_relay_login_state.json`。可以在不调用在线模型的
-情况下检查 Tracker：
+在配置中心依次完成：
+
+1. 🌐 添加网页、本地或 API 模型
+2. 🔑 网页模型点击“打开网页登录”，手动完成登录
+3. 🧪 点击“测试”确认模型可用
+4. 👑 按需启用 Commander
+5. ✅ 点击“完成并关闭”
+
+> 🔒 登录状态和 API Key 只保存在本机加密目录。<br>
+> 🚫 AgentRelay 不会绕过 CAPTCHA，也不会自动填写账号密码。
+
+---
+
+## 🧭 怎么使用？
+
+### 💬 日常使用：不用记命令
+
+安装并配置 Provider 后，继续正常使用 Codex、Claude Code、Kimi Code、Pi 或 Hermes 即可。
+
+当问题重复失败、耗时过长，或者你明确说出：
+
+```text
+现在调用 DeepSeek
+请让 Fusion 独立检查这个问题
+用 AgentRelay 查一下本地归档
+```
+
+Agent 会结合 Hook 提醒和 Skill 规则决定是否调用外援。
+
+### ⚡ 使用 AgentFusion
+
+Pi 中直接输入：
+
+```text
+/agent-fusion
+```
+
+会打开中文选择菜单，可以开关 Fusion、选择 Provider、切换 `readonly` / `coding` 模式和重置会话。
+
+其他 Agent 通常只需自然语言提出委派需求，例如：
+
+```text
+请先检查 AgentFusion 状态。
+如果 delegable=true，就把测试日志调查交给 Fusion；
+如果不可用，不要等待，继续本地处理。
+```
+
+如果要直接使用 CLI：
+
+```bash
+PYTHON="${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python"
+FUSION="${CODEX_HOME:-$HOME/.codex}/skills/agent-fusion/scripts/agent_fusion.py"
+
+"$PYTHON" "$FUSION" status --json
+"$PYTHON" "$FUSION" provider web:deepseek-web
+"$PYTHON" "$FUSION" mode readonly
+```
+
+需要允许 Fusion 写文件和执行命令时：
+
+```bash
+"$PYTHON" "$FUSION" mode coding --confirm-coding
+```
+
+> 🛡️ `coding` 模式会真实修改工作区并执行命令。只在任务边界清楚、你明确同意时使用。
+
+### 🖼️ 使用 AgentImage
+
+当前模型不能识图时，可以显式调用：
+
+```bash
+python3 scripts/agent_image.py /path/to/image.png
+```
+
+也可以使用 Agent 提供的 `$agent-image` 或 `@agent-image` 入口。
+
+AgentImage 不会自动拦截所有图片，只有你明确要求识图时才执行。
+
+### 👑 使用 Commander
+
+遇到跨模块、高风险或适合并行的任务，可以明确告诉主 Agent：
+
+```text
+这个任务跨前端和后端，请启用 Commander，
+拆分隔离 Agent，完成后先审查，再逐文件合并。
+```
+
+Commander 会：
+
+1. 🧾 生成需求和执行计划
+2. 👥 创建 1 到 5 个隔离 Agent
+3. 🔍 汇总结果并做审查
+4. ✅ 经你确认后才合并回主工作区
+
+主工作区在审查期间被修改，或者两个 Agent 对同一文件产生冲突时，合并会暂停，不会覆盖你的文件。
+
+---
+
+## 🛠️ 支持的 Agent
+
+| Agent | 支持情况 | 说明 |
+|---|---|---|
+| 🟢 Codex CLI | 完整支持 | 始终安装 |
+| 🟢 Claude Code | 完整支持 | 自动合并 `hooks` 配置 |
+| 🟢 Kimi Code | 完整支持 | 支持失败与 Stop Hook |
+| 🟢 Pi | 完整支持 | 提供原生 Fusion 工具与中文菜单 |
+| 🟢 Hermes | 完整支持 | 首次触发需要在终端确认 |
+| 🟡 OpenCode | 仅 Skill | 没有 Prompt 注入 Hook |
+| 🔴 deepseek-cli | 不支持 | 没有 Hook、插件或 Skill 机制 |
+
+安装器只新增或更新 AgentRelay 自己的配置，不会删除已有 Hook。
+
+---
+
+## ✅ 安装后检查
+
+查看 Tracker 状态：
 
 ```bash
 "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" \
   "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" status
 ```
 
-正常的新状态应显示 `retry_count: 0`、`relay_triggered: false`、`relay_call_count: 0` 和
-`should_trigger: false`。测试 Skill 实际调用前需要重启 Codex。
-
-无需 Session ID 查看最近活动会话和会话内问题：
+查看最近问题：
 
 ```bash
-"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" \
-  "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" status
 "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" \
   "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" problems
 ```
 
-## 目录结构
+正常的新状态应包含：
 
 ```text
-AgentRelay-Hub/
-├── README.md
-├── LICENSE
-├── install.py
-├── requirements.txt
-├── hooks/
-│   ├── agent_relay_hook.py
-│   ├── agent_relay_hook.sh
-│   └── agent_relay_tracker.py
-├── scripts/
-│   ├── agent_relay.py
-│   ├── agent_relay_login.py
-│   └── agent_relay_runtime.py
-├── skills/
-│   └── agent-relay/
-│       └── SKILL.md
-├── examples/
-│   └── hooks.json.example
-└── .github/workflows/ci.yml
+retry_count: 0
+relay_triggered: false
+relay_call_count: 0
+should_trigger: false
 ```
 
-安装后，Codex 目录会额外包含：
+如果 Hook 没有反应，先重启 Agent，再检查：
 
 ```text
-$CODEX_HOME/
-├── agentrelay-env/          # AgentRelay 独立 Python、pip、Playwright
-├── agent_relay_tracker/
-│   ├── sessions/            # 每个 Codex Session 的当前状态
-│   └── problems/            # 按 Session 分组的问题独立快照
-├── hooks/
-├── skills/agent-relay/
-├── skills/agent-image/
-├── skills/agent-fusion/
-└── hooks.json
+$CODEX_HOME/hooks.json
+$CODEX_HOME/agent_relay_tracker/logs/error.log
 ```
 
-## 配置
+---
 
-- `CODEX_HOME`：Codex 配置根目录，默认 `$HOME/.codex`
-- `AGENT_RELAY_LOGIN_STATE`：可选，自定义 Playwright storage state 路径
-- `AGENT_RELAY_<PROVIDER>_LOGIN_STATE`：可选，指定某个 Provider 的 storage state
-- `AGENT_RELAY_PROVIDER`：在线咨询脚本的 Provider，默认值为 `deepseek`；主编排流程默认离线，不依赖该 Provider
-- `AGENT_RELAY_SESSION_BINDINGS`：可选，自定义会话绑定 JSON 路径
-- `AGENT_RELAY_BROWSER_PATH`：可选，自定义 Chromium 可执行文件
-- `AGENT_RELAY_DEBUG=true`：可选，显示诊断输出；默认关闭
+## 🩺 常见问题
 
-运行错误写入 Skill 根目录的 `logs/error.log`。Tracker/Hook 错误写入
-`$CODEX_HOME/agent_relay_tracker/logs/error.log`。
+| 现象 | 先检查什么 |
+|---|---|
+| 🔔 Hook 没反应 | 是否重启 Agent；`hooks.json` 是否包含 `agent_relay_hook.py` |
+| 🔑 网页登录失效 | 重新打开配置中心并登录；不要手动编辑登录状态文件 |
+| 🌐 网页保存了但不能自动对话 | 网站是否有适配器；DeepSeek 已内置，其他网站能力取决于当前 Adapter |
+| ⚡ Fusion 不工作 | 是否配置 Provider；`status --json` 是否返回 `delegable=true` |
+| 👑 Commander 合并暂停 | 主工作区是否被改动；不同 Agent 是否修改了同一个文件 |
+| 🖥️ Chromium 找不到 | 重新运行 `python3 install.py`，或设置 `AGENT_RELAY_BROWSER_PATH` |
 
-## 故障排查
+---
 
-### Hook 无响应
+## 🛡️ 安全边界
 
-确认 Codex 已在安装后重启，检查 `$CODEX_HOME/hooks.json` 是否包含
-`agent_relay_hook.py`，并查看 `$CODEX_HOME/agent_relay_tracker/logs/error.log`。Python Hook
-可在 Windows、macOS 和 Linux 使用；旧的 shell Hook 只作为 POSIX 兼容文件保留。
+- 🚫 不绕过 CAPTCHA，不保存账号密码
+- 🔒 Hook 不直接连接在线模型，只生成候选提醒
+- 🧠 外部模型建议必须由主 Agent 验证，不能直接当作最终答案
+- 🧰 Fusion 只能访问指定 workspace
+- 👑 Commander 使用隔离 workspace，默认不会覆盖主工作区
+- 🔐 Cookie、登录状态和 API Key 不写入项目、日志或 Git
 
-### 登录失效或 Session 过期
+---
 
-重新运行 `agent_relay_login.py`，在浏览器中手动完成登录，再重启 Codex。不要手动编辑 storage
-state 文件。
+## ⚙️ 它是怎么实现的？
 
-### Provider 页面变化
+### 🔁 一次外援请求的完整链路
 
-页面结构变化可能导致回复提取失败。查看 Skill 的 `logs/error.log`，提交 issue 时只附去敏后的
-错误信息，不要附 Cookie、登录状态或私人对话。
+```text
+Agent 会话
+   │
+   ▼
+Hook 观察失败次数、有效耗时和显式调用语句
+   │
+   ▼
+Tracker 按 Session 和问题隔离状态
+   │
+   ▼
+向 Agent 注入候选提醒 additionalContext
+   │
+   ▼
+Agent 结合上下文判断：现在是否需要外援
+   │
+   ▼
+Skill 选择 web / api / local Provider
+   │
+   ▼
+Provider Adapter 调用外部模型
+   │
+   ▼
+主 Agent 验证结果、修改代码并重新测试
+```
 
-### Chromium 不存在
+### 🧩 主要模块
 
-重新运行 `python3 install.py`。安装器会在独立环境中执行 Playwright 的 Chromium 安装，并验证
-`chromium.launch(headless=False)` 所需的完整浏览器；也可通过 `AGENT_RELAY_BROWSER_PATH`
-指定兼容的 Chromium。
+| 模块 | 作用 |
+|---|---|
+| `hooks/` | 监听 Agent 事件、计时、记录重试和生成提醒 |
+| `skills/agent-relay/` | 决定什么时候查询 Provider、归档和发起协作 |
+| `skills/agent-image/` | 把图片交给支持识图的 Provider |
+| `skills/agent-fusion/` | 管理 Fusion 开关、Provider、模式、会话和工具循环 |
+| `scripts/agent_provider.py` | 统一处理网页、API 和本地模型 |
+| `scripts/fusion_runner.py` | Fusion 的持久会话、工具调用、步数限制和交接 |
+| `scripts/research_commander.py` | Commander 的角色规划、隔离执行和结果汇总 |
+| `scripts/agentrelay_console.py` | 确认卡、Commander 和逐文件合并入口 |
+| `scripts/config_web.py` | 本机网页配置中心 |
 
-Linux 如果已经存在 Chromium，但启动时报缺少系统库，可按 Playwright 提示安装系统依赖；
-安装器不会自动执行需要管理员权限的 `install-deps` 或 `sudo`。
+### ⚖️ 触发权重
 
-## 安全边界
+AgentRelay 使用简单的时间与失败阶梯，不靠无限轮询：
 
-AgentRelay 不绕过 CAPTCHA，不保存账号密码，不在 Hook 中直接访问任何在线 Provider，也不会
-把 Provider 建议自动视为最终答案。Agent 必须自行判断、修改并验证，不能只把在线回复或脚本
-转交用户后结束任务。
+| 权重 | 条件 | 行为 |
+|---|---|---|
+| 1️⃣ | 刚开始处理，未命中归档 | 正常继续 |
+| 2️⃣ | 5 到 15 分钟，或命中归档 | 先查本地历史结论 |
+| 3️⃣ | 15 分钟以上，或重复失败明显 | 进入“是否叫外援”的判断 |
 
-## License
+系统只给候选建议，不会越过主 Agent 直接做决定。
 
-MIT，详见 [LICENSE](LICENSE)。
+### ⚡ Fusion 为什么不会递归？
+
+- Fusion 子进程会设置 `AGENTRELAY_FUSION_CHILD=1`
+- Commander 子进程会设置 `AGENTRELAY_COMMANDER_CHILD=1`
+- 子 Agent 不允许再次启动 Fusion 或 Commander
+- Commander 运行时持有最高优先级锁，Fusion 会在下一次模型或工具调用前暂停
+- 被中断的 Fusion 会生成交接快照，不会静默丢失工作
+
+### 👑 Commander 如何避免写坏项目？
+
+- 每个子 Agent 使用独立 workspace
+- 主 Agent 负责最终审查
+- 合并前检查主工作区是否发生变化
+- 同一个文件出现多个不同版本时停止自动合并
+- 只有明确确认后才逐文件写回
+
+### 🧪 本地验证
+
+运行主要测试：
+
+```bash
+python3 -m unittest tests.test_fusion tests.test_agent_targets -v
+```
+
+检查差异格式：
+
+```bash
+git diff --check
+```
+
+AgentRelay 没有后台常驻进程。Hook 只会在对应 Agent 会话运行时被拉起，网页配置服务在关闭页面后立即停止。
+
+---
+
+<div align="center">
+
+### ⭐ 如果 AgentRelay 对你有帮助，欢迎 Star
+
+**MIT License** · 详见 [LICENSE](LICENSE)
+
+</div>

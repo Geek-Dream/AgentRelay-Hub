@@ -1,6 +1,6 @@
 ---
 name: agent-fusion
-description: "AgentRelay Fusion 默认开启的持久 sidekick。仅在 `/agent-fusion status` 返回 delegable=true，或用户显式调用 agent-fusion 时使用；通过当前已配置的单个 web/local/api Provider 建立按 workspace 和 session 隔离的持久会话，默认 readonly，可按用户明确选择切换 coding。未配置 Provider、Commander 正在运行、当前进程是 Commander/Fusion 子会话，或 Fusion 已关闭时立即跳过，不探测登录、不打开浏览器、不回退默认 Provider。"
+description: "Delegate bulky or isolated execution work to AgentRelay Fusion's persistent sidekick, including test suites, wide searches, batch reading, mechanical scans, independent reproduction, and well-scoped implementation. Use it before doing qualifying work locally when the local status returns delegable=true; skip silently when Fusion is disabled, has no configured Provider, is busy, or Commander is active. Default readonly; coding requires an explicit switch."
 ---
 
 # AgentFusion
@@ -11,6 +11,31 @@ AgentFusion 是 AgentRelay 的持久协助 Agent：默认开启，但只有用�
 
 Fusion 永不启动另一个 Fusion，也永不启动 Commander。Commander 拥有最高优先级，启动时
 会接管并关闭正在运行的 Fusion 任务。
+
+## 委派决策
+
+像 Pi 的双 Agent harness 一样，主 Agent 应保留计划、歧义解释和最终验收，把高输出量或可
+隔离的执行工作默认交给 Fusion。判断依据是任务会产生多少输出，而不是步骤数。
+
+满足以下任一条件，且状态为 `delegable=true` 时，先委派再继续本地工作：
+
+- 测试套件、构建或静态检查会产生数百行日志。
+- 需要跨多个文件搜索、批量阅读、机械扫描或汇总大量结果。
+- 需要独立复现问题、收集证据或做一轮独立验证。
+- 任务边界已经明确，可以写成自包含的实现、重构或测试修复工作。
+
+以下任务由主 Agent 直接完成：
+
+- 一两行就能回答的查询，或很小的定点修改。
+- 需求仍然模糊，必须先和用户澄清。
+- 判断本身就是交付物，或最终审查必须由主 Agent 独立完成。
+- 涉及密钥、Cookie、登录状态，或与当前工作产生不可协调的写冲突。
+- Fusion 已关闭、未配置 Provider、正在忙、被 Commander 抢占或返回不可用。
+
+委派时不要只给一句“看一下”。`task` 要说明做什么和在哪里做；`context` 要包含主 Agent
+已经确定的计划、约束、相关文件和决定；`expect` 要说明需要返回的报告、改动和验证证据。
+状态 `delegable=true` 只表示可以调用，只有真正调用 delegate 或 `agent_fusion_delegate`
+后 Fusion 才在干活。
 
 ## 先检查本地状态
 
@@ -39,6 +64,9 @@ Fusion 永不启动另一个 Fusion，也永不启动 Commander。Commander 拥�
 - `FUSION_DISABLED`：跳过。只有用户明确要求开启时才执行开关命令。
 
 未配置 Provider 时状态检查在本地立即结束，不能让主任务等待外部模型。
+
+Pi 中优先调用原生 `agent_fusion_delegate` 工具。其他目标没有等价的原生委派工具时，
+才使用下面的 CLI。
 
 ## 开关、Provider 与模式
 

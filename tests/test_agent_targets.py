@@ -298,8 +298,17 @@ class PiExtensionTests(unittest.TestCase):
         self.assertIn("AGENTRELAY_PYTHON", content)
         self.assertIn("AGENTRELAY_SHIM", content)
         self.assertIn("AGENTRELAY_FUSION", content)
+        self.assertIn('import { Type } from "typebox"', content)
         self.assertIn("before_agent_start", content)
         self.assertIn('registerCommand("agent-fusion"', content)
+        self.assertIn('name: FUSION_TOOL_NAME', content)
+        self.assertIn('FUSION_TOOL_NAME = "agent_fusion_delegate"', content)
+        self.assertIn("parameters: fusionDelegateSchema", content)
+        self.assertIn('executionMode: "sequential"', content)
+        self.assertIn("syncFusionTool(pi, fusionStatus())", content)
+        self.assertIn("sessionManager.getSessionId()", content)
+        self.assertIn('pi.on("session_start"', content)
+        self.assertIn("result.systemPrompt", content)
         self.assertIn("state?.delegable", content)
         self.assertIn("agent-fusion", content)
         self.assertIn("return item.label + \" - \" + item.description;", content)
@@ -311,6 +320,176 @@ class PiExtensionTests(unittest.TestCase):
         self.assertFalse(targets.write_pi_extension(
             extension, Path("/venv/bin/python"), Path("/skill/scripts/agentrelay_hook_shim.py"),
         ))
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js 未安装")
+    def test_generated_extension_registers_and_executes_fusion_tool(self):
+        tmp = Path(tempfile.mkdtemp(prefix="agentrelay-pi-runtime-test-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        extension = tmp / "extensions" / "agent-relay.ts"
+        targets.write_pi_extension(
+            extension,
+            Path("/venv/bin/python"),
+            Path("/skill/scripts/agentrelay_hook_shim.py"),
+        )
+
+        # Pi supplies this virtual module at runtime. A minimal local shim keeps
+        # this test independent from a globally installed Pi package.
+        typebox = tmp / "node_modules" / "typebox"
+        typebox.mkdir(parents=True)
+        (typebox / "package.json").write_text(
+            json.dumps({"name": "typebox", "type": "module", "main": "index.js"}),
+            encoding="utf-8",
+        )
+        (typebox / "index.js").write_text(
+            "export const Type = {\n"
+            "  Object: (properties) => ({ type: 'object', properties }),\n"
+            "  String: (options = {}) => ({ type: 'string', ...options }),\n"
+            "  Optional: (schema) => schema,\n"
+            "};\n",
+            encoding="utf-8",
+        )
+
+        record = tmp / "fusion-args.jsonl"
+        fake_fusion = tmp / "agent_fusion.py"
+        fake_fusion.write_text(
+            "import json, os, sys\n"
+            "with open(os.environ['FUSION_RECORD'], 'a', encoding='utf-8') as f:\n"
+            "    f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "delegable = os.environ.get('FUSION_DELEGABLE', '1') == '1'\n"
+            "state = {\n"
+            "    'delegable': delegable,\n"
+            "    'reason': 'READY' if delegable else 'FUSION_PROVIDER_NOT_CONFIGURED',\n"
+            "    'tool_mode': 'readonly',\n"
+            "    'max_steps': 8, 'provider': {'ref': 'api:test'},\n"
+            "}\n"
+            "if sys.argv[1:2] == ['status']:\n"
+            "    result = {'status': 'success', 'state': state}\n"
+            "else:\n"
+            "    result = {'status': 'success', 'answer': 'fusion answer',\n"
+            "              'session_id': 'session-123', 'steps': 2,\n"
+            "              'tools_used': ['read_file'], 'tool_mode': 'readonly'}\n"
+            "print('AGENT_FUSION_RESULT=' + json.dumps(result))\n",
+            encoding="utf-8",
+        )
+        fake_shim = tmp / "agentrelay_hook_shim.py"
+        fake_shim.write_text("print('{}')\n", encoding="utf-8")
+
+        driver = tmp / "runtime-driver.mjs"
+        driver.write_text(
+            "import agentRelay from './extensions/agent-relay.ts';\n"
+            "const active = ['read', 'bash'];\n"
+            "let tool;\n"
+            "const handlers = new Map();\n"
+            "const pi = {\n"
+            "  registerTool(value) { tool = value; },\n"
+            "  registerCommand() {},\n"
+            "  on(name, handler) { handlers.set(name, handler); },\n"
+            "  getActiveTools() { return [...active]; },\n"
+            "  setActiveTools(names) { active.splice(0, active.length, ...names); },\n"
+            "};\n"
+            "const ctx = {\n"
+            "  cwd: '/workspace/project',\n"
+            "  sessionManager: { getSessionId() { return 'session-123'; } },\n"
+            "};\n"
+            "await agentRelay(pi);\n"
+            "await handlers.get('session_start')({}, ctx);\n"
+            "const prompt = await handlers.get('before_agent_start')(\n"
+            "  { prompt: 'inspect tests', systemPrompt: 'BASE PROMPT' }, ctx);\n"
+            "if (!tool) throw new Error('tool was not registered');\n"
+            "const availableActive = [...active];\n"
+            "let update;\n"
+            "const result = await tool.execute(\n"
+            "  'call-1',\n"
+            "  { task: 'inspect tests', context: 'Use rg', expect: 'cite files' },\n"
+            "  undefined,\n"
+            "  (value) => { update = value; },\n"
+            "  ctx,\n"
+            ");\n"
+            "process.env.FUSION_DELEGABLE = '0';\n"
+            "const unavailablePrompt = await handlers.get('before_agent_start')(\n"
+            "  { prompt: 'inspect tests', systemPrompt: 'BASE PROMPT' }, ctx);\n"
+            "const unavailableActive = [...active];\n"
+            "const skipped = await tool.execute(\n"
+            "  'call-2',\n"
+            "  { task: 'inspect tests' },\n"
+            "  undefined,\n"
+            "  undefined,\n"
+            "  ctx,\n"
+            ");\n"
+            "console.log(JSON.stringify({\n"
+            "  toolName: tool.name,\n"
+            "  executionMode: tool.executionMode,\n"
+            "  availableActive,\n"
+            "  unavailableActive,\n"
+            "  prompt,\n"
+            "  unavailablePrompt,\n"
+            "  update,\n"
+            "  result,\n"
+            "  skipped,\n"
+            "}));\n",
+            encoding="utf-8",
+        )
+
+        env = {
+            **os.environ,
+            "HOME": str(tmp),
+            "CODEX_HOME": str(tmp / ".codex"),
+            "AGENTRELAY_PYTHON": sys.executable,
+            "AGENTRELAY_FUSION": str(fake_fusion),
+            "AGENTRELAY_SHIM": str(fake_shim),
+            "FUSION_RECORD": str(record),
+        }
+        completed = subprocess.run(
+            ["node", "--experimental-strip-types", str(driver)],
+            cwd=tmp,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        runtime = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(runtime["toolName"], "agent_fusion_delegate")
+        self.assertEqual(runtime["executionMode"], "sequential")
+        self.assertIn("agent_fusion_delegate", runtime["availableActive"])
+        self.assertNotIn("agent_fusion_delegate", runtime["unavailableActive"])
+        self.assertTrue(runtime["prompt"]["systemPrompt"].startswith("BASE PROMPT"))
+        self.assertIn(
+            "Default to delegating and monitoring",
+            runtime["prompt"]["systemPrompt"],
+        )
+        self.assertNotIn("systemPrompt", runtime.get("unavailablePrompt") or {})
+        self.assertIn("Delegating to AgentRelay Fusion", runtime["update"]["content"][0]["text"])
+        self.assertIn("fusion answer", runtime["result"]["content"][0]["text"])
+        self.assertEqual(runtime["result"]["details"]["session_id"], "session-123")
+        self.assertEqual(runtime["skipped"]["details"]["status"], "skipped")
+        self.assertEqual(
+            runtime["skipped"]["details"]["reason"],
+            "FUSION_PROVIDER_NOT_CONFIGURED",
+        )
+
+        calls = [
+            json.loads(line)
+            for line in record.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        delegate_calls = [args for args in calls if args[:1] == ["delegate"]]
+        self.assertEqual(len(delegate_calls), 1)
+        self.assertEqual(
+            delegate_calls[0],
+            [
+                "delegate",
+                "inspect tests",
+                "--workspace",
+                "/workspace/project",
+                "--session-id",
+                "session-123",
+                "--context",
+                "Use rg\n\nExpected return:\ncite files",
+            ],
+        )
 
 
 class RelayPythonTests(unittest.TestCase):
