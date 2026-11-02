@@ -8,10 +8,12 @@ separate, explicit confirmation action.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 from dataclasses import asdict
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 
@@ -29,6 +31,15 @@ except ImportError:
                                    TaskContext, WorkflowEngine)
     from orchestrator_store import MemoryStore
     from task_scheduler import TaskAnalyzer
+
+
+CARD_STYLE_CHOICES = ("default", "codex", "auto")
+ANSI_RED_BOLD = "\033[1;31m"
+ANSI_BLUE_BOLD = "\033[1;34m"
+ANSI_GREEN = "\033[32m"
+ANSI_RESET = "\033[0m"
+CODEX_DIVIDER = "────────────────────────────────────────"
+_CJK_TEXT = re.compile(r"[\u3400-\u9fff]")
 
 
 def _root(value: str | None) -> Path:
@@ -49,7 +60,131 @@ def _line(title: str, value) -> str:
     return f"{title}: {value or '无'}"
 
 
-def render_requirement_card(card: dict) -> str:
+def resolve_card_style(
+    style: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """Resolve card style while keeping the existing plain output as default."""
+    env = os.environ if environ is None else environ
+    requested = str(style or env.get("AGENTRELAY_CARD_STYLE", "default")).strip().lower()
+    if requested == "auto":
+        target = str(env.get("AGENTRELAY_TARGET", "")).strip().lower()
+        is_codex = target == "codex" or bool(
+            env.get("CODEX_THREAD_ID") or env.get("CODEX_SESSION_ID")
+        )
+        return "codex" if is_codex else "default"
+    return requested if requested in {"default", "codex"} else "default"
+
+
+def _paint(value, color: str) -> str:
+    text = str(value)
+    return f"{color}{text}{ANSI_RESET}" if text else text
+
+
+def _display_values(value) -> list[str]:
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if str(item)] or ["无"]
+    return [str(value)] if value not in (None, "") else ["无"]
+
+
+def _paint_technical(value) -> str:
+    text = str(value)
+    if text == "无" or _CJK_TEXT.search(text):
+        return text
+    return _paint(text, ANSI_GREEN)
+
+
+def _codex_field(label: str, value, *, risk: bool = False) -> list[str]:
+    label_color = ANSI_RED_BOLD if risk else ANSI_BLUE_BOLD
+    lines = [_paint(label, label_color)]
+    for item in _display_values(value):
+        if risk and item != "无":
+            lines.append(_paint(item, ANSI_RED_BOLD))
+        else:
+            lines.append(_paint_technical(item))
+    return lines
+
+
+def _confirmation_action_label(action: str | None) -> str:
+    labels = {
+        "confirm_requirement": "确认需求理解",
+        "enable_commander": "启用审查官模式",
+        "execute": "执行确认的修改",
+    }
+    return labels.get(action, action or "无")
+
+
+def _confirmation_choices(action: str | None) -> tuple[str, str, str]:
+    if action == "confirm_requirement":
+        return ("确认需求", "调整方案", "取消任务")
+    if action == "enable_commander":
+        return ("启用审查", "调整方案", "取消任务")
+    return ("批准执行", "调整方案", "取消任务")
+
+
+def _render_codex_requirement_card(card: dict) -> str:
+    lines = [
+        _paint("AgentRelay / 需求卡", ANSI_RED_BOLD),
+        CODEX_DIVIDER,
+    ]
+    fields = (
+        ("任务", card.get("task_id")),
+        ("用户需求", card.get("user_requirement") or card.get("original_request")),
+        ("需求评估", card.get("requirement_assessment")),
+        ("大白话", card.get("plain_explanation")),
+        ("影响模块", card.get("affected_modules")),
+        ("影响文件", card.get("affected_files") or card.get("expected_files")),
+        ("当前功能", card.get("current_state")),
+        ("目标功能", card.get("target_state")),
+    )
+    for label, value in fields:
+        lines.extend(_codex_field(label, value))
+    lines.extend(
+        _codex_field(
+            "风险",
+            card.get("risk_analysis") or card.get("risks"),
+            risk=True,
+        )
+    )
+    lines.extend(_codex_field("验证", card.get("verification_plan")))
+    lines.extend(_codex_field("回滚", card.get("rollback_plan")))
+    return "\n".join(lines)
+
+
+def _render_codex_confirmation_card(value: dict) -> str:
+    action = value.get("action")
+    lines = [
+        _paint("AgentRelay / 确认卡", ANSI_RED_BOLD),
+        CODEX_DIVIDER,
+    ]
+    fields = (
+        ("任务", value.get("task_id")),
+        ("状态", value.get("status")),
+        ("当前确认", _confirmation_action_label(action)),
+        ("授权文件", value.get("allowed_files") or value.get("scope")),
+        ("验证命令", value.get("verification_commands")),
+        ("验收条件", value.get("acceptance_criteria")),
+        ("工作区", value.get("workspace")),
+        ("修改尝试", value.get("attempts")),
+        ("最近错误", value.get("last_error")),
+        ("恢复原因", value.get("recovery_reason")),
+    )
+    for label, field_value in fields:
+        lines.extend(_codex_field(label, field_value))
+    if value.get("status") == "pending":
+        first, second, third = _confirmation_choices(action)
+        lines.extend([
+            CODEX_DIVIDER,
+            _paint(f"[1] {first}", ANSI_GREEN),
+            _paint(f"[2] {second}", ANSI_BLUE_BOLD),
+            _paint(f"[3] {third}", ANSI_RED_BOLD),
+        ])
+    return "\n".join(lines)
+
+
+def render_requirement_card(card: dict, *, style: str | None = None) -> str:
+    if resolve_card_style(style) == "codex":
+        return _render_codex_requirement_card(card)
     lines = ["需求卡", f"任务: {card.get('task_id', '')}",
              _line("用户需求", card.get("user_requirement") or card.get("original_request")),
              _line("需求评估", card.get("requirement_assessment")),
@@ -64,11 +199,17 @@ def render_requirement_card(card: dict) -> str:
     return "\n".join(lines)
 
 
-def render_confirmation_card(card: ConfirmationCard | dict) -> str:
+def render_confirmation_card(
+    card: ConfirmationCard | dict,
+    *,
+    style: str | None = None,
+) -> str:
     value = asdict(card) if isinstance(card, ConfirmationCard) else dict(card)
+    if resolve_card_style(style) == "codex":
+        return _render_codex_confirmation_card(value)
     lines = ["确认卡", f"任务: {value.get('task_id', '')}",
              _line("状态", value.get("status")),
-             _line("当前确认", {"confirm_requirement": "确认需求理解", "enable_commander": "启用审查官模式", "execute": "执行确认的修改"}.get(value.get("action"), value.get("action"))),
+             _line("当前确认", _confirmation_action_label(value.get("action"))),
              _line("授权文件", value.get("allowed_files") or value.get("scope")),
              _line("验证命令", value.get("verification_commands")),
              _line("验收条件", value.get("acceptance_criteria")),
@@ -77,6 +218,15 @@ def render_confirmation_card(card: ConfirmationCard | dict) -> str:
              _line("最近错误", value.get("last_error")),
              _line("恢复原因", value.get("recovery_reason"))]
     return "\n".join(lines)
+
+
+def _add_card_style_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--card-style",
+        choices=CARD_STYLE_CHOICES,
+        default=None,
+        help="卡片样式：default 保持原样，codex 使用彩色详细卡片，auto 按目标 Agent 判断",
+    )
 
 
 def model_status(root: Path) -> list[dict]:
@@ -176,6 +326,7 @@ def main(argv=None) -> int:
     task = sub.add_parser("task", help="create and review confirmation cards")
     actions = task.add_subparsers(dest="action", required=True)
     create = actions.add_parser("create", help="submit a task; complex work waits for confirmation")
+    _add_card_style_argument(create)
     create.add_argument("task_id")
     create.add_argument("request")
     create.add_argument("--workspace")
@@ -187,6 +338,7 @@ def main(argv=None) -> int:
     actions.add_parser("list")
     for name in ("show", "approve", "reject", "cancel", "execute"):
         action = actions.add_parser(name)
+        _add_card_style_argument(action)
         action.add_argument("task_id")
     commander = sub.add_parser("commander", help="run dynamic 1-5 role Commander")
     commander.add_argument("task_id")
@@ -296,9 +448,15 @@ def main(argv=None) -> int:
                    "provider": result["provider_response"]["provider"]}
         if args.as_json:
             return _emit(payload, True)
-        requirement = (render_requirement_card(payload["requirement_card"]) + "\n\n"
+        requirement = (render_requirement_card(
+            payload["requirement_card"], style=args.card_style) + "\n\n"
                        if payload["requirement_card"] else "")
-        return _emit(requirement + render_confirmation_card(payload["confirmation_card"]), False)
+        return _emit(
+            requirement + render_confirmation_card(
+                payload["confirmation_card"], style=args.card_style
+            ),
+            False,
+        )
     if args.action == "list":
         cards = [asdict(card) for card in store.cards.values()]
         return _emit(cards, True) if args.as_json else _emit("\n".join(
@@ -316,12 +474,20 @@ def main(argv=None) -> int:
             pass
         if args.as_json:
             return _emit({"requirement_card": requirement, "confirmation_card": asdict(card)}, True)
-        text = (render_requirement_card(requirement) + "\n\n") if requirement else ""
-        return _emit(text + render_confirmation_card(card), False)
+        text = (
+            render_requirement_card(requirement, style=args.card_style) + "\n\n"
+            if requirement else ""
+        )
+        return _emit(
+            text + render_confirmation_card(card, style=args.card_style),
+            False,
+        )
     if args.action in {"approve", "reject", "cancel"}:
         target = {"approve": "approved", "reject": "rejected", "cancel": "cancelled"}[args.action]
         updated = store.advance_requirement(args.task_id) if (args.action == "approve" and card.action == "confirm_requirement") else store.transition(args.task_id, target)
-        return _emit(asdict(updated), args.as_json) if args.as_json else _emit(render_confirmation_card(updated), False)
+        return _emit(asdict(updated), args.as_json) if args.as_json else _emit(
+            render_confirmation_card(updated, style=args.card_style), False
+        )
     if card.action != "execute":
         print("当前确认卡不是执行确认；请先完成需求确认或启用审查官模式确认。", file=sys.stderr)
         return 1

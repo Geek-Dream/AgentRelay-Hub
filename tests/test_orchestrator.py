@@ -19,9 +19,19 @@ from scripts.orchestrator_dispatcher import Dispatcher
 from scripts.orchestrator_store import DispatchRequest
 from scripts.orchestrator_core import (Orchestrator, TaskType, classify_task,
                                         SelfWorker, SelfReviewer, VerificationRunner, ConfirmationStore, FallbackExecutor,
-                                        default_compileall_command)
+                                        ConfirmationCard, default_compileall_command)
 from scripts.orchestrator_core import WorkflowEngine, TaskExecutionState, TaskStateMachine, TaskContext
 from scripts import commander_provider_pool, fusion_mode, orchestrator_core
+from scripts.agentrelay_console import (
+    ANSI_BLUE_BOLD,
+    ANSI_GREEN,
+    ANSI_RED_BOLD,
+    ANSI_RESET,
+    CODEX_DIVIDER,
+    render_confirmation_card,
+    render_requirement_card,
+    resolve_card_style,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -508,6 +518,134 @@ class OrchestratorTests(unittest.TestCase):
             self.assertIn("restored_files", orchestrator.changelog[-1].rollback)
 
 
+class AgentRelayConsoleCardTests(unittest.TestCase):
+    def setUp(self):
+        self.requirement = {
+            "task_id": "task-20261102-a1b2",
+            "user_requirement": "重构 Fusion Provider 的选择与锁机制",
+            "requirement_assessment": "跨模块或高风险任务",
+            "plain_explanation": "分析并修改相关代码，然后执行验证。",
+            "affected_modules": ["Fusion", "任务调度"],
+            "affected_files": [
+                "scripts/fusion_mode.py",
+                "scripts/fusion_runner.py",
+            ],
+            "current_state": "现有实现待重构，等待确认",
+            "target_state": "按目标架构完成重构并通过验证",
+            "risks": ["范围扩大风险", "兼容性风险"],
+            "verification_plan": ["修改后通过验证", "python -m pytest"],
+            "rollback_plan": ["保存修改前内容", "失败时逐文件恢复"],
+        }
+        self.confirmation = ConfirmationCard(
+            task_id="task-20261102-a1b2",
+            action="execute",
+            scope=("scripts/fusion_mode.py", "scripts/fusion_runner.py"),
+            acceptance_criteria=("修改后通过验证", "不修改未授权文件"),
+            status="pending",
+            request="重构 Fusion Provider 的选择与锁机制",
+            workspace="/Users/wl/Desktop/AgentRelay-Hub",
+            allowed_files=("scripts/fusion_mode.py", "scripts/fusion_runner.py"),
+            verification_commands=("python -m pytest tests/test_fusion.py",),
+        )
+
+    def test_default_requirement_card_matches_existing_plain_format(self):
+        self.assertEqual(
+            render_requirement_card(self.requirement, style="default"),
+            "\n".join([
+                "需求卡",
+                "任务: task-20261102-a1b2",
+                "用户需求: 重构 Fusion Provider 的选择与锁机制",
+                "需求评估: 跨模块或高风险任务",
+                "大白话: 分析并修改相关代码，然后执行验证。",
+                "影响模块: Fusion、任务调度",
+                "影响文件: scripts/fusion_mode.py、scripts/fusion_runner.py",
+                "当前功能: 现有实现待重构，等待确认",
+                "目标功能: 按目标架构完成重构并通过验证",
+                "风险: 范围扩大风险、兼容性风险",
+                "验证: 修改后通过验证、python -m pytest",
+                "回滚: 保存修改前内容、失败时逐文件恢复",
+            ]),
+        )
+
+    def test_default_confirmation_card_matches_existing_plain_format(self):
+        output = render_confirmation_card(self.confirmation, style="default")
+        self.assertTrue(output.startswith("确认卡\n"))
+        self.assertIn("状态: pending", output)
+        self.assertIn("当前确认: 执行确认的修改", output)
+        self.assertIn("修改尝试: 无", output)
+        self.assertIn("最近错误: 无", output)
+        self.assertNotIn("\033[", output)
+
+    def test_codex_requirement_card_is_colorful_and_keeps_all_fields(self):
+        output = render_requirement_card(self.requirement, style="codex")
+        self.assertIn(f"{ANSI_RED_BOLD}AgentRelay / 需求卡{ANSI_RESET}", output)
+        self.assertIn(f"{ANSI_BLUE_BOLD}任务{ANSI_RESET}", output)
+        self.assertIn(f"{ANSI_GREEN}task-20261102-a1b2{ANSI_RESET}", output)
+        self.assertIn(
+            f"{ANSI_RED_BOLD}范围扩大风险{ANSI_RESET}",
+            output,
+        )
+        for label in (
+            "用户需求",
+            "需求评估",
+            "大白话",
+            "影响模块",
+            "影响文件",
+            "当前功能",
+            "目标功能",
+            "风险",
+            "验证",
+            "回滚",
+        ):
+            self.assertIn(label, output)
+
+    def test_codex_confirmation_card_keeps_details_and_uses_numbered_choices(self):
+        output = render_confirmation_card(self.confirmation, style="codex")
+        self.assertIn(f"{ANSI_RED_BOLD}AgentRelay / 确认卡{ANSI_RESET}", output)
+        self.assertIn(f"{ANSI_GREEN}pending{ANSI_RESET}", output)
+        self.assertIn(CODEX_DIVIDER, output)
+        self.assertIn(f"{ANSI_GREEN}[1] 批准执行{ANSI_RESET}", output)
+        self.assertIn(f"{ANSI_BLUE_BOLD}[2] 调整方案{ANSI_RESET}", output)
+        self.assertIn(f"{ANSI_RED_BOLD}[3] 取消任务{ANSI_RESET}", output)
+        for label in (
+            "任务",
+            "状态",
+            "当前确认",
+            "授权文件",
+            "验证命令",
+            "验收条件",
+            "工作区",
+            "修改尝试",
+            "最近错误",
+            "恢复原因",
+        ):
+            self.assertIn(label, output)
+
+    def test_style_resolution_keeps_default_plain(self):
+        self.assertEqual(resolve_card_style(None, {}), "default")
+        self.assertEqual(
+            resolve_card_style(
+                "auto",
+                {"AGENTRELAY_TARGET": "codex"},
+            ),
+            "codex",
+        )
+        self.assertEqual(
+            resolve_card_style(
+                "auto",
+                {"AGENTRELAY_TARGET": "claude"},
+            ),
+            "default",
+        )
+        self.assertEqual(
+            resolve_card_style(
+                None,
+                {"AGENTRELAY_CARD_STYLE": "codex"},
+            ),
+            "codex",
+        )
+
+
 class CrossPlatformRuntimeTests(unittest.TestCase):
     def test_windows_provider_lock_is_exclusive_and_released(self):
         fake_msvcrt = FakeMsvcrt()
@@ -799,6 +937,14 @@ class CrossPlatformHookTests(unittest.TestCase):
         self.assertFalse(self.hook.valid_hook_output("not-json"))
         self.assertFalse(self.hook.valid_hook_output(
             '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit"}}'
+        ))
+        self.assertFalse(self.hook.valid_hook_output(
+            '{"systemMessage":123,"hookSpecificOutput":'
+            '{"hookEventName":"UserPromptSubmit","additionalContext":"confirm first"}}'
+        ))
+        self.assertTrue(self.hook.valid_hook_output(
+            '{"systemMessage":"colored card","hookSpecificOutput":'
+            '{"hookEventName":"UserPromptSubmit","additionalContext":"confirm first"}}'
         ))
 
     def test_hook_forwards_valid_pre_tool_deny(self):

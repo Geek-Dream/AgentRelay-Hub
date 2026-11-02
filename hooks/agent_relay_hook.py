@@ -209,6 +209,8 @@ def valid_hook_output(value: str, event_name: str | None = None) -> bool:
         return False
     if not isinstance(payload, dict):
         return False
+    if "systemMessage" in payload and not isinstance(payload["systemMessage"], str):
+        return False
     if event_name == "Stop":
         return (
             payload.get("decision") == "block"

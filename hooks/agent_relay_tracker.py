@@ -87,6 +87,13 @@ LOCK_FILE = TRACKER_DIR / ".lock"
 RELAY_ESCALATION_WAIT_SECONDS = {1: 600, 2: 300, 3: 300}
 RELAY_MAX_SIGNALS = 3
 
+ANSI_RED_BOLD = "\033[1;31m"
+ANSI_BLUE_BOLD = "\033[1;34m"
+ANSI_GREEN = "\033[32m"
+ANSI_RESET = "\033[0m"
+HOOK_CARD_DIVIDER = "────────────────────────────────────────"
+_CJK_TEXT = re.compile(r"[\u3400-\u9fff]")
+
 
 def normalize_agent_id(agent_id):
     """
@@ -1811,29 +1818,248 @@ def tool_writes_files(tool_name, tool_input):
     return _shell_text_writes_files(command)
 
 
-def emit_hook_context(event_name, context):
-    """输出 Codex 支持的 additionalContext JSON。"""
+def _paint(value, color):
+    text = str(value)
+    return f"{color}{text}{ANSI_RESET}" if text else text
+
+
+def _clip_card_text(value, limit=600):
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit - 1]}…"
+
+
+def _card_values(value):
+    if isinstance(value, (list, tuple, set)):
+        values = [
+            _clip_card_text(item)
+            for item in value
+            if str(item or "").strip()
+        ]
+        return values or ["无"]
+    text = _clip_card_text(value)
+    return [text] if text else ["无"]
+
+
+def _paint_technical(value):
+    text = str(value)
+    if text == "无" or _CJK_TEXT.search(text):
+        return text
+    return _paint(text, ANSI_GREEN)
+
+
+def _card_field(label, value, *, risk=False):
+    color = ANSI_RED_BOLD if risk else ANSI_BLUE_BOLD
+    lines = [_paint(label, color)]
+    for item in _card_values(value):
+        if risk and item != "无":
+            lines.append(_paint(item, ANSI_RED_BOLD))
+        else:
+            lines.append(_paint_technical(item))
+    return lines
+
+
+def _hook_card_choices():
+    return [
+        HOOK_CARD_DIVIDER,
+        _paint("[1] 批准执行", ANSI_GREEN),
+        _paint("[2] 调整方案", ANSI_BLUE_BOLD),
+        _paint("[3] 取消任务", ANSI_RED_BOLD),
+    ]
+
+
+def _task_card_id(seed):
+    digest = hashlib.sha256(str(seed or "").encode("utf-8")).hexdigest()
+    return f"task-{digest[:10]}"
+
+
+def _request_files(prompt):
+    return sorted({
+        str(value).strip()
+        for value in TASK_FILE_REFERENCE_PATTERN.findall(str(prompt or ""))
+        if str(value).strip()
+    })[:12]
+
+
+def _request_modules(prompt):
+    modules = []
+    text = str(prompt or "")
+    for pattern in TASK_DOMAIN_PATTERNS:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            modules.append(match.group(0))
+    return list(dict.fromkeys(modules))[:8]
+
+
+def _task_gate_risks(prompt):
+    risks = [
+        "将修改工作区文件，方案或修改范围变化时需要重新确认。",
+    ]
+    if matches_any_pattern(prompt, TASK_DANGEROUS_REQUEST_PATTERNS):
+        risks.append("需求中包含破坏性操作描述，执行前必须再次核对具体命令和影响范围。")
+    return risks
+
+
+def render_task_gate_card(prompt, gate):
+    """生成 Codex CLI 可渲染的彩色需求确认卡。"""
+
+    gate = gate if isinstance(gate, dict) else {}
+    request_hash = (
+        gate.get("request_sha256")
+        or hashlib.sha256(normalize_text(prompt).encode("utf-8")).hexdigest()
+    )
+    reasons = gate.get("reasons") or ["本地规则判断本次任务需要先确认"]
+    files = _request_files(prompt)
+    modules = _request_modules(prompt)
+
+    lines = [
+        _paint("AgentRelay / 需求确认卡", ANSI_RED_BOLD),
+        HOOK_CARD_DIVIDER,
+    ]
+    lines.extend(_card_field("任务", _task_card_id(request_hash)))
+    lines.extend(_card_field("用户需求", _clip_card_text(prompt, 800)))
+    lines.extend(_card_field("评估结果", reasons))
+    lines.extend(_card_field(
+        "大白话",
+        "先核对要做哪些修改、可能影响什么；你批准后再动文件，完成后运行验证。",
+    ))
+    lines.extend(_card_field("影响模块", modules or ["以当前需求涉及的相关代码为准"]))
+    lines.extend(_card_field("影响文件", files or ["待读取相关代码后确认具体文件"]))
+    lines.extend(_card_field("当前状态", "waiting_for_approval"))
+    lines.extend(_card_field("批准后", "执行已展示的修改方案，并运行专项检查和完整验证。"))
+    lines.extend(_card_field("风险", _task_gate_risks(prompt), risk=True))
+    lines.extend(_card_field(
+        "验证",
+        [
+            "先运行与改动直接相关的测试或构建命令。",
+            "确认通过后，再运行项目已有的完整测试。",
+        ],
+    ))
+    lines.extend(_card_field(
+        "回滚",
+        "修改前保留原文件内容；验证失败时按文件恢复，并记录失败原因。",
+    ))
+    lines.extend(_hook_card_choices())
+    return "\n".join(lines)
+
+
+def _tool_targets(tool_name, tool_input):
+    if isinstance(tool_input, dict):
+        targets = []
+        for key in (
+            "file_path",
+            "path",
+            "file",
+            "target",
+            "target_file",
+        ):
+            value = tool_input.get(key)
+            if isinstance(value, str) and value.strip():
+                targets.append(value.strip())
+
+        patch = tool_input.get("input") or tool_input.get("patch")
+        if isinstance(patch, str):
+            targets.extend(re.findall(
+                r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+)$",
+                patch,
+                flags=re.MULTILINE,
+            ))
+        if targets:
+            return list(dict.fromkeys(targets))[:12]
+
+    command = shell_command_text(tool_name, tool_input)
+    if command:
+        return [_clip_card_text(command, 500)]
+    return []
+
+
+def _tool_gate_is_danger(reason):
+    return "[AgentRelay 安全门禁]" in str(reason or "")
+
+
+def render_tool_gate_card(tool_name, tool_input, reason):
+    """生成危险命令或未批准写入被阻断时的彩色确认卡。"""
+
+    danger = _tool_gate_is_danger(reason)
+    solution_key = build_solution_key(tool_name, tool_input) or tool_name
+    targets = _tool_targets(tool_name, tool_input)
+    title = "AgentRelay / 危险操作确认卡" if danger else "AgentRelay / 写入确认卡"
+
+    lines = [
+        _paint(title, ANSI_RED_BOLD),
+        HOOK_CARD_DIVIDER,
+    ]
+    lines.extend(_card_field("任务", _task_card_id(solution_key)))
+    lines.extend(_card_field("工具", normalize_text(tool_name) or "unknown"))
+    lines.extend(_card_field("操作内容", targets or ["未提供具体路径或命令"]))
+    lines.extend(_card_field("当前状态", "blocked_waiting_for_approval"))
+    lines.extend(_card_field(
+        "大白话",
+        "这次操作会修改文件或执行高风险命令，所以先停下来让你确认。",
+    ))
+    lines.extend(_card_field(
+        "风险",
+        [
+            _clip_card_text(reason, 800),
+            "同类操作不会自动获得批准；命令或参数变化时必须再次确认。",
+        ],
+        risk=True,
+    ))
+    lines.extend(_card_field(
+        "验证",
+        "执行后检查实际变化，再运行与本次修改或命令直接相关的测试。",
+    ))
+    lines.extend(_card_field(
+        "回滚",
+        "修改类操作使用修改前备份或版本控制恢复；删除类操作可能无法恢复。",
+    ))
+    lines.extend(_hook_card_choices())
+    return "\n".join(lines)
+
+
+def codex_hook_cards_enabled():
+    """仅在 Codex Hook 环境输出 systemMessage；其他 Agent 保持原协议。"""
+
+    target = normalize_text(os.environ.get("AGENTRELAY_TARGET")).lower()
+    if target:
+        return target == "codex"
+    return bool(
+        os.environ.get("CODEX_HOME")
+        or os.environ.get("CODEX_THREAD_ID")
+        or os.environ.get("CODEX_SESSION_ID")
+    )
+
+
+def emit_hook_context(event_name, context, system_message=None):
+    """输出模型上下文，并在 Codex 中附带用户可见的彩色 Hook 卡片。"""
 
     if not context:
         return
-    print(json.dumps({
+    payload = {
         "hookSpecificOutput": {
             "hookEventName": event_name,
             "additionalContext": context,
         },
-    }, ensure_ascii=False), flush=True)
+    }
+    if system_message and codex_hook_cards_enabled():
+        payload["systemMessage"] = system_message
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
-def emit_pre_tool_deny(reason):
+def emit_pre_tool_deny(reason, system_message=None):
     """安全降级为 deny；当前 Codex parser 不接受原生 ask。"""
 
-    print(json.dumps({
+    payload = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": reason,
         },
-    }, ensure_ascii=False), flush=True)
+    }
+    if system_message and codex_hook_cards_enabled():
+        payload["systemMessage"] = system_message
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 def approval_controls_snapshot(state, prompt):
@@ -1909,6 +2135,7 @@ def update_task_gate_for_prompt(state, prompt):
     gate.setdefault("level", "small")
     gate.setdefault("requires_confirmation", False)
     gate.setdefault("reasons", [])
+    gate.setdefault("card_shown_sha256", None)
 
     approvals = state.get("tool_approval")
     if not isinstance(approvals, dict):
@@ -1980,10 +2207,12 @@ def update_task_gate_for_prompt(state, prompt):
     if not classification["requires_confirmation"]:
         gate["status"] = "clear"
         gate["notified_sha256"] = None
+        gate["card_shown_sha256"] = None
         return ""
 
     gate["status"] = "awaiting_confirmation"
     gate["notified_sha256"] = gate["request_sha256"]
+    gate["card_shown_sha256"] = None
     reasons = "；".join(classification["reasons"])
     return (
         "[AgentRelay 任务门禁]\n"
@@ -5415,8 +5644,22 @@ def handle_hook_event(
             state,
             prompt,
         )
+        system_message = None
+        gate = state.get("task_gate")
+        if (
+            notice.startswith("[AgentRelay 任务门禁]")
+            and isinstance(gate, dict)
+            and gate.get("status") == "awaiting_confirmation"
+            and gate.get("card_shown_sha256") != gate.get("request_sha256")
+        ):
+            system_message = render_task_gate_card(prompt, gate)
+            gate["card_shown_sha256"] = gate.get("request_sha256")
         write_state(state, session_id=session_id)
-        emit_hook_context("UserPromptSubmit", notice)
+        emit_hook_context(
+            "UserPromptSubmit",
+            notice,
+            system_message=system_message,
+        )
         return state
 
     if event_name == "PreToolUse":
@@ -5432,7 +5675,14 @@ def handle_hook_event(
             session_id,
         )
         if not allowed:
-            emit_pre_tool_deny(deny_reason)
+            emit_pre_tool_deny(
+                deny_reason,
+                system_message=render_tool_gate_card(
+                    tool_name,
+                    tool_input,
+                    deny_reason,
+                ),
+            )
             return read_state(session_id=session_id)
 
         return handle_pre_tool_use(

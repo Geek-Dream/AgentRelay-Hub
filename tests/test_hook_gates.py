@@ -10,6 +10,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 HOOK = PROJECT_ROOT / "hooks" / "agent_relay_hook.py"
 HOOK_SH = PROJECT_ROOT / "hooks" / "agent_relay_hook.sh"
+ANSI_RED_BOLD = "\033[1;31m"
+ANSI_BLUE_BOLD = "\033[1;34m"
+ANSI_GREEN = "\033[32m"
+ANSI_RESET = "\033[0m"
 
 
 class HookGateTests(unittest.TestCase):
@@ -66,6 +70,19 @@ class HookGateTests(unittest.TestCase):
         self.assertEqual(context["hookEventName"], "UserPromptSubmit")
         self.assertIn("需求卡/确认卡", context["additionalContext"])
         self.assertIn("不要写入文件", context["additionalContext"])
+        system_message = output["systemMessage"]
+        self.assertIn(
+            f"{ANSI_RED_BOLD}AgentRelay / 需求确认卡{ANSI_RESET}",
+            system_message,
+        )
+        self.assertIn(f"{ANSI_BLUE_BOLD}任务{ANSI_RESET}", system_message)
+        self.assertIn(f"{ANSI_GREEN}waiting_for_approval{ANSI_RESET}", system_message)
+        self.assertIn(f"{ANSI_RED_BOLD}将修改工作区文件", system_message)
+        self.assertIn(f"{ANSI_GREEN}[1] 批准执行{ANSI_RESET}", system_message)
+        self.assertIn(f"{ANSI_BLUE_BOLD}[2] 调整方案{ANSI_RESET}", system_message)
+        self.assertIn(f"{ANSI_RED_BOLD}[3] 取消任务{ANSI_RESET}", system_message)
+        self.assertNotIn("```", system_message)
+        self.assertNotIn("<div", system_message)
 
     def test_single_file_small_fix_does_not_emit_a_card(self):
         result = self.run_hook(self.payload(
@@ -76,6 +93,19 @@ class HookGateTests(unittest.TestCase):
 
         self.assert_hook_ok(result)
         self.assertEqual(result.stdout, "")
+
+    def test_non_codex_target_keeps_context_without_system_message(self):
+        self.env["AGENTRELAY_TARGET"] = "claude"
+        result = self.run_hook(self.payload(
+            "non-codex-large-task",
+            "UserPromptSubmit",
+            prompt="请重构整个项目的前端、后端和数据库，并补充测试和部署文档",
+        ))
+
+        self.assert_hook_ok(result)
+        output = json.loads(result.stdout)
+        self.assertIn("additionalContext", output["hookSpecificOutput"])
+        self.assertNotIn("systemMessage", output)
 
     def test_large_task_blocks_write_until_explicit_approval(self):
         session_id = "approve-write"
@@ -96,9 +126,14 @@ class HookGateTests(unittest.TestCase):
         )
         denied = self.run_hook(patch)
         self.assert_hook_ok(denied)
-        denied_output = json.loads(denied.stdout)["hookSpecificOutput"]
+        denied_payload = json.loads(denied.stdout)
+        denied_output = denied_payload["hookSpecificOutput"]
         self.assertEqual(denied_output["permissionDecision"], "deny")
         self.assertIn("尚未获得用户批准", denied_output["permissionDecisionReason"])
+        self.assertIn(
+            f"{ANSI_RED_BOLD}AgentRelay / 写入确认卡{ANSI_RESET}",
+            denied_payload["systemMessage"],
+        )
 
         approval = self.run_hook(self.payload(
             session_id,
@@ -163,9 +198,16 @@ class HookGateTests(unittest.TestCase):
 
         denied = self.run_hook(command)
         self.assert_hook_ok(denied)
-        denied_output = json.loads(denied.stdout)["hookSpecificOutput"]
+        denied_payload = json.loads(denied.stdout)
+        denied_output = denied_payload["hookSpecificOutput"]
         self.assertEqual(denied_output["permissionDecision"], "deny")
         self.assertIn("删除文件或目录", denied_output["permissionDecisionReason"])
+        self.assertIn(
+            f"{ANSI_RED_BOLD}AgentRelay / 危险操作确认卡{ANSI_RESET}",
+            denied_payload["systemMessage"],
+        )
+        self.assertIn(f"{ANSI_RED_BOLD}[AgentRelay 安全门禁]", denied_payload["systemMessage"])
+        self.assertIn("检测到高风险操作：删除文件或目录", denied_payload["systemMessage"])
 
         approval = self.run_hook(self.payload(
             session_id,
@@ -322,6 +364,10 @@ class HookGateTests(unittest.TestCase):
         output = json.loads(result.stdout)["hookSpecificOutput"]
         self.assertEqual(output["hookEventName"], "UserPromptSubmit")
         self.assertIn("任务门禁", output["additionalContext"])
+        self.assertIn(
+            "AgentRelay / 需求确认卡",
+            json.loads(result.stdout)["systemMessage"],
+        )
 
 
 if __name__ == "__main__":

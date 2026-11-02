@@ -89,7 +89,9 @@ if [ -n "$TRACKER_OUTPUT" ] &&
         EVENT_TYPE="$EVENT_TYPE" "$PYTHON" -c 'import json, os, sys
 data = json.load(sys.stdin)
 event = os.environ.get("EVENT_TYPE")
-if event == "Stop":
+if "systemMessage" in data and not isinstance(data.get("systemMessage"), str):
+    valid = False
+elif event == "Stop":
     valid = data.get("decision") == "block" and bool(str(data.get("reason") or "").strip())
 else:
     output = data.get("hookSpecificOutput")

@@ -33,6 +33,20 @@ Hook 可以保守预筛选直接行动句式（如“现在调用 DeepSeek”“
 - 用户明确批准后，只能重试完全相同的工具输入一次；任何参数变化都需要重新确认。
 - 不要把一次命令批准扩展到同类命令、其他路径或其他任务。
 
+## 卡片显示样式
+
+- 默认使用现有纯文本卡片，保证所有 Agent 和终端都能正常阅读。
+- 在 Codex 终端中需要彩色详细卡片时，命令显式传 `--card-style codex`，或设置
+  `AGENTRELAY_CARD_STYLE=codex`。`auto` 仅在目标 Agent 明确为 Codex 时启用彩色样式。
+- Codex 彩色卡使用红色标题、蓝色字段名、绿色英文值、红色加粗风险，并保留
+  `[1]`、`[2]`、`[3]` 三个操作选项。
+- Codex CLI 的用户可见颜色必须来自脚本真实 stdout 或 Hook 顶层 `systemMessage`。
+  `additionalContext` 只给模型读取，不会显示成彩色终端卡片。
+- 禁止在普通助手回复里用 Markdown、HTML、CSS、代码块或彩色 emoji 冒充终端颜色；
+  这类内容不会得到稳定的 ANSI 渲染。
+- 需要彩色卡片时，让 `UserPromptSubmit` 或 `PreToolUse` Hook 返回 `systemMessage`；
+  非 Codex 场景继续使用原纯文本卡片。
+
 ## Skill 目录与环境
 
 Skill 根目录：当前文件所在目录，以下命令从 Skill 根目录执行。

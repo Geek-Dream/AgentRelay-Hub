@@ -40,6 +40,12 @@ def main(argv=None) -> int:
     actions.add_parser("list")
     for name in ("show", "status", "approve", "reject", "cancel", "execute", "recover", "retry"):
         cmd = actions.add_parser(name); cmd.add_argument("task_id")
+        cmd.add_argument(
+            "--card-style",
+            choices=("default", "codex", "auto"),
+            default=None,
+            help="显示卡片样式",
+        )
         if name == "recover": cmd.add_argument("--action", choices=("fail", "retry"), required=True)
     args = parser.parse_args(argv)
     store = _store(args.root)
@@ -55,7 +61,7 @@ def main(argv=None) -> int:
     if action in {"show", "status"}:
         if args.as_json:
             return _emit(_public(card), True)
-        print(render_confirmation_card(card))
+        print(render_confirmation_card(card, style=args.card_style))
         return 0
     if action in {"approve", "reject", "cancel"}:
         try:
