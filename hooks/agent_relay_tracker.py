@@ -87,12 +87,7 @@ LOCK_FILE = TRACKER_DIR / ".lock"
 RELAY_ESCALATION_WAIT_SECONDS = {1: 600, 2: 300, 3: 300}
 RELAY_MAX_SIGNALS = 3
 
-ANSI_RED_BOLD = "\033[1;31m"
-ANSI_BLUE_BOLD = "\033[1;34m"
-ANSI_GREEN = "\033[32m"
-ANSI_RESET = "\033[0m"
 HOOK_CARD_DIVIDER = "────────────────────────────────────────"
-_CJK_TEXT = re.compile(r"[\u3400-\u9fff]")
 
 
 def normalize_agent_id(agent_id):
@@ -1818,11 +1813,6 @@ def tool_writes_files(tool_name, tool_input):
     return _shell_text_writes_files(command)
 
 
-def _paint(value, color):
-    text = str(value)
-    return f"{color}{text}{ANSI_RESET}" if text else text
-
-
 def _clip_card_text(value, limit=600):
     text = str(value or "").strip()
     if len(text) <= limit:
@@ -1842,30 +1832,19 @@ def _card_values(value):
     return [text] if text else ["无"]
 
 
-def _paint_technical(value):
-    text = str(value)
-    if text == "无" or _CJK_TEXT.search(text):
-        return text
-    return _paint(text, ANSI_GREEN)
-
-
-def _card_field(label, value, *, risk=False):
-    color = ANSI_RED_BOLD if risk else ANSI_BLUE_BOLD
-    lines = [_paint(label, color)]
+def _card_field(label, value):
+    lines = [str(label)]
     for item in _card_values(value):
-        if risk and item != "无":
-            lines.append(_paint(item, ANSI_RED_BOLD))
-        else:
-            lines.append(_paint_technical(item))
+        lines.append(str(item))
     return lines
 
 
 def _hook_card_choices():
     return [
         HOOK_CARD_DIVIDER,
-        _paint("[1] 批准执行", ANSI_GREEN),
-        _paint("[2] 调整方案", ANSI_BLUE_BOLD),
-        _paint("[3] 取消任务", ANSI_RED_BOLD),
+        "✅ [1] 批准执行",
+        "🛠️ [2] 调整方案",
+        "⛔ [3] 取消任务",
     ]
 
 
@@ -1902,7 +1881,7 @@ def _task_gate_risks(prompt):
 
 
 def render_task_gate_card(prompt, gate):
-    """生成 Codex CLI 可渲染的彩色需求确认卡。"""
+    """生成 Codex systemMessage 可稳定显示的纯文本需求确认卡。"""
 
     gate = gate if isinstance(gate, dict) else {}
     request_hash = (
@@ -1912,32 +1891,43 @@ def render_task_gate_card(prompt, gate):
     reasons = gate.get("reasons") or ["本地规则判断本次任务需要先确认"]
     files = _request_files(prompt)
     modules = _request_modules(prompt)
+    scope = []
+    if modules:
+        scope.append(f"模块：{'、'.join(modules)}")
+    else:
+        scope.append("模块：以当前需求涉及的相关代码为准")
+    if files:
+        scope.append(f"文件：{'、'.join(files)}")
+    else:
+        scope.append("文件：待读取相关代码后确认")
 
     lines = [
-        _paint("AgentRelay / 需求确认卡", ANSI_RED_BOLD),
+        "🧭 AgentRelay / 需求确认卡",
         HOOK_CARD_DIVIDER,
     ]
-    lines.extend(_card_field("任务", _task_card_id(request_hash)))
-    lines.extend(_card_field("用户需求", _clip_card_text(prompt, 800)))
-    lines.extend(_card_field("评估结果", reasons))
+    lines.extend(_card_field("🎯 任务", _task_card_id(request_hash)))
+    lines.extend(_card_field("📝 用户需求", _clip_card_text(prompt, 800)))
+    lines.extend(_card_field("🔎 触发原因", reasons))
     lines.extend(_card_field(
-        "大白话",
-        "先核对要做哪些修改、可能影响什么；你批准后再动文件，完成后运行验证。",
+        "🧭 处理方式",
+        "先核对修改目标和影响范围；你批准后再动文件，完成后运行验证。",
     ))
-    lines.extend(_card_field("影响模块", modules or ["以当前需求涉及的相关代码为准"]))
-    lines.extend(_card_field("影响文件", files or ["待读取相关代码后确认具体文件"]))
-    lines.extend(_card_field("当前状态", "waiting_for_approval"))
-    lines.extend(_card_field("批准后", "执行已展示的修改方案，并运行专项检查和完整验证。"))
-    lines.extend(_card_field("风险", _task_gate_risks(prompt), risk=True))
+    lines.extend(_card_field("📦 影响范围", scope))
+    lines.extend(_card_field("⏳ 当前状态", "waiting_for_approval"))
     lines.extend(_card_field(
-        "验证",
+        "✅ 批准后",
+        "执行当前卡片展示的修改方案，并运行专项检查和完整验证。",
+    ))
+    lines.extend(_card_field("⚠️ 主要风险", _task_gate_risks(prompt)))
+    lines.extend(_card_field(
+        "🧪 验证",
         [
             "先运行与改动直接相关的测试或构建命令。",
             "确认通过后，再运行项目已有的完整测试。",
         ],
     ))
     lines.extend(_card_field(
-        "回滚",
+        "↩️ 回滚",
         "修改前保留原文件内容；验证失败时按文件恢复，并记录失败原因。",
     ))
     lines.extend(_hook_card_choices())
@@ -1979,39 +1969,45 @@ def _tool_gate_is_danger(reason):
 
 
 def render_tool_gate_card(tool_name, tool_input, reason):
-    """生成危险命令或未批准写入被阻断时的彩色确认卡。"""
+    """生成 Codex systemMessage 可稳定显示的纯文本工具确认卡。"""
 
     danger = _tool_gate_is_danger(reason)
     solution_key = build_solution_key(tool_name, tool_input) or tool_name
     targets = _tool_targets(tool_name, tool_input)
-    title = "AgentRelay / 危险操作确认卡" if danger else "AgentRelay / 写入确认卡"
+    title = (
+        "🛑 AgentRelay / 危险操作确认卡"
+        if danger
+        else "📝 AgentRelay / 写入确认卡"
+    )
 
     lines = [
-        _paint(title, ANSI_RED_BOLD),
+        title,
         HOOK_CARD_DIVIDER,
     ]
-    lines.extend(_card_field("任务", _task_card_id(solution_key)))
-    lines.extend(_card_field("工具", normalize_text(tool_name) or "unknown"))
-    lines.extend(_card_field("操作内容", targets or ["未提供具体路径或命令"]))
-    lines.extend(_card_field("当前状态", "blocked_waiting_for_approval"))
+    lines.extend(_card_field("🎯 任务", _task_card_id(solution_key)))
+    lines.extend(_card_field("🧰 工具", normalize_text(tool_name) or "unknown"))
+    lines.extend(_card_field("📂 操作内容", targets or ["未提供具体路径或命令"]))
+    lines.extend(_card_field("⏳ 当前状态", "blocked_waiting_for_approval"))
     lines.extend(_card_field(
-        "大白话",
+        "🧭 处理方式",
         "这次操作会修改文件或执行高风险命令，所以先停下来让你确认。",
     ))
     lines.extend(_card_field(
-        "风险",
+        "⚠️ 主要风险",
         [
             _clip_card_text(reason, 800),
-            "同类操作不会自动获得批准；命令或参数变化时必须再次确认。",
         ],
-        risk=True,
     ))
     lines.extend(_card_field(
-        "验证",
-        "执行后检查实际变化，再运行与本次修改或命令直接相关的测试。",
+        "🔐 批准边界",
+        "批准只对当前操作有效；命令、路径或参数变化时必须再次确认。",
     ))
     lines.extend(_card_field(
-        "回滚",
+        "🧪 验证",
+        "执行后检查实际变化，再运行与本次操作直接相关的测试或检查。",
+    ))
+    lines.extend(_card_field(
+        "↩️ 回滚",
         "修改类操作使用修改前备份或版本控制恢复；删除类操作可能无法恢复。",
     ))
     lines.extend(_hook_card_choices())
@@ -2032,7 +2028,7 @@ def codex_hook_cards_enabled():
 
 
 def emit_hook_context(event_name, context, system_message=None):
-    """输出模型上下文，并在 Codex 中附带用户可见的彩色 Hook 卡片。"""
+    """输出模型上下文，并在 Codex 中附带用户可见的 Hook 卡片。"""
 
     if not context:
         return
