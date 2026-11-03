@@ -80,7 +80,10 @@ class KimiRegistrationTests(unittest.TestCase):
         for event in targets.KIMI_EVENTS:
             self.assertIn(f'event = "{event}"', text)
         self.assertIn("agentrelay_hook_shim.py", text)
-        import tomllib
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib
         data = tomllib.loads(text)
         self.assertEqual(len(data["hooks"]), 1 + len(targets.KIMI_EVENTS))
 
