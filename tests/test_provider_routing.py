@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -9,10 +10,19 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from agent_relay import DeepSeekAdapter  # noqa: E402
 from agent_relay_runtime import SessionRef  # noqa: E402
 from generic_web_adapter import GenericWebAdapter  # noqa: E402
+import config_manager  # noqa: E402
 
 
 class DeepSeekRoutingTests(unittest.TestCase):
     def setUp(self):
+        # 路由规则应在固定配置下测试，不能读取开发机的私有 DeepSeek 配置。
+        hybrid = {"web_providers": [{"id": "deepseek-web", "conversation": {
+            "supports_hybrid": True,
+            "titles": {"hybrid": "AgentRelay-DeepSeek"},
+        }}]}
+        mocked = mock.patch.object(config_manager, "load_config", return_value=hybrid)
+        mocked.start()
+        self.addCleanup(mocked.stop)
         self.adapter = DeepSeekAdapter()
 
     def test_hybrid_mode_uses_single_unified_conversation(self):

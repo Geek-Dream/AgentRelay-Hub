@@ -45,7 +45,7 @@ jobs:
         run: python scripts/verify_page.py --output runtime/page-verification
 
       - name: Upload page verification evidence
-        if: always()
+        if: always() && hashFiles('runtime/page-verification/result.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: config-page-verification
