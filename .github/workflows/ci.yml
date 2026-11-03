@@ -88,7 +88,8 @@ jobs:
                   or name.startswith("recenthistoricaldialogue")
                   or "cookie" in name
                   or "login_state" in name
-                  or "session" in name
+                  or name.startswith(("session.", "sessions."))
+                  or name.endswith((".session", ".session.json", ".session.jsonl"))
                   or ".before-" in name
                   or name.endswith((".bak", ".pyc"))
                   or any(".bak." in part.lower() for part in path.parts)

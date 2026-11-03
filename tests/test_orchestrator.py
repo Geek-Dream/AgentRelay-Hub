@@ -709,7 +709,7 @@ class CrossPlatformRuntimeTests(unittest.TestCase):
         )
         python_path = r"C:\Program Files\AgentRelay\python.exe"
         script_path = (
-            r"C:\Users\example\.codex\skills\agent-relay\scripts"
+            r"C:\AgentRelayTest\skills\agent-relay\scripts"
             r"\agent_relay_archive.py"
         )
         with mock.patch.object(
@@ -821,26 +821,26 @@ class CrossPlatformHookTests(unittest.TestCase):
 
     def test_windows_command_quotes_paths_with_spaces(self):
         command = self.installer.build_hook_command(
-            Path("C:/Users/Test User/.codex/agentrelay-env/Scripts/python.exe"),
-            Path("C:/Users/Test User/.codex/hooks/agent_relay_hook.py"),
+            Path("C:/AgentRelayTest/Test User/.codex/agentrelay-env/Scripts/python.exe"),
+            Path("C:/AgentRelayTest/Test User/.codex/hooks/agent_relay_hook.py"),
             "nt",
         )
-        self.assertIn('"C:\\Users\\Test User', command.replace("/", "\\"))
+        self.assertIn('"C:\\AgentRelayTest\\Test User', command.replace("/", "\\"))
         self.assertIn("python.exe", command)
         self.assertIn("agent_relay_hook.py", command)
 
     def test_posix_command_quotes_paths_with_spaces(self):
         command = self.installer.build_hook_command(
-            Path("/Users/test user/.codex/agentrelay-env/bin/python"),
-            Path("/Users/test user/.codex/hooks/agent_relay_hook.py"),
+            Path("/opt/agentrelay-test/test user/.codex/agentrelay-env/bin/python"),
+            Path("/opt/agentrelay-test/test user/.codex/hooks/agent_relay_hook.py"),
             "posix",
         )
-        self.assertIn("'/Users/test user/", command)
+        self.assertIn("'/opt/agentrelay-test/test user/", command)
 
     def test_installer_upgrades_old_script_hook_and_preserves_user_hooks(self):
         with tempfile.TemporaryDirectory() as directory:
             hooks_json = Path(directory) / "hooks.json"
-            old_command = "/bin/sh /Users/test/.codex/hooks/agent_relay_hook.sh"
+            old_command = "/bin/sh /opt/agentrelay-test/.codex/hooks/agent_relay_hook.sh"
             user_command = "/usr/local/bin/user-hook.sh"
             hooks_json.write_text(json.dumps({
                 "hooks": {
@@ -885,8 +885,8 @@ class CrossPlatformHookTests(unittest.TestCase):
                 },
             }), encoding="utf-8")
             replacement = shlex_command(
-                "/Users/test/.codex/agentrelay-env/bin/python",
-                "/Users/test/.codex/hooks/agent_relay_hook.py",
+                "/opt/agentrelay-test/.codex/agentrelay-env/bin/python",
+                "/opt/agentrelay-test/.codex/hooks/agent_relay_hook.py",
             )
 
             with mock.patch.object(self.installer, "HOOKS_JSON", hooks_json), \
