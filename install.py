@@ -55,6 +55,9 @@ SCRIPT_FILES = (
     "agent_relay.py",
     "agent_relay_login.py",
     "agent_relay_runtime.py",
+    "provider_leases.py",
+    "web_session_pool.py",
+    "sensitive_redaction.py",
     "agentrelay_hook_shim.py",
     "orchestrator_runtime.py",
     "orchestrator_store.py",
@@ -666,6 +669,7 @@ def _load_local_config():
 def _configure_web(config: dict) -> None:
     print("\n线上模型配置（网页登录会话）")
     print("可配置 DeepSeek、千问、Kimi 或其他网页模型。Cookie 只保存在本机，不会写入项目。")
+    print("这里填写的是协作模型，不是正在驱动 Codex 的主模型；不要复用主模型服务或账号。")
     providers = config.setdefault("web_providers", [])
     while True:
         print("\n1. DeepSeek  2. 千问  3. Kimi  4. 自定义网页模型  0. 返回")
@@ -704,9 +708,12 @@ def _configure_web(config: dict) -> None:
         if login_result.returncode != 0:
             print("登录没有完成，本次不保存为可用 Provider。")
             continue
+        from scripts.config_manager import normalize_provider_limits
+        limits = normalize_provider_limits(_ask_provider_limits("web"), "web")
         entry = {"id": provider_id, "name": label, "url": url, "enabled": True,
                  "state_file": str(TARGET_SKILL / "agent_relay_login_state.json.enc") if provider_id == "deepseek-web" else
-                 str(TARGET_SKILL / "config" / f"{provider_id}.storage-state.json.enc")}
+                 str(TARGET_SKILL / "config" / f"{provider_id}.storage-state.json.enc"),
+                 **limits}
         providers[:] = [item for item in providers if not isinstance(item, dict) or item.get("id") != provider_id]
         providers.append(entry)
         config["default_provider"] = provider_id
@@ -722,6 +729,42 @@ def _guess_vision_support(model: str) -> bool:
         "qwen2.5-vl", "qwen3-vl", "gemma-3-vision", "aio-vision",
     )
     return any(marker in name for marker in markers)
+
+
+def _ask_provider_limits(kind: str) -> dict[str, int | str]:
+    """Ask for the shared Provider scheduler limits with safe defaults."""
+    from scripts.config_manager import (
+        provider_concurrency_defaults,
+        normalize_provider_limits,
+    )
+
+    defaults = provider_concurrency_defaults(kind)
+    descriptions = {
+        "web": "网页会话同时处理多个 Agent 时，每个编号会话只执行一个请求。",
+        "local": "本地模型通常只有一个推理槽位；提高前请确认服务本身支持并发。",
+        "api": "官方或中转 API 通常可并发，按账号限额调整，默认 10。",
+    }
+    print(descriptions[kind])
+    raw = {
+        "max_concurrency": _ask(
+            f"最大并发数（{kind} 默认 {defaults['max_concurrency']}）",
+            str(defaults["max_concurrency"]),
+        ),
+        "queue_timeout": _ask(
+            "排队超时秒数（满载时最多等待多久）",
+            str(defaults["queue_timeout"]),
+        ),
+        "lease_ttl": _ask(
+            "租约 TTL 秒数（进程异常退出后的自动回收时间）",
+            str(defaults["lease_ttl"]),
+        ),
+    }
+    normalized = normalize_provider_limits(raw, kind)
+    return {
+        "max_concurrency": normalized["max_concurrency"],
+        "queue_timeout": normalized["queue_timeout"],
+        "lease_ttl": normalized["lease_ttl"],
+    }
 
 
 # 1x1 像素的 PNG，用于真实探测本地模型是否真的接受图片输入。
@@ -761,7 +804,8 @@ def _probe_vision(endpoint: str, model: str, api_key: str = "") -> tuple[bool, s
 
 def _configure_local(config: dict) -> None:
     print("\n本地模型配置")
-    print("支持 Ollama、llama.cpp、vLLM、LM Studio 等 OpenAI 兼容接口；本地模型始终单并发。")
+    print("支持 Ollama、llama.cpp、vLLM、LM Studio 等 OpenAI 兼容接口。")
+    print("这里填写的是独立协作模型，不要填写正在驱动当前 Agent 的主模型。")
     if not _yes_no("配置本地模型", True):
         return
     found = _scan_local_services()
@@ -789,7 +833,7 @@ def _configure_local(config: dict) -> None:
         default_model = "llama3.2"
     model = _ask("模型名称", default_model)
     alias = _ask("本地模型别名", model)
-    queue_timeout = _ask("最多等待多少秒（超过后改走线上或离线规则）", "30")
+    limits = _ask_provider_limits("local")
     if not _valid_url(endpoint):
         print("接口地址无效，已跳过。")
         return
@@ -815,8 +859,7 @@ def _configure_local(config: dict) -> None:
         local_entries = []
         config["local_providers"] = local_entries
     local_entries[:] = [{"id": alias, "name": alias, "endpoint": endpoint,
-        "model": model, "enabled": True, "queue_timeout": int(queue_timeout or 30),
-        "vision": bool(vision)}]
+        "model": model, "enabled": True, **limits, "vision": bool(vision)}]
     print("已保存本地模型配置。首次调用时会再次检查服务是否启动。")
     if not vision:
         print("该模型未标记图片识别能力：普通文字任务仍可使用，agent-image 不会把图片发给它。")
@@ -825,6 +868,7 @@ def _configure_local(config: dict) -> None:
 def _configure_api(config: dict) -> None:
     print("\nAPI 模型配置")
     print("API 密钥只加密保存在本机；Commander 子 Agent 不会调用 API Provider。")
+    print("这里填写的是独立协作模型，不要填写 Codex 主模型或与它共用的接口。")
     if not _yes_no("配置 API 模型", True):
         return
     endpoint = _ask("API 地址", "https://api.openai.com/v1")
@@ -833,6 +877,7 @@ def _configure_api(config: dict) -> None:
     alias = _ask("模型别名", model)
     print("请求类型：1. OpenAI 兼容聊天接口  2. 自定义兼容接口")
     request_type = "openai-compatible" if input("请选择 [1]：").strip() != "2" else "custom-compatible"
+    limits = _ask_provider_limits("api")
     if not _valid_url(endpoint) or not api_key or not model:
         print("API 配置不完整，已跳过。")
         return
@@ -847,7 +892,8 @@ def _configure_api(config: dict) -> None:
         api_entries = []
         config["api_providers"] = api_entries
     api_entries[:] = [{"id": alias, "name": alias, "endpoint": endpoint,
-        "api_key": api_key, "model": model, "request_type": request_type, "enabled": True, "timeout": 60}]
+        "api_key": api_key, "model": model, "request_type": request_type,
+        "enabled": True, "timeout": 60, **limits}]
     if _yes_no("现在发送一次测试请求", False):
         chat_ok, chat_message = _probe_chat(endpoint, model, api_key)
         print(f"API 聊天测试：{chat_message}。")
@@ -1251,6 +1297,8 @@ def run_web_configurator() -> None:
         return f"{kind}_providers"
 
     def upsert_provider(kind: str, value: dict) -> dict:
+        from scripts.config_manager import normalize_provider_limits
+
         section = provider_kind(kind)
         provider_id = str(value.get("id", "")).strip().lower()
         if not _valid_provider_id(provider_id):
@@ -1266,14 +1314,22 @@ def run_web_configurator() -> None:
                      "adapter": "deepseek" if provider_id == "deepseek-web" else "generic",
                      # 表单保存不带 state_file；必须保留旧值，否则登录状态指针会被清空
                      "state_file": str(value.get("state_file") or old.get("state_file") or ""),
+                     "max_concurrency": value.get("max_concurrency", old.get("max_concurrency")),
+                     "queue_timeout": value.get("queue_timeout", old.get("queue_timeout")),
+                     "lease_ttl": value.get("lease_ttl", old.get("lease_ttl")),
                      "conversation": conversation}
         elif kind == "local":
             endpoint = str(value.get("endpoint", "")).strip()
             if not _valid_url(endpoint) or not value.get("model"):
                 raise ValueError("本地接口地址和模型名称不能为空")
+            old = next((x for x in config.get(section, []) if isinstance(x, dict) and x.get("id") == provider_id), {})
             value = {"id": provider_id, "name": str(value.get("name") or provider_id), "endpoint": endpoint,
                      "model": str(value["model"]), "enabled": bool(value.get("enabled", True)),
-                     "queue_timeout": max(1, min(3600, int(value.get("queue_timeout", 30))))}
+                     # 配置页面不回显运行时探测结果；编辑文字配置时保留识图能力。
+                     "vision": bool(value.get("vision", old.get("vision", False))),
+                     "max_concurrency": value.get("max_concurrency", old.get("max_concurrency")),
+                     "queue_timeout": value.get("queue_timeout", old.get("queue_timeout")),
+                     "lease_ttl": value.get("lease_ttl", old.get("lease_ttl"))}
         else:
             endpoint = str(value.get("endpoint", "")).strip()
             if not _valid_url(endpoint) or not value.get("model"):
@@ -1286,7 +1342,11 @@ def run_web_configurator() -> None:
             value = {"id": provider_id, "name": str(value.get("name") or provider_id), "endpoint": endpoint,
                      "model": str(value["model"]), "api_key": api_key, "request_type": str(value.get("request_type", "openai-compatible")),
                      "format": fmt,
-                     "enabled": bool(value.get("enabled", True)), "timeout": max(5, min(600, int(value.get("timeout", 60))))}
+                     "enabled": bool(value.get("enabled", True)), "timeout": max(5, min(600, int(value.get("timeout", 60)))),
+                     "max_concurrency": value.get("max_concurrency", old.get("max_concurrency")),
+                     "queue_timeout": value.get("queue_timeout", old.get("queue_timeout")),
+                     "lease_ttl": value.get("lease_ttl", old.get("lease_ttl"))}
+        value = normalize_provider_limits(value, kind)
         entries = config.setdefault(section, [])
         entries[:] = [item for item in entries if not isinstance(item, dict) or item.get("id") != provider_id]
         entries.append(value)

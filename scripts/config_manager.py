@@ -107,6 +107,74 @@ def default_config() -> dict[str, Any]:
     }
 
 
+PROVIDER_CONCURRENCY_DEFAULTS = {
+    "web": 1,
+    "local": 1,
+    "api": 10,
+}
+PROVIDER_QUEUE_TIMEOUT_DEFAULT = 30
+PROVIDER_LEASE_TTL_DEFAULT = 90
+
+
+def _bounded_integer(
+    value: object,
+    default: int,
+    *,
+    minimum: int = 1,
+    maximum: int = 3600,
+) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def provider_concurrency_defaults(kind: str) -> dict[str, int]:
+    """Return the safe defaults for one Provider category."""
+    normalized_kind = str(kind or "").strip().lower()
+    if normalized_kind not in PROVIDER_CONCURRENCY_DEFAULTS:
+        raise ValueError(f"未知 Provider 类型：{kind!r}")
+    return {
+        "max_concurrency": PROVIDER_CONCURRENCY_DEFAULTS[normalized_kind],
+        "queue_timeout": PROVIDER_QUEUE_TIMEOUT_DEFAULT,
+        "lease_ttl": PROVIDER_LEASE_TTL_DEFAULT,
+    }
+
+
+def normalize_provider_limits(item: object, kind: str) -> dict[str, Any]:
+    """Add bounded concurrency controls while preserving old Provider fields.
+
+    API Providers are usually stateless and can serve several requests, so
+    their default limit is 10. A local model and a logged-in web conversation
+    share mutable state, so those default to one unless explicitly increased.
+    """
+    raw = dict(item) if isinstance(item, dict) else {}
+    defaults = provider_concurrency_defaults(kind)
+    normalized = {
+        **raw,
+        "max_concurrency": _bounded_integer(
+            raw.get("max_concurrency"),
+            defaults["max_concurrency"],
+            minimum=1,
+            maximum=100,
+        ),
+        "queue_timeout": _bounded_integer(
+            raw.get("queue_timeout"),
+            defaults["queue_timeout"],
+            minimum=1,
+            maximum=3600,
+        ),
+        "lease_ttl": _bounded_integer(
+            raw.get("lease_ttl"),
+            defaults["lease_ttl"],
+            minimum=10,
+            maximum=3600,
+        ),
+    }
+    return normalized
+
+
 def provider_title_stem(provider_id: str) -> str:
     """Return the human-readable CamelCase part of an automatic session title."""
     aliases = {"deepseek": "DeepSeek", "qianwen": "Qianwen", "kimi": "Kimi"}
@@ -206,7 +274,7 @@ def _normalize_web_provider(item: object) -> dict[str, Any] | None:
         return None
     name = str(item.get("name") or provider_id)
     base_url = str(item.get("base_url") or item.get("url") or "").strip()
-    normalized = {
+    normalized = normalize_provider_limits({
         **item,
         "id": provider_id,
         "name": name,
@@ -215,7 +283,24 @@ def _normalize_web_provider(item: object) -> dict[str, Any] | None:
         "enabled": bool(item.get("enabled", True)),
         "adapter": str(item.get("adapter") or ("deepseek" if provider_id == "deepseek-web" else "")),
         "conversation": normalize_conversation(provider_id, item.get("conversation")),
-    }
+    }, "web")
+    return normalized
+
+
+def _normalize_provider_list(items: object, kind: str) -> list[dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        provider_id = str(item.get("id") or "").strip().lower()
+        if not provider_id:
+            continue
+        normalized.append(normalize_provider_limits(
+            {**item, "id": provider_id},
+            kind,
+        ))
     return normalized
 
 
@@ -268,6 +353,12 @@ def load_config(home: Path | None = None) -> dict[str, Any]:
         normalized for item in merged.get("web_providers", [])
         if (normalized := _normalize_web_provider(item)) is not None
     ]
+    merged["local_providers"] = _normalize_provider_list(
+        merged.get("local_providers"), "local"
+    )
+    merged["api_providers"] = _normalize_provider_list(
+        merged.get("api_providers"), "api"
+    )
     commander = merged["commander"]
     if not commander.get("terminal_path"):
         commander["terminal_path"] = commander.get("terminal", "codex")
@@ -391,6 +482,12 @@ def save_config(value: Mapping[str, Any], home: Path | None = None) -> Path:
         item for raw in normalized.get("web_providers", [])
         if (item := _normalize_web_provider(raw)) is not None
     ]
+    normalized["local_providers"] = _normalize_provider_list(
+        normalized.get("local_providers"), "local"
+    )
+    normalized["api_providers"] = _normalize_provider_list(
+        normalized.get("api_providers"), "api"
+    )
     commander = normalized.get("commander")
     if isinstance(commander, dict):
         commander["terminal_path"] = str(commander.get("terminal_path") or commander.get("terminal") or "codex")
@@ -440,7 +537,7 @@ def migrate_legacy_deepseek_config(home: Path | None = None) -> tuple[dict[str, 
         for item in providers
     )
     if target.is_file() and not has_deepseek:
-        providers.append({
+        providers.append(_normalize_web_provider({
             "id": "deepseek-web",
             "name": "DeepSeek",
             "url": "https://chat.deepseek.com/",
@@ -460,7 +557,7 @@ def migrate_legacy_deepseek_config(home: Path | None = None) -> tuple[dict[str, 
                     "hybrid": "AgentRelay-DeepSeek",
                 },
             },
-        })
+        }))
         config["default_provider"] = "deepseek-web"
         changed = True
 

@@ -916,6 +916,7 @@ try:
         venv_python,
         decrypt_provider_state,
     )
+    from .web_session_pool import WebSessionPool, find_pool_session
 except ImportError:
     from agent_relay_runtime import (
         ProviderSpec,
@@ -929,6 +930,7 @@ except ImportError:
         venv_python,
         decrypt_provider_state,
     )
+    from web_session_pool import WebSessionPool, find_pool_session
 
 # ============================================================
 # 全局配置
@@ -2821,6 +2823,7 @@ def run_provider(
         provider_name=None,
         timeout=300,
         human_input=False,
+        business=None,
 ):
     """
     执行当前 Provider 的自动对话。
@@ -2830,9 +2833,19 @@ def run_provider(
     """
 
     try:
-        from .config_manager import apply_config_to_environment
+        from .config_manager import (
+            apply_config_to_environment,
+            find_web_provider,
+            load_config,
+            provider_concurrency_defaults,
+        )
     except ImportError:
-        from config_manager import apply_config_to_environment
+        from config_manager import (
+            apply_config_to_environment,
+            find_web_provider,
+            load_config,
+            provider_concurrency_defaults,
+        )
     apply_config_to_environment()
     provider_name = provider_name or os.environ.get("AGENT_RELAY_PROVIDER", DEFAULT_PROVIDER)
 
@@ -2850,7 +2863,35 @@ def run_provider(
     binding_store = SessionBindingStore(
         SESSION_BINDINGS_FILE
     )
-    binding_scope = adapter.session_scope(mode)
+    config = load_config(CODEX_HOME)
+    provider_entry = find_web_provider(config, adapter.name) or {}
+    web_defaults = provider_concurrency_defaults("web")
+    session_business = str(
+        business
+        or os.environ.get("AGENTRELAY_WEB_SESSION_BUSINESS", "default")
+        or "default"
+    ).strip().lower() or "default"
+    session_pool = WebSessionPool(
+        adapter.name,
+        limit=int(provider_entry.get(
+            "max_concurrency",
+            web_defaults["max_concurrency"],
+        ) or web_defaults["max_concurrency"]),
+        queue_timeout=float(provider_entry.get(
+            "queue_timeout",
+            web_defaults["queue_timeout"],
+        ) or web_defaults["queue_timeout"]),
+        lease_ttl=float(provider_entry.get(
+            "lease_ttl",
+            web_defaults["lease_ttl"],
+        ) or web_defaults["lease_ttl"]),
+        home=CODEX_HOME,
+        business=session_business,
+    )
+    pool_context = None
+    pool_entered = False
+    binding_scope = ""
+    pool_title = ""
 
     # 通用兜底默认有头（反风控、验证可人工处理）；环境变量可全局强制。
     headless = not getattr(adapter, "prefer_headful", False)
@@ -2868,6 +2909,11 @@ def run_provider(
         context = None
 
         try:
+            pool_context = session_pool.claim()
+            session_slot = pool_context.__enter__()
+            pool_entered = True
+            binding_scope = session_slot.binding_scope
+            pool_title = session_slot.title
 
             browser, context = (
                 create_browser_context(
@@ -2910,10 +2956,22 @@ def run_provider(
             # 确保当前使用对应 Adapter
             adapter = detected_adapter
 
-            target = binding_store.get(adapter.name, binding_scope)
+            owner = session_pool.slot_owner_record(session_slot.slot)
+            same_business = owner.get("business") == session_business
+            owned_session_id = owner.get("session_id", "") if same_business else ""
+            target = (
+                binding_store.get(adapter.name, binding_scope)
+                if same_business and owned_session_id
+                else None
+            )
             creating_new_session = False
+            adopting_legacy_session = False
 
-            if target and adapter.is_session_reference_valid(target):
+            if (
+                target
+                and target.session_id == owned_session_id
+                and adapter.is_session_reference_valid(target)
+            ):
                 try:
                     print(
                         f"\n使用已绑定会话："
@@ -2934,16 +2992,58 @@ def run_provider(
                 print("\n正在扫描左侧对话栏...")
                 sessions = adapter.list_sessions(page)
                 print(f"发现 {len(sessions)} 个会话。")
-                target = adapter.find_target_session(sessions, mode=mode)
+                if owned_session_id:
+                    target = find_pool_session(
+                        sessions,
+                        pool_title,
+                        session_id=owned_session_id,
+                    )
+                if (
+                    target is None
+                    and session_slot.slot == 1
+                    and not owner.get("business")
+                    and session_pool.consume_legacy_adoption()
+                ):
+                    # The pre-pool single conversation can be adopted exactly
+                    # once. A later business must start from a clean session.
+                    target = adapter.find_target_session(sessions, mode=mode)
+                    adopting_legacy_session = target is not None
 
                 if target is not None:
                     print(
-                        f"✅ 找到{adapter.canonical_session_title(mode)}类会话："
+                        f"✅ 找到{pool_title}会话："
                         f"{target.title}"
                     )
                     adapter.open_session(page, target)
                     adapter.configure_mode(page, mode)
                     binding_store.put(binding_scope, target)
+                    session_pool.set_slot_owner(
+                        session_slot.slot,
+                        session_id=target.session_id,
+                        href=target.href,
+                    )
+                    if (
+                        adopting_legacy_session
+                        or " ".join(str(target.title or "").split()).casefold()
+                        != " ".join(pool_title.split()).casefold()
+                    ):
+                        try:
+                            target = adapter.rename_session(
+                                page,
+                                target,
+                                pool_title,
+                            )
+                            binding_store.put(binding_scope, target)
+                            session_pool.set_slot_owner(
+                                session_slot.slot,
+                                session_id=target.session_id,
+                                href=target.href,
+                            )
+                        except Exception as exc:
+                            log_error(
+                                f"编号会话改名失败 provider={adapter.name} "
+                                f"slot={session_slot.slot}: {exc}"
+                            )
                 else:
                     creating_new_session = True
                     adapter.prepare_new_session(page, mode)
@@ -3056,13 +3156,13 @@ def run_provider(
                         deadline = time.monotonic() + 15
                         target = adapter.current_session(
                             page,
-                            adapter.canonical_session_title(mode),
+                            pool_title,
                         )
                         while target is None and time.monotonic() < deadline:
                             page.wait_for_timeout(200)
                             target = adapter.current_session(
                                 page,
-                                adapter.canonical_session_title(mode),
+                                pool_title,
                             )
                         if target is None:
                             raise RuntimeError("发送后未获得新会话 URL")
@@ -3142,7 +3242,7 @@ def run_provider(
                             )
 
             if creating_new_session:
-                canonical_title = adapter.canonical_session_title(mode)
+                canonical_title = pool_title
                 try:
                     target = adapter.rename_session(
                         page,
@@ -3156,6 +3256,11 @@ def run_provider(
                     )
                     print(f"⚠️ 新会话已创建，但重命名失败：{exc}")
                 binding_store.put(binding_scope, target)
+                session_pool.set_slot_owner(
+                    session_slot.slot,
+                    session_id=target.session_id,
+                    href=target.href,
+                )
 
             # ------------------------------------------------
             # 返回结果（包含实际使用的图片列表）
@@ -3174,6 +3279,13 @@ def run_provider(
             }
 
         finally:
+            if pool_context is not None and pool_entered:
+                try:
+                    pool_context.__exit__(None, None, None)
+                except Exception as exc:
+                    log_error(
+                        f"网页会话租约释放失败 provider={adapter.name}: {exc}"
+                    )
 
             if context:
 

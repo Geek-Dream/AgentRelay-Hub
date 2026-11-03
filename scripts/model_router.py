@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
+from typing import Any, Mapping
 
 @dataclass(frozen=True)
 class ModelChoice:
@@ -12,6 +13,115 @@ class ModelChoice:
     reason: str
     fallback: str = "local"
     score: float = 0.0
+
+
+@dataclass(frozen=True)
+class ProviderRoute:
+    """A capability-aware route that never hides a loss of execution ability."""
+
+    provider_id: str
+    kind: str
+    role: str
+    executable: bool
+    advisory: bool
+    capabilities: tuple[str, ...]
+    capability_loss: tuple[str, ...]
+    fallback_reason: str = ""
+
+
+def provider_capabilities(kind: str, entry: Mapping[str, Any] | None = None) -> tuple[str, ...]:
+    """Describe what a Provider can safely do from AgentRelay's perspective."""
+    normalized_kind = str(kind or "").strip().lower()
+    values = entry if isinstance(entry, Mapping) else {}
+    if normalized_kind in {"api", "local"}:
+        capabilities = ["text", "analysis", "code_generation", "code_review"]
+        if normalized_kind == "local" and bool(values.get("vision")):
+            capabilities.append("images")
+        return tuple(capabilities)
+    if normalized_kind == "web":
+        capabilities = ["text", "analysis", "code_assistance", "web_search", "data_organization"]
+        conversation = values.get("conversation")
+        images = conversation.get("images") if isinstance(conversation, Mapping) else {}
+        if isinstance(images, Mapping) and any(bool(value) for value in images.values()):
+            capabilities.append("images")
+        if bool(values.get("supports_file_upload")):
+            capabilities.append("file_upload")
+        return tuple(capabilities)
+    return ()
+
+
+def route_provider_task(
+    providers: Mapping[str, Mapping[str, Any]],
+    *,
+    preferred: str = "",
+    needs_local_execution: bool = False,
+    advisory_allowed: bool = True,
+) -> ProviderRoute | None:
+    """Choose an executable or advisory Provider without silent web execution.
+
+    ``needs_local_execution`` is used for Fusion coding and local tool use. In
+    that mode the only valid order is API, then local. Web Providers may still
+    answer advisory questions, but they are always marked non-executable.
+    """
+    available = {
+        str(provider_id): dict(value)
+        for provider_id, value in providers.items()
+        if isinstance(value, Mapping) and bool(value.get("enabled", True))
+    }
+    preferred_id = str(preferred or "").strip()
+    if preferred_id and preferred_id in available:
+        item = available[preferred_id]
+        kind = str(item.get("kind") or "").strip().lower()
+        if not needs_local_execution or kind in {"api", "local"}:
+            return ProviderRoute(
+                provider_id=preferred_id,
+                kind=kind,
+                role="executor" if kind in {"api", "local"} else "advisory",
+                executable=kind in {"api", "local"},
+                advisory=kind == "web",
+                capabilities=provider_capabilities(kind, item.get("entry")),
+                capability_loss=() if kind in {"api", "local"} else ("local_read_write", "shell_execution"),
+            )
+
+    for kind in (("api", "local") if needs_local_execution else ("api", "local", "web")):
+        candidates = sorted(
+            provider_id
+            for provider_id, item in available.items()
+            if str(item.get("kind") or "").lower() == kind
+        )
+        if candidates:
+            provider_id = candidates[0]
+            item = available[provider_id]
+            return ProviderRoute(
+                provider_id=provider_id,
+                kind=kind,
+                role="executor" if kind in {"api", "local"} else "advisory",
+                executable=kind in {"api", "local"},
+                advisory=kind == "web",
+                capabilities=provider_capabilities(kind, item.get("entry")),
+                capability_loss=() if kind in {"api", "local"} else ("local_read_write", "shell_execution"),
+                fallback_reason="PREFERRED_PROVIDER_UNAVAILABLE",
+            )
+    if advisory_allowed and not needs_local_execution:
+        web_candidates = sorted(
+            provider_id
+            for provider_id, item in available.items()
+            if str(item.get("kind") or "").lower() == "web"
+        )
+        if web_candidates:
+            provider_id = web_candidates[0]
+            item = available[provider_id]
+            return ProviderRoute(
+                provider_id=provider_id,
+                kind="web",
+                role="advisory",
+                executable=False,
+                advisory=True,
+                capabilities=provider_capabilities("web", item.get("entry")),
+                capability_loss=("local_read_write", "shell_execution"),
+                fallback_reason="ADVISORY_ONLY",
+            )
+    return None
 
 
 class ProviderRouteMemory:

@@ -17,11 +17,19 @@ for _candidate in (SCRIPT_DIR, _RELAY_SCRIPT_DIR):
         sys.path.insert(0, str(_candidate))
 
 try:
-    from . import config_manager, fusion_mode, fusion_runner  # noqa: E402
+    from . import (  # noqa: E402
+        config_manager,
+        fusion_mode,
+        fusion_runner,
+        provider_leases,
+        sensitive_redaction,
+    )
 except ImportError:
     import config_manager  # noqa: E402
     import fusion_mode  # noqa: E402
     import fusion_runner  # noqa: E402
+    import provider_leases  # noqa: E402
+    import sensitive_redaction  # noqa: E402
 
 
 RESULT_PREFIX = "AGENT_FUSION_RESULT="
@@ -207,18 +215,23 @@ def _call_web_provider(
     provider: Mapping[str, Any],
     messages: list[dict[str, Any]],
     timeout: int,
+    business: str = "default",
 ) -> dict[str, Any]:
     try:
         from .agent_relay import run_provider
     except ImportError:
         from agent_relay import run_provider
+    redaction = sensitive_redaction.redact_text(_web_prompt(messages))
     raw = run_provider(
-        _web_prompt(messages),
+        redaction.text,
         "expert",
         provider_name=str(provider["id"]),
         timeout=timeout,
+        business=business,
     )
-    answer = str(raw.get("answer", "") if isinstance(raw, dict) else raw or "").strip()
+    answer = redaction.restore(
+        str(raw.get("answer", "") if isinstance(raw, dict) else raw or "")
+    ).strip()
     if not answer:
         raise RuntimeError("网页 Provider 返回了空回答")
     return {
@@ -227,6 +240,7 @@ def _call_web_provider(
             "message": {"role": "assistant", "content": answer},
             "finish_reason": "stop",
         }],
+        "agentrelay_redaction": redaction.audit(),
     }
 
 
@@ -236,17 +250,22 @@ def _call_provider_model(
     tools: list[dict[str, Any]],
     timeout: int,
     home: Path | None,
+    business: str = "default",
 ) -> dict[str, Any]:
     config_manager.apply_config_to_environment(home)
     kind = str(provider["kind"])
     entry = provider["entry"]
+    # Web calls claim a numbered conversation slot inside run_provider(). Taking
+    # a second lease here would reserve two slots for one request.
     if kind == "web":
-        return _call_web_provider(provider, messages, timeout)
-    if kind == "local":
-        return _call_chat_model(entry, messages, tools, timeout)
-    if kind == "api":
-        return _call_formatted_model(entry, messages, tools, timeout)
-    raise RuntimeError(f"不支持的 Fusion Provider 类型：{kind}")
+        return _call_web_provider(provider, messages, timeout, business=business)
+    manager = fusion_mode.provider_lease_manager(provider, home=home)
+    with manager.lease(metadata={"caller": "fusion", "pid": os.getpid()}):
+        if kind == "local":
+            return _call_chat_model(entry, messages, tools, timeout)
+        if kind == "api":
+            return _call_formatted_model(entry, messages, tools, timeout)
+        raise RuntimeError(f"不支持的 Fusion Provider 类型：{kind}")
 
 
 def _delegate_error_messages() -> dict[str, str]:
@@ -261,6 +280,7 @@ def _delegate_error_messages() -> dict[str, str]:
         "COMMANDER_CHILD": "当前进程是 Commander 子 Agent，不能调用 Fusion",
         "FUSION_CHILD": "当前进程是 Fusion 子会话，不能递归调用 Fusion 或 Commander",
         "FUSION_TOOL_MODE_UNSUPPORTED": "网页 Provider 不支持 coding 模式，请切换为 readonly",
+        "FUSION_PROVIDER_BUSY": "Fusion Provider 正在满负荷处理其他会话，排队等待已超时",
     }
 
 
@@ -298,6 +318,10 @@ def delegate(
     if provider is None:
         return _error("failed", error, "无法解析 Fusion Provider", state=state)
     provider_public = fusion_mode.public_provider(provider)
+    environment = environ if environ is not None else os.environ
+    web_business = str(
+        environment.get("AGENTRELAY_WEB_SESSION_BUSINESS") or "default"
+    )
     selected_workspace = (
         Path(workspace).expanduser()
         if workspace is not None
@@ -309,7 +333,14 @@ def delegate(
         tools: list[dict[str, Any]],
         timeout: int,
     ) -> dict[str, Any]:
-        return _call_provider_model(provider, messages, tools, timeout, home)
+        return _call_provider_model(
+            provider,
+            messages,
+            tools,
+            timeout,
+            home,
+            business=web_business,
+        )
 
     try:
         result = fusion_runner.run_sidekick(
@@ -326,6 +357,24 @@ def delegate(
             lock_dir=lock_dir,
             environ=environ,
             call_model=call_model,
+        )
+    except provider_leases.ProviderLeaseTimeout as exc:
+        current_state = fusion_mode.fusion_state(
+            config=config,
+            home=home,
+            lock_dir=lock_dir,
+            environ=environ,
+        )
+        current_state["lease"] = exc.status
+        current_state["degraded"] = True
+        current_state["fallback_reason"] = "PROVIDER_QUEUE_TIMEOUT"
+        return _error(
+            "rejected",
+            "FUSION_PROVIDER_BUSY",
+            str(exc),
+            provider=provider_public,
+            state=current_state,
+            provider_lease=exc.status,
         )
     except fusion_runner.FusionRunnerError as exc:
         status = "rejected" if exc.code in {
@@ -360,6 +409,14 @@ def delegate(
 
     result.setdefault("provider", provider_public)
     result.setdefault("max_steps", int(state["max_steps"]))
+    result.setdefault(
+        "provider_lease",
+        fusion_mode.provider_lease_manager(
+            provider,
+            home=home,
+            business=web_business,
+        ).status(),
+    )
     result.setdefault("state", state)
     return result
 

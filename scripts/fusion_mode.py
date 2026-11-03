@@ -30,8 +30,12 @@ if _RELAY_SCRIPT_DIR.is_dir() and str(_RELAY_SCRIPT_DIR) not in sys.path:
 
 try:
     from . import config_manager  # noqa: E402
+    from . import model_router, provider_leases, web_session_pool  # noqa: E402
 except ImportError:
     import config_manager  # noqa: E402
+    import model_router  # noqa: E402
+    import provider_leases  # noqa: E402
+    import web_session_pool  # noqa: E402
 
 
 FUSION_DEFAULTS = {
@@ -195,6 +199,57 @@ def available_providers(config: Mapping[str, Any]) -> list[dict[str, str]]:
     ]
 
 
+def provider_lease_manager(
+    provider: Mapping[str, Any],
+    *,
+    home: Path | None = None,
+    queue_timeout: int | float | None = None,
+    business: str = "default",
+):
+    """Build the shared scheduler for one resolved Provider.
+
+    Web Providers are coordinated by the numbered conversation pool. Local and
+    API Providers use a regular request lease. Returning either manager here
+    keeps status checks pointed at the same storage used by real calls.
+    """
+    entry = provider.get("entry") if isinstance(provider.get("entry"), Mapping) else {}
+    kind = str(provider.get("kind") or "")
+    defaults = config_manager.provider_concurrency_defaults(kind)
+    limit = int(
+        entry.get("max_concurrency", defaults["max_concurrency"])
+        or defaults["max_concurrency"]
+    )
+    resolved_queue_timeout = (
+        float(queue_timeout)
+        if queue_timeout is not None
+        else float(
+            entry.get("queue_timeout", defaults["queue_timeout"])
+            or defaults["queue_timeout"]
+        )
+    )
+    lease_ttl = float(
+        entry.get("lease_ttl", defaults["lease_ttl"])
+        or defaults["lease_ttl"]
+    )
+    if kind == "web":
+        return web_session_pool.WebSessionPool(
+            str(provider.get("id") or provider.get("ref") or ""),
+            limit=limit,
+            queue_timeout=resolved_queue_timeout,
+            lease_ttl=lease_ttl,
+            home=home,
+            business=business,
+        )
+    return provider_leases.ProviderLeaseManager(
+        str(provider.get("ref") or provider.get("id") or ""),
+        kind=kind,
+        limit=limit,
+        queue_timeout=resolved_queue_timeout,
+        lease_ttl=lease_ttl,
+        directory=provider_leases.default_lease_directory(home),
+    )
+
+
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -309,8 +364,14 @@ def fusion_state(
         "available_providers": available_providers(loaded),
         "provider": None,
         "tool_capable": False,
+        "capability_role": "",
+        "capabilities": [],
+        "capability_loss": [],
         "delegable": False,
         "reason": "",
+        "lease": {},
+        "degraded": False,
+        "fallback_reason": "",
     }
     if activity["active"]:
         state["reason"] = activity["reason"]
@@ -328,6 +389,15 @@ def fusion_state(
         return state
     state["provider"] = public_provider(provider)
     state["tool_capable"] = provider["kind"] in {"local", "api"}
+    state["capability_role"] = "executor" if state["tool_capable"] else "advisory"
+    state["capabilities"] = list(model_router.provider_capabilities(
+        str(provider["kind"]),
+        provider.get("entry"),
+    ))
+    state["capability_loss"] = (
+        [] if state["tool_capable"]
+        else ["local_read_write", "shell_execution"]
+    )
     if fusion["tool_mode"] == "coding" and not state["tool_capable"]:
         state["reason"] = "FUSION_TOOL_MODE_UNSUPPORTED"
         return state
@@ -338,6 +408,18 @@ def fusion_state(
     if not provider_is_ready(provider):
         state["reason"] = "FUSION_PROVIDER_NOT_READY"
         return state
+    environment = environ if environ is not None else os.environ
+    web_business = str(
+        environment.get("AGENTRELAY_WEB_SESSION_BUSINESS") or "default"
+    )
+    lease_status = provider_lease_manager(
+        provider,
+        home=home,
+        business=web_business,
+    ).status()
+    state["lease"] = lease_status
+    state["degraded"] = bool(lease_status.get("degraded"))
+    state["fallback_reason"] = str(lease_status.get("fallback_reason") or "")
     state["delegable"] = True
     state["reason"] = "READY"
     return state

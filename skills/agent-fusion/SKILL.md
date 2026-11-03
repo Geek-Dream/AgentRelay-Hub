@@ -1,6 +1,6 @@
 ---
 name: agent-fusion
-description: "Delegate bulky or isolated execution work to AgentRelay Fusion's persistent sidekick, including test suites, wide searches, batch reading, mechanical scans, independent reproduction, and well-scoped implementation. Use it before doing qualifying work locally when the local status returns delegable=true; skip silently when Fusion is disabled, has no configured Provider, is busy, or Commander is active. Default readonly; coding requires an explicit switch."
+description: "Delegate bulky or isolated execution work to AgentRelay Fusion's persistent sidekick, including test suites, wide searches, batch reading, mechanical scans, independent reproduction, and well-scoped implementation. Use it before doing qualifying work locally when the local status returns delegable=true; queue only within the configured timeout, expose a busy timeout instead of silently switching to web, and skip when Fusion is disabled, has no configured Provider, or Commander is active. Default readonly; coding requires an explicit switch."
 ---
 
 # AgentFusion
@@ -62,6 +62,9 @@ Fusion 永不启动另一个 Fusion，也永不启动 Commander。Commander 拥�
   不要等待、探网、检查登录或尝试默认 Provider。
 - `COMMANDER_ACTIVE`、`COMMANDER_CHILD` 或 `FUSION_CHILD`：强制互斥，立即跳过。
 - `FUSION_DISABLED`：跳过。只有用户明确要求开启时才执行开关命令。
+- `state.degraded=true` 或 `state.fallback_reason=PROVIDER_QUEUE_ACTIVE`：Provider 已满载，
+  只能在配置的排队时间内等待。超时返回 `FUSION_PROVIDER_BUSY`，必须明确报告，不能静默
+  改成本地执行，也不能把需要读写文件的 coding 任务降级给网页模型。
 
 未配置 Provider 时状态检查在本地立即结束，不能让主任务等待外部模型。
 
@@ -92,6 +95,17 @@ FUSION="${CODEX_HOME:-$HOME/.codex}/skills/agent-fusion/scripts/agent_fusion.py"
 `on` 只开启能力，不会自动选择 Provider。Fusion 永不猜测默认 Provider；必须使用
 `web:<id>`、`local:<id>` 或 `api:<id>` 精确指定。
 
+### 共享并发与租约
+
+- 每个 Provider 的并发上限由全部 Codex 会话、Fusion 和 Commander 共享。
+- 默认上限是网页 `1`、本地 `1`、API `10`；每个 Provider 可以单独配置。
+- 满载请求按持久化 ticket 顺序排队，默认最多等待 30 秒。
+- 单个请求持有租约，默认 TTL 为 90 秒；进程退出或心跳过期后名额会自动回收。
+- 排队超时返回 `FUSION_PROVIDER_BUSY`。不要把 busy 当成“可以偷偷换网页模型”。
+
+配置 Provider 时不要填写正在驱动当前 Agent 的主模型，也不要填写与主模型共用的
+endpoint、API 或同一个本地服务。那会造成资源争用、串行、超时和错误的性能判断。
+
 ### readonly
 
 默认模式。允许：
@@ -111,6 +125,24 @@ FUSION="${CODEX_HOME:-$HOME/.codex}/skills/agent-fusion/scripts/agent_fusion.py"
 
 coding 模式可以直接修改文件并执行命令，必须由用户明确确认后才能启用。网页 Provider 没有
 工具协议，不能切换到 coding。
+
+### 网页 Provider 的 advisory 边界
+
+网页 Provider 适合咨询、简单代码建议、网络搜索、数据整理，以及在显式配置支持时识图。
+它们没有 Fusion 的工具协议，因此不能获得本机文件读写或 shell 执行能力。
+
+需要实际执行本机任务时，Fusion 的合法路由顺序是 `API → 本地`。即使网页 Provider 可用、
+并发更高或排队更短，也不能用它顶替 API 或本地模型来执行 coding 任务。
+
+### 网页会话与脱敏
+
+- 每个网页 Provider 使用 `AgentRelay-<Provider>-1`、`-2`、`-3` 等全局编号会话槽位。
+- 同一 Provider 的槽位被所有 Agent 共享；不同业务流程使用不同的上下文绑定范围。
+- 已绑定的旧网页会话只允许被兼容流程接管一次。之后的新业务流程从干净会话开始。
+- 所有槽位都忙时进入队列，达到上限后不会额外创建超量会话。
+- 网页请求发出前会替换已识别的 API Key、Bearer 令牌、密码、私钥、邮箱和手机号。
+- 可逆映射只保留在当前本机进程内存，不落盘；返回文本到达本机后再恢复原值。
+- 遇到不完整私钥等无法安全脱敏的内容时停止发送，不能把原文降级发给网页模型。
 
 ## 发起委派
 
@@ -153,5 +185,8 @@ coding 模式可以直接修改文件并执行命令，必须由用户明确确�
 - 不把密钥、Cookie、登录状态或无关的大段源码放进任务上下文。
 - Fusion 不能访问 workspace 之外的路径。
 - coding 模式能执行真实命令，必须遵守当前用户的授权范围和项目验证流程。
+- 需要本机执行时只选择 `api` 或 `local`；网页 Provider 始终按 advisory 处理。
+- Provider 满载时按租约排队，超时要明确报告，不能静默换 Provider 或改变任务能力。
 - 不让 Fusion 自己启动 Commander；脚本通过 `AGENTRELAY_FUSION_CHILD=1` 拒绝递归。
 - 不在 Commander 子 Agent 中调用 Fusion；脚本通过 `AGENTRELAY_COMMANDER_CHILD=1` 拒绝。
+- `agentrelay_daemon.py` 是可选的监控和状态汇总进程，不是 Fusion 租约或调度的必要条件。

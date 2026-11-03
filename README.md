@@ -80,6 +80,26 @@ Commander 适合跨模块或高风险任务：
 > 不要把主模型本身，或者与主模型共用同一个服务、endpoint、API 的模型填进去。<br>
 > 否则两边会争用同一个资源，出现排队、串行、超时，也会失去独立复核的价值。
 
+### 🧮 并发、排队和路由边界
+
+每个 Provider 都像一个小型服务台，所有 Codex 会话、Fusion 和 Commander 共用同一套名额：
+
+| 类型 | 默认并发 | 适合怎么用 |
+|---|---:|---|
+| 🌐 网页模型 | 1 | 编号网页会话；每个会话同一时间只处理一个请求 |
+| 💻 本地模型 | 1 | 默认假设本地服务只有一个推理槽位 |
+| 🔌 API 模型 | 10 | 按账号限额调整；提高前先确认接口真的支持并发 |
+
+- ⏳ 满载时先进入全局 FIFO 队列，默认最多等待 30 秒。
+- 🛑 排队超时会返回明确的 `FUSION_PROVIDER_BUSY`，不会偷偷改成另一个模型继续执行。
+- 🧹 每个请求持有短租约；调用方异常退出后，租约默认在 90 秒内自动回收。
+- 🧠 需要读写文件或执行命令的任务只走 `api → local`。网页模型只能提供咨询、代码建议、
+  网页搜索、数据整理或在配置支持时识图，不能获得本机读写和 shell 执行能力。
+- 🔢 网页会话使用 `AgentRelay-DeepSeek-1`、`-2`、`-3` 这样的全局编号槽位；不同业务流程
+  不复用彼此历史。没有空闲槽位时排队，不会通过混用旧上下文假装扩容。
+- 🕵️ 发给网页模型前会替换识别到的密钥、令牌、邮箱和手机号；恢复映射只留在当前本机进程
+  内存中，不写盘。遇到不完整私钥等无法安全处理的内容时会停止发送。
+
 ---
 
 ## 🚦 什么时候会触发？
@@ -181,10 +201,12 @@ waiting_for_approval
 Fusion 能力默认开启，但 **不等于每轮都会自动干活，也不会自动选择 Provider**：
 
 - ✅ 已配置可用 Provider，且状态为 `delegable=true`：主 Agent 可以委派
-- ⏸️ 未配置 Provider、Fusion 已关闭或正在忙：立即跳过，不等待、不探网
+- ⏸️ 未配置 Provider、Fusion 已关闭或 Provider 不可用：立即跳过，不等待、不探网
+- ⏳ Provider 满载：按配置进入 FIFO 队列；超时后明确报告忙，不会静默降级成网页执行
 - 👑 Commander 运行时：Fusion 强制暂停，避免两个调度器互相抢占
 - 🎯 Provider 必须显式指定，例如 `web:deepseek-web`、`local:local-llm` 或
   `api:kimi-api`；没有 `provider_id` 时不会偷偷借用 Codex 主模型
+- 🌐 指定网页 Provider 时只能做咨询；需要 Fusion 实际改文件或跑命令时必须选择 API 或本地模型
 
 Fusion 适合“输出很多、边界清楚、可以独立完成”的工作，例如：
 
@@ -261,8 +283,9 @@ web
 1. 🌐 添加网页、本地或 API 模型
 2. 🔑 网页模型点击“打开网页登录”，手动完成登录
 3. 🧪 点击“测试”确认模型可用
-4. 👑 按需启用 Commander
-5. ✅ 点击“完成并关闭”
+4. 🧮 为每个协作模型设置最大并发、排队超时和租约回收时间
+5. 👑 按需启用 Commander
+6. ✅ 点击“完成并关闭”
 
 > 🔒 登录状态和 API Key 只保存在本机加密目录。<br>
 > 🚫 AgentRelay 不会绕过 CAPTCHA，也不会自动填写账号密码。
@@ -413,6 +436,7 @@ $CODEX_HOME/agent_relay_tracker/logs/error.log
 | 🔑 网页登录失效 | 重新打开配置中心并登录；不要手动编辑登录状态文件 |
 | 🌐 网页保存了但不能自动对话 | 网站是否有适配器；DeepSeek 已内置，其他网站能力取决于当前 Adapter |
 | ⚡ Fusion 不工作 | 是否配置 Provider；`status --json` 是否返回 `delegable=true` |
+| ⏳ Fusion 一直排队或返回忙 | 查看该 Provider 的 `max_concurrency`；确认没有把主模型或同一本地服务重复填入 |
 | 👑 Commander 合并暂停 | 主工作区是否被改动；不同 Agent 是否修改了同一个文件 |
 | 🖥️ Chromium 找不到 | 重新运行 `python3 install.py`，或设置 `AGENT_RELAY_BROWSER_PATH` |
 
@@ -427,6 +451,7 @@ $CODEX_HOME/agent_relay_tracker/logs/error.log
 - 🧠 外部模型建议必须由主 Agent 验证，不能直接当作最终答案
 - 🧰 Fusion 只能访问指定 workspace
 - 👑 Commander 使用隔离 workspace，默认不会覆盖主工作区
+- 🕵️ 网页咨询发送前做可逆脱敏；敏感映射只保存在当前进程内存，不写入项目或运行文件
 - 🔐 Cookie、登录状态和 API Key 不写入项目、日志或 Git
 
 ---
@@ -477,6 +502,15 @@ Agent 结合上下文判断：现在是否需要外援
 Skill 选择 web / api / local Provider
    │
    ▼
+主 Agent 按能力判断：API / 本地可执行，网页只提供咨询
+   │
+   ▼
+Provider 租约或编号网页会话槽位（全局 FIFO 排队）
+   │
+   ▼
+网页请求发送前脱敏，返回后在本机恢复原值
+   │
+   ▼
 Provider Adapter 调用外部模型
    │
    ▼
@@ -492,6 +526,10 @@ Provider Adapter 调用外部模型
 | `skills/agent-image/` | 把图片交给支持识图的 Provider |
 | `skills/agent-fusion/` | 管理 Fusion 开关、Provider、模式、会话和工具循环 |
 | `scripts/agent_provider.py` | 统一处理网页、API 和本地模型 |
+| `scripts/provider_leases.py` | 跨进程 Provider 并发租约、FIFO 排队和异常回收 |
+| `scripts/web_session_pool.py` | 全局编号网页会话、业务流程隔离和槽位复用 |
+| `scripts/sensitive_redaction.py` | 网页咨询前的可逆脱敏与本机恢复 |
+| `scripts/model_router.py` | 根据能力选择可执行或只读咨询 Provider |
 | `scripts/fusion_runner.py` | Fusion 的持久会话、工具调用、步数限制和交接 |
 | `scripts/research_commander.py` | Commander 的角色规划、隔离执行和结果汇总 |
 | `scripts/agentrelay_console.py` | 确认卡、Commander 和逐文件合并入口 |
@@ -508,6 +546,17 @@ AgentRelay 使用简单的时间与失败阶梯，不靠无限轮询：
 | 3️⃣ | 15 分钟以上，或重复失败明显 | 进入“是否叫外援”的判断 |
 
 系统只给候选建议，不会越过主 Agent 直接做决定。
+
+### 🧮 Provider 调度怎么工作？
+
+- 每个 Provider 的并发上限由所有 Agent 进程共享，不按单个会话重新计算。
+- 调用开始前先获取租约；轮到谁由持久化队列的 ticket 顺序决定。
+- 租约记录 PID、心跳和过期时间。进程崩溃后，不再存活或过期的名额会被下一个调用回收。
+- 网页 Provider 使用同一套租约，但每个名额对应一个编号会话和业务流程绑定范围。
+- 需要执行本机操作时，路由器按 `API → 本地` 选择；网页 Provider 会被标记为 advisory，
+  即使它满载、排队或不可用，也不能被当成隐式执行器。
+- 队列超时会返回结构化错误，主 Agent 必须报告“当前 Provider 忙”，不能伪造成功或静默
+  换用另一种能力。
 
 ### ⚡ Fusion 为什么不会递归？
 
@@ -530,7 +579,8 @@ AgentRelay 使用简单的时间与失败阶梯，不靠无限轮询：
 运行主要测试：
 
 ```bash
-"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" -m pytest -q
+"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" \
+  -m unittest discover -s tests -v
 ```
 
 检查差异格式：
@@ -539,7 +589,8 @@ AgentRelay 使用简单的时间与失败阶梯，不靠无限轮询：
 git diff --check
 ```
 
-AgentRelay 没有后台常驻进程。Hook 只会在对应 Agent 会话运行时被拉起，网页配置服务在关闭页面后立即停止。
+Hook 和 Provider 租约都按需运行，不需要常驻服务。网页配置服务在关闭页面后停止；可选的
+`agentrelay_daemon.py` 只负责周期监控和汇总 Provider 租约状态，不是 Fusion 调度的前提。
 
 ---
 
