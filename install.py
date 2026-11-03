@@ -81,6 +81,8 @@ SCRIPT_FILES = (
     "task_scheduler.py",
     "config_manager.py",
     "config_web.py",
+    "page_verification.py",
+    "verify_page.py",
     "generic_web_adapter.py",
     "diagnose_web_provider.py",
     "agent_relay_archive.py",

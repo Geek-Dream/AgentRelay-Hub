@@ -5571,6 +5571,53 @@ def extract_last_assistant_message(data):
 # Hook 事件入口
 # ============================================================
 
+def _page_verification_module():
+    """Resolve scripts both from the source checkout and the installed Skill."""
+    import importlib
+    try:
+        return importlib.import_module("scripts.page_verification")
+    except ImportError:
+        for base in (CODEX_DIR / "skills" / "agent-relay", Path(__file__).resolve().parent.parent):
+            script_dir = base / "scripts"
+            if (script_dir / "page_verification.py").is_file():
+                sys.path.insert(0, str(script_dir))
+                return importlib.import_module("page_verification")
+        raise
+
+
+def record_page_verification_edit(session_id, data, tool_name, tool_input, tool_output,
+                                  before=False):
+    """Keep page evidence separate from the long-lived problem tracker state."""
+    try:
+        module = _page_verification_module()
+        if before:
+            module.record_command_start(CODEX_DIR, session_id, str(data.get("cwd") or os.getcwd()),
+                                        tool_name, tool_input)
+        else:
+            module.record_page_edit(CODEX_DIR, session_id, str(data.get("cwd") or os.getcwd()),
+                                    tool_name, tool_input, tool_output)
+    except (ImportError, OSError, ValueError, TypeError) as exc:
+        log_event("page_verification_record_error", {"error": str(exc)})
+
+
+def page_completion_block_reason(session_id, message):
+    try:
+        module = _page_verification_module()
+        if module.completion_claim(message):
+            return module.verify_evidence(CODEX_DIR, session_id)
+    except (ImportError, OSError, ValueError, TypeError) as exc:
+        log_event("page_verification_check_error", {"error": str(exc)})
+    return None
+
+
+def pending_page_verification_reason(session_id):
+    try:
+        return _page_verification_module().verify_evidence(CODEX_DIR, session_id)
+    except (ImportError, OSError, ValueError, TypeError) as exc:
+        log_event("page_verification_check_error", {"error": str(exc)})
+        return None
+
+
 def handle_hook_event(
     event_name,
     data,
@@ -5626,6 +5673,10 @@ def handle_hook_event(
         )
 
     if event_name == "UserPromptSubmit":
+        pending_page_reason = pending_page_verification_reason(session_id)
+        if pending_page_reason:
+            emit_hook_context("UserPromptSubmit", pending_page_reason)
+            return read_state(session_id=session_id)
         prompt = extract_prompt(data)
         approval_controls = approval_controls_snapshot(
             read_state(session_id=session_id),
@@ -5681,6 +5732,7 @@ def handle_hook_event(
             )
             return read_state(session_id=session_id)
 
+        record_page_verification_edit(session_id, data, tool_name, tool_input, None, before=True)
         return handle_pre_tool_use(
             tool_name=tool_name,
             tool_input=tool_input,
@@ -5693,16 +5745,15 @@ def handle_hook_event(
     if event_name in ("PostToolUse", "PostToolUseFailure"):
         # PostToolUseFailure 由 Kimi Code 在工具失败时触发（shim 已把
         # error 桥接为 tool_output）；按同一入口统计失败与重试。
+        tool_name = extract_tool_name(data)
+        tool_input = extract_tool_input(data)
+        tool_output = extract_tool_output(data)
+        if event_name == "PostToolUse":
+            record_page_verification_edit(session_id, data, tool_name, tool_input, tool_output)
         return handle_post_tool_use(
-            tool_name=extract_tool_name(
-                data
-            ),
-            tool_input=extract_tool_input(
-                data
-            ),
-            tool_output=extract_tool_output(
-                data
-            ),
+            tool_name=tool_name,
+            tool_input=tool_input,
+            tool_output=tool_output,
             tool_use_id=extract_tool_use_id(
                 data
             ),
@@ -5710,9 +5761,14 @@ def handle_hook_event(
         )
 
     if event_name == "Stop":
+        message = extract_last_assistant_message(data)
+        reason = page_completion_block_reason(session_id, message)
+        if reason:
+            print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False), flush=True)
+            return read_state(session_id=session_id)
         return handle_stop(
             session_id=session_id,
-            last_assistant_message=extract_last_assistant_message(data),
+            last_assistant_message=message,
         )
 
     return read_state(

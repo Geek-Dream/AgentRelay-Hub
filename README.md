@@ -589,6 +589,18 @@ AgentRelay 使用简单的时间与失败阶梯，不靠无限轮询：
 git diff --check
 ```
 
+真实页面检查（Chromium 必须已安装；失败返回 1，不会把跳过当通过）：
+
+```bash
+"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" \
+  scripts/verify_page.py --output runtime/page-verification
+```
+
+检查会实际打开配置中心，点击全部导航、切换明暗主题，检查桌面与手机布局，并保存截图、
+控制台错误和 `result.json`。修改 HTML/CSS/JS/页面模板后，Hook 会按会话记录文件哈希；
+声称“页面完成/验证通过”时，必须有覆盖当前文件版本的真实浏览器证据，否则 Stop 会阻断。
+再次修改文件会使旧证据失效；非页面任务不触发。CI 同样运行页面检查并上传截图。
+
 Hook 和 Provider 租约都按需运行，不需要常驻服务。网页配置服务在关闭页面后停止；可选的
 `agentrelay_daemon.py` 只负责周期监控和汇总 Provider 租约状态，不是 Fusion 调度的前提。
 

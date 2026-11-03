@@ -543,7 +543,7 @@ class AgentRelayConsoleCardTests(unittest.TestCase):
             acceptance_criteria=("修改后通过验证", "不修改未授权文件"),
             status="pending",
             request="重构 Fusion Provider 的选择与锁机制",
-            workspace="/Users/wl/Desktop/AgentRelay-Hub",
+            workspace="/tmp/agentrelay-test-workspace",
             allowed_files=("scripts/fusion_mode.py", "scripts/fusion_runner.py"),
             verification_commands=("python -m pytest tests/test_fusion.py",),
         )

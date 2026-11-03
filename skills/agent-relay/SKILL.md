@@ -271,6 +271,11 @@ retry=0、用户未要求 → 不触发在线模型。首次外援审核的条�
 `mvn compile` / `mvn test`；Node 用 `npm run build` / `npm test`；Go 用
 `go build ./...` / `go test ./...`。
 
+修改 HTML/CSS/JS 或页面模板后，还必须真实打开页面检查，不能用静态测试或“看起来正常”
+代替。运行 `scripts/verify_page.py --session <当前 session_id>`（或按 README 使用
+`--output` 做独立检查），确认 Chromium 控制台、主要导航、主题、桌面/移动截图均正常。
+浏览器不可用、检查失败或文件在检查后再次修改时，必须列为未验证项，不得声称页面完成。
+
 ## 连续外援协作（同一问题内）
 
 首次调用成功后进入外援协作：Agent 必须先实施并验证在线建议。出现以下任一情况可直接

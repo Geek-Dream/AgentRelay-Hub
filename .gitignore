@@ -41,6 +41,9 @@ agentrelay-env/
 **/config/
 *.enc
 /tests/
+!/tests/
+/tests/*
+!/tests/test_page_verification.py
 归档/
 /skills/agent-relay/归档/
 /skills/agent-image/cache/
