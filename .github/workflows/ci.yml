@@ -36,11 +36,11 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install -r requirements.txt pytest 'tomli; python_version < "3.11"'
 
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -v
-
       - name: Install Chromium for config page verification
         run: python -m playwright install --with-deps chromium
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
 
       - name: Verify config page in a real browser
         run: python scripts/verify_page.py --output runtime/page-verification
