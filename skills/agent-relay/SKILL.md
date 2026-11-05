@@ -7,6 +7,70 @@ description: "AgentRelay 外援协作、工作流与本地归档。当 Agent 长
 
 AgentRelay 是 AI Agent 与外部专家模型之间的中继层，调用当前已配置的在线模型 Provider。
 
+## 分档交付审计（按修改范围触发）
+
+参考 gstack 的 review/QA 闭环，但不依赖安装 gstack。参考来源和 MIT 许可见
+`references/delivery-audit-gstack.md`。`/agent-approval` 同时绑定权限与审计深度：
+
+- `strict`：所有写入仍需确认；实际修改任务收尾时执行完整审计：逐项需求、真实 diff、行为、
+  主 Agent 审查和独立审查。页面还要完成现有目标/边界/视觉认证。缺一项都不能声称完成。
+- `standard`（默认）：普通代码小改走轻量检查；多文件、复杂/共享/高风险和不确定结果自动升级。
+  单文件、单目标的颜色/圆角/按钮方圆/字号/间距等样式修改，只做目标 computed style、
+  目标外关键布局和基本交互验证，不强制完整需求审计或独立审查。
+- `relaxed`：小任务不创建正式交付审计，不强制 Fusion；仅大型、多文件、多目标、共享或高风险
+  修改进入完整审计。危险命令、越界、目标未达成和虚假完成声明仍不豁免。
+
+### 触发边界与禁止自审循环
+
+- 普通问答、概念解释、搜索和只读检查不创建审计。Hook 的待办/Stop 提醒只是历史状态通知，
+  **不是用户授权继续执行**。不得因提醒自动修改文件、运行测试、调用 Fusion 或开始新审计。
+- 用户主动输入 `/agent-audit` 仅查看清单，不等于要求立即执行。是否继续由用户后续明确指示决定。
+- 已结束任务或新问题的旧审计不能劫持当前问答。非页面任务不触发截图门禁。
+- 同一待办不反复出卡，不通过审计结果本身制造下一轮审计；后续实际代码修改才需刷新证据。
+
+### 实际执行方式
+
+1. Hook 只在本档位需要的修改任务中建立审计待办；relaxed 小任务不建立正式审计。
+2. 完成实现后输入 `/agent-audit`，阅读当前真实待办。该命令只显示状态，**不等于审计通过**。
+3. 主 Agent 必须读取用户需求和真实 diff，逐项对照 DONE/CHANGED/UNVERIFIABLE；漏做或越界先处理。
+4. 真实运行与改动匹配的项目测试或行为探针，不能只复制一个“测试通过”结论：
+
+```bash
+python3 "${CODEX_HOME:-$HOME/.codex}/skills/agent-relay/scripts/delivery_audit.py" \
+  run-behavior --home "${CODEX_HOME:-$HOME/.codex}" --session "<当前真实 session_id>" \
+  --cmd "<项目已有测试或本地行为检查命令>" --kind test
+```
+
+`--kind test` 要真实执行测试且数量大于 0；CLI/API/任务探针用 `--kind probe`，不强制截图。
+失败、超时、未运行和覆盖缺口必须保留，不得只保存成功结论。
+5. 逐项登记真实证据（`requirements`、`diff`、`self_review`、`visual`、`independent_review`）：
+
+```bash
+AUDIT="${CODEX_HOME:-$HOME/.codex}/skills/agent-relay/scripts/delivery_audit.py"
+python3 "$AUDIT" record --home "${CODEX_HOME:-$HOME/.codex}" --session "<当前真实 session_id>" \
+  --check requirements --passed --evidence '[{"item":"原始需求","status":"done","evidence":"文件:行/真实行为"}]'
+python3 "$AUDIT" record --home "${CODEX_HOME:-$HOME/.codex}" --session "<当前真实 session_id>" \
+  --check diff --passed --evidence '已读取完整 diff；修改仅限允许文件，未发现未声明行为'
+python3 "$AUDIT" record --home "${CODEX_HOME:-$HOME/.codex}" --session "<当前真实 session_id>" \
+  --check self_review --passed --evidence '已检查异常路径、相邻调用、目标外影响和覆盖缺口；未发现问题'
+```
+
+6. 页面按上文完成真实截图和视觉认证，Hook 会复用该证据，不需要重复勾选。无视觉仍只能用户复查。
+7. 完整审计需要独立审查时，运行 `delivery_audit.py independent-review --home ... --session ...`。
+   它会先走现有 Fusion 状态检查，`delegable=true` 才实际 `delegate` 一次并保存真实结果；
+   不可用或失败时脚本只登记 `fallback=main_agent_local_adversarial_review_required` 且
+   `passed=false`；主 Agent 必须先实际完成本地对抗性审查，之后才能单独登记
+   `fallback=main_agent_completed_local_adversarial_review` 且 `passed=true`。
+   不能把“需要审查”伪写成“已经审查”，也不得写“已独立复核”；未真实调用不得登记
+   `provider=fusion` 成功。
+8. 后续任何文件修改都使审计过期，必须重新检查受影响证据。通过前只能报告进度和未验证项，
+   不能写“全部完成/已验证/审计通过”。最终回复列出完成内容、验证结果、未验证项。
+
+当用户只是问“`/agent-audit` 是干嘛的”“这是干嘛的”“为什么要审计”等功能或机制问题时，
+只解释用途和触发条件；不得运行 `delivery_audit.py`、读取审计状态卡、创建审计待办或把
+普通问答切换成交付审计。只有用户明确要求执行审计，或当前修改任务出现真实完成声明时，
+才进入上述审计流程。
+
 ## 调用语义（显式请求）
 
 用户要求当前执行“调用 AgentRelay”“使用 AgentRelay”“让 AgentRelay 分析”“调用在线模型”
@@ -19,21 +83,140 @@ Hook 可以保守预筛选直接行动句式（如“现在调用 DeepSeek”“
 
 ## Hook 门禁
 
+- 目标外检查必须真实计算：`--invariant <目标外选择器>` 在修改前记录位置/尺寸和计算样式；
+  `--after` 自动继承这些选择器，即使漏写参数也必须逐项比较。没有实际 `unchanged_results`、
+  检查失败或验收后文件又变化，不得写“无副作用”。公共组件复用路径必须真实存在，不能编造。
+- 普通 UI 修改（包括按钮文字、输入框尺寸等）会生成辅助契约草案，不造成二次审批；
+  草案不代替真实目标/边界验收。显式严格契约仍需具体参考、允许文件和复用依据。
+- **目标必须真的改对**：整页没乱不等于目标成功。修改前用
+  `verify_page.py --session <当前真实 session_id> --url <本地页面> --target-selector <选择器> --expected <属性JSON> --invariant <目标外选择器>`
+  采集目标 computed style、位置尺寸和局部截图；修改后用 `--after`（相同目标参数）逐项比较，
+  生成 `target_verified`。目标未达预期不能交付；目标达成但目标外有副作用同样不能交付。
+- **页面验收不是“截图存在”**：有视觉时必须实际读取整页/容器截图，检查目标与
+  `unchanged_checks`，然后运行 `visual_review.py record --passed`，每张截图重复传
+  `--screenshot <路径>`，并逐项传 `--observation 'target=实际观察'` 和
+  `--observation '<目标外检查项>=实际观察'`，再加 `--self-reviewed` 和
+  `--attestation '已逐项读取截图，核对可见内容、布局间距、对齐和空白溢出'`。
+  多个目标必须用 `--target-item <目标>` 逐项声明，用 `--item-screenshot '<目标>=<独立截图路径>'`
+  绑定不同的真实截图，观察项使用目标名，不能拿一张图或功能点击代替全部视觉检查。
+  多个目标复用同一图片会按内容哈希拒绝；点击、DOM、控制台和尺寸测量属于功能/结构检查，
+  不能冒充某个目标的视觉观察。完成声明声称“1–4 象限、四张表、全部页面”等范围时，
+  认证目标数必须覆盖该范围，否则 Hook 阻断。只有图片文件头、泛泛的“没问题”或未逐项观察
+  都不得通过。
+- **观察必须具体**：每个目标项和目标外项目都要写出实际可见内容或布局结果，例如
+  “表格显示 2 行，列宽对齐，底部连续空白约 400px”，不能只写“符合/正常/无变化”。
+  自评审签名至少覆盖两类视觉检查（内容、布局、间距、对齐、空白、溢出、遮挡、尺寸等）。
+  截图会做真实像素布局分析；出现连续大块近白区域时不能登记 `passed`，必须修复后重新截图，
+  或如实转为 `user_review_required` 请用户复查。
+- **原生视觉默认**：当前主 Agent 能读取用户图片或 Playwright 截图时，使用 `native` 视觉审查；
+  不调用 agent-image 不代表没有视觉。只有主 Agent 明确无法读图时才考虑借视觉 Provider。
+- 无视觉时调用 `visual_review.py agent-image` 借视觉 Provider；Provider 必须逐项返回
+  `target: 通过: 实际观察` 和各目标外项目的实际观察。失败或无法判断只能用户复查。
+- 无视觉 Provider 时不强制截图：用 `verify_page.py --no-screenshots` 完成真实 Chromium 的
+  DOM/布局、控制台、文件哈希、按钮点击/输入和目标外检查，随后 `visual_review.py nonvisual`
+  登记结构化结果。最终只能 `user_review_required`，明确请用户看页面，不得声称视觉通过。
+- **截图必须清理**：验收完成后先运行
+  `visual_review.py cleanup --session <当前 session_id> --home "$HOME/.codex"`，删除本轮登记的
+  全部截图，仅保留文字证据和清理状态。若截图未登记在状态中，对每个绝对路径重复传
+  `--screenshot <绝对路径>` 再运行 cleanup，不能使用通配符。若宿主拒绝 `rm -f`，不要重复
+  相同命令或再次弹同类确认；立即改为一次一个文件执行 `unlink -- <绝对路径>`，全部执行后
+  用 `test ! -e <绝对路径>` 回查。仅允许系统临时目录或 AgentRelay 验收证据目录内、明确
+  逐个列出的截图；禁止目录、项目文件、用户输入图片、符号链接、`-r/-R`、通配符或与其他
+  路径混合删除。
+- 多目标/复杂修改由 Hook 出确认卡，不能由 Agent 自行省略；目标外边界是执行与验收底线，
+  不是确认卡装饰。发现父布局、公共组件或其他模块受影响必须先重新确认。
+
+## 语义审批桥
+
+用户不需要记固定批准口令。`好的`、`OK`、`没问题`、`执行吧`、`行吧`、`1`、`[1]`
+或其他自然表达，都要由主 Agent 结合确认卡和完整对话理解真实含义；Hook 只能提醒，
+不能因为命中关键词就替用户授权。
+
+收到 `[AgentRelay 语义审批桥]` 时：
+
+- 先判断用户是在明确批准、明确拒绝、提问、犹豫、补充条件，还是提出了新范围。
+- 只有明确同意**当前确认卡展示的同一范围**，才运行上下文给出的
+  `resolve-intent --decision approve --source-sha256 ...`，并把 `reason` 换成真实的
+  语义判断依据。
+- 只有明确拒绝当前范围，才运行 `--decision reject`。拒绝后写入继续被 Hook 阻断。
+- 问句、否定、假设、犹豫、补充条件或新范围不得写回批准；需要时先解释、询问或更新确认卡。
+- `source-sha256` 必须使用当前提醒中的值，对应最后一条用户消息。旧哈希、范围已变化的
+  快照和重复写回都会失败，不能重试旧批准。
+- 危险命令批准仍只对完全相同的工具输入生效一次；语义批准不能扩展到其他命令、文件或任务。
+
+
+## 严格变更约束（默认遵守，授权后发挥）
+
+- **复用优先，禁止重复造轮子**：实现前必须检索项目已有组件、骨架/加载态、按钮、表格、
+  样式变量和相似页面，先复用或扩展现有实现。不得因为“自己也能画出来”就另造一套骨架。
+- `change_contract` 对显式 UI 作用域要求 `reuse_checked=true` 和实际 `reuse_evidence`；
+  未检索或没有复用依据时写入会被阻断。确需新建组件必须说明现有实现缺口、共享影响，
+  获得用户明确授权后设置 `new_component_approved=true`，不能只凭“更好看/更厉害”自由发挥。
+- 公共组件不能误改，也不能绕开公共组件复制一套。验收必须说明复用了什么、未新增何种重复实现，
+  并真实检查页面；代码能运行不等于符合项目设计系统。
+
+
+- 默认严格按用户指定的 UI 参考执行；只有用户明确说“自由发挥/自由优化”才可调整设计，
+  但仍不能扩大文件、数据、接口或业务范围。参考不清楚时先问，不靠印象猜。
+- 确认卡必须列出：具体 UI 参考文件/页面/截图、创作权限、允许修改文件、禁止范围、
+  额外 Bug 只报告、真实 diff 与参考验收方式。名单外写入会被 Hook 阻断，不是只提醒。
+- 建立约束时，在 Hook `UserPromptSubmit` payload 中传 `change_contract`：
+  `{version:1, workspace:"...", allowed_files:["..."], references:["..."], mode:"strict", style_only:true}`。
+  `mode:"creative"` 只能来自用户明确授权。批准后 Hook 冻结基线；后续改变约定会重新待确认。
+- 样式任务默认冻结接口、字段、数据、排序和业务逻辑。发现其他 Bug 只报告位置、原因和影响，
+  不擅自修复；需要新增文件、修改数据或扩大业务范围时必须重新确认。
+- 完工前运行真实 diff 与参考对照。浏览器可运行不等于参考一致；用截图/对照报告核对后执行
+  `scripts/change_contract.py verify-reference --session <当前 session_id> --evidence <路径>`，
+  将真实证据绑定到当前约束。缺参考证据、文件越界或样式任务改到业务文件，都不得声称完成。
+- 作用域按用户指定对象决定：指定模块/容器/元素就只改该对象；指定某大模块下全部元素，
+  只能影响该模块。只有明确“整个项目/全部/全局”才可修改公共组件或全局样式。
+- 建立元素级约束时同时填写 `target_scope`、`allowed_properties`、`forbidden_effects`、
+  `shared_files/shared_impact`、`unchanged_checks`。局部目标修改共享文件会被 Hook 阻断，
+  即使文件在 allowed_files 中也不例外；需要父布局或公共组件影响时必须重新确认。
+- 目标外默认全部冻结：兄弟元素位置/尺寸、父容器布局、其他模块和交互不得因本次修改改变。
+  例如缩小输入框不能把导出按钮挤到旁边；改 A 模块滚动条不能改公共滚动条影响 B/C 模块。
+- 参考对照报告必须逐项写出目标与目标外检查的实际结果，每行使用 `项目: 实际对照结果`，
+  例如 `订单输入框: computed style 和位置尺寸与参考一致`、`导出按钮不移位: before/after rect 相同`。
+  任意非空文件、只有截图而没有逐项观察，都不是参考一致证明。
+- Commander/Fusion 必须继承同一约束，不得因子 Agent 隔离工作区而放宽范围。
+
+
 收到 `[AgentRelay 任务门禁]` 时：
 
 - 先向用户展示简短的需求卡或确认卡，写清修改范围、关键风险和验证方式。
 - 用户明确批准前，只做只读检查、搜索和安全测试；禁止写文件、调用 Fusion、启动
   Commander 或调用其他协作模型。
-- 用户批准后只执行已经展示的当前方案。新增修改范围或改变关键方案时重新确认。
+- 用户用自然语言回复后，由主 Agent 判断语义，再通过 `[AgentRelay 语义审批桥]` 给出的
+  `resolve-intent` 命令写回；不要要求用户改用固定短语，也不要由 Hook 关键词直接授权。
+- 写回批准后只执行已经展示的当前方案。新增修改范围或改变关键方案时重新确认。
 - 任务预检只使用本地确定性规则，不额外调用第二个模型；最终任务解释仍由主 Agent 负责。
 
 收到 `[AgentRelay 安全门禁]` 时：
 
 - 当前工具已经被硬阻断。向用户解释命令用途、影响范围、回滚方式和验证方式，再展示确认卡。
-- 用户明确批准后，只能重试完全相同的工具输入一次；任何参数变化都需要重新确认。
+- 用户自然回复是否批准，由主 Agent 结合语境判断并通过语义审批桥写回；Hook 不猜关键词。
+- 写回批准后，只能重试完全相同的工具输入一次；任何参数变化都需要重新确认。
 - 不要把一次命令批准扩展到同类命令、其他路径或其他任务。
 
 ## 卡片显示样式
+
+## 权限容忍度与确认卡去重
+
+- 默认 `standard`：清晰的小修改可直接执行；多文件、多领域、大工程、共享/全局影响、
+  模糊目标仍需确认。`strict`：所有新增/修改/删除先确认；`relaxed`：仅危险命令、
+  大工程、共享/越界影响需确认。纯问答与只读检查任何模式都不需要确认。
+- 用户输入 `/agent-approval` 或 `/设置` 时，显示带说明的数字设置卡；`1=strict`、
+  `2=standard`（默认）、`3=relaxed`。Pi 使用原生菜单；其他支持可见 Hook 的宿主由用户
+  下一次回复数字完成设置，未打开菜单时不得把普通数字消息当成选择。
+- 设置只改变任务确认容忍度，不批准待处理任务，不放宽危险命令、共享影响和元素边界。
+  保存必须复用 `approval_policy.py` 并回读 `~/.codex/agent_relay_tracker/approval-policy.json`。
+- 无法使用宿主菜单时运行 `scripts/approval_policy.py` 进入本地数字菜单；兼容
+  `scripts/approval_policy.py show` 与 `scripts/approval_policy.py set strict|standard|relaxed`。
+- 一次动作只显示一张用户可见确认卡。`systemMessage` 给宿主显示，`additionalContext`
+  只提醒模型“卡已显示、等待批准”，不得再生成默认提示卡或要求二次确认。
+- 危险命令、共享组件/目标外影响、未批准 change_contract 不受宽松模式豁免。
+  命令/路径/参数或影响范围变化是新的动作，必须重新确认。
+
 
 - 默认使用现有纯文本卡片，保证所有 Agent 和终端都能正常阅读。
 - 在 Codex 终端中需要彩色详细卡片时，命令显式传 `--card-style codex`，或设置
@@ -275,6 +458,8 @@ retry=0、用户未要求 → 不触发在线模型。首次外援审核的条�
 代替。运行 `scripts/verify_page.py --session <当前 session_id>`（或按 README 使用
 `--output` 做独立检查），确认 Chromium 控制台、主要导航、主题、桌面/移动截图均正常。
 浏览器不可用、检查失败或文件在检查后再次修改时，必须列为未验证项，不得声称页面完成。
+即使会话状态里没有页面文件记录，只要最终回复声称“亲自查看截图、逐项检查、视觉验收通过”，
+Hook 也会阻断；必须先形成当前会话可核对的浏览器证据和视觉认证证书。
 
 ## 连续外援协作（同一问题内）
 

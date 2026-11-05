@@ -1,6 +1,7 @@
 # Python caches
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
 # AgentRelay runtime state and private data
 runtime/
@@ -40,10 +41,6 @@ venv/
 agentrelay-env/
 **/config/
 *.enc
-/tests/
-!/tests/
-/tests/*
-!/tests/test_page_verification.py
 归档/
 /skills/agent-relay/归档/
 /skills/agent-image/cache/

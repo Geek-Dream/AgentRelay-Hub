@@ -552,37 +552,42 @@ class AgentRelayConsoleCardTests(unittest.TestCase):
         self.assertEqual(
             render_requirement_card(self.requirement, style="default"),
             "\n".join([
-                "需求卡",
-                "任务: task-20261102-a1b2",
+                CODEX_DIVIDER,
+                "「AgentRelay · 需求卡」",
+                CODEX_DIVIDER,
+                "",
+                "任务:   task-20261102-a1b2",
                 "用户需求: 重构 Fusion Provider 的选择与锁机制",
                 "需求评估: 跨模块或高风险任务",
-                "大白话: 分析并修改相关代码，然后执行验证。",
+                "大白话:  分析并修改相关代码，然后执行验证。",
                 "影响模块: Fusion、任务调度",
                 "影响文件: scripts/fusion_mode.py、scripts/fusion_runner.py",
                 "当前功能: 现有实现待重构，等待确认",
                 "目标功能: 按目标架构完成重构并通过验证",
-                "风险: 范围扩大风险、兼容性风险",
-                "验证: 修改后通过验证、python -m pytest",
-                "回滚: 保存修改前内容、失败时逐文件恢复",
+                "风险:   范围扩大风险、兼容性风险",
+                "验证:   修改后通过验证、python -m pytest",
+                "回滚:   保存修改前内容、失败时逐文件恢复",
+                CODEX_DIVIDER,
             ]),
         )
 
     def test_default_confirmation_card_matches_existing_plain_format(self):
         output = render_confirmation_card(self.confirmation, style="default")
-        self.assertTrue(output.startswith("确认卡\n"))
-        self.assertIn("状态: pending", output)
+        self.assertTrue(output.startswith(CODEX_DIVIDER + "\n「AgentRelay · 执行确认卡」\n" + CODEX_DIVIDER + "\n"))
+        self.assertTrue(output.endswith(CODEX_DIVIDER))
+        self.assertIn("状态:   pending", output)
         self.assertIn("当前确认: 执行确认的修改", output)
-        self.assertIn("修改尝试: 无", output)
+        self.assertIn("修改尝试: 0", output)
         self.assertIn("最近错误: 无", output)
         self.assertNotIn("\033[", output)
 
     def test_codex_requirement_card_is_colorful_and_keeps_all_fields(self):
         output = render_requirement_card(self.requirement, style="codex")
-        self.assertIn(f"{ANSI_RED_BOLD}AgentRelay / 需求卡{ANSI_RESET}", output)
-        self.assertIn(f"{ANSI_BLUE_BOLD}任务{ANSI_RESET}", output)
+        self.assertIn(f"{ANSI_RED_BOLD}「AgentRelay · 需求卡」{ANSI_RESET}", output)
+        self.assertIn(f"{ANSI_BLUE_BOLD}任务:  {ANSI_RESET}", output)
         self.assertIn(f"{ANSI_GREEN}task-20261102-a1b2{ANSI_RESET}", output)
         self.assertIn(
-            f"{ANSI_RED_BOLD}范围扩大风险{ANSI_RESET}",
+            f"{ANSI_RED_BOLD}范围扩大风险、兼容性风险{ANSI_RESET}",
             output,
         )
         for label in (
@@ -601,7 +606,7 @@ class AgentRelayConsoleCardTests(unittest.TestCase):
 
     def test_codex_confirmation_card_keeps_details_and_uses_numbered_choices(self):
         output = render_confirmation_card(self.confirmation, style="codex")
-        self.assertIn(f"{ANSI_RED_BOLD}AgentRelay / 确认卡{ANSI_RESET}", output)
+        self.assertIn(f"{ANSI_RED_BOLD}「AgentRelay · 执行确认卡」{ANSI_RESET}", output)
         self.assertIn(f"{ANSI_GREEN}pending{ANSI_RESET}", output)
         self.assertIn(CODEX_DIVIDER, output)
         self.assertIn(f"{ANSI_GREEN}[1] 批准执行{ANSI_RESET}", output)

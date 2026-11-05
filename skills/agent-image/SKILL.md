@@ -5,6 +5,11 @@ description: "AgentRelay 图片识别中继。仅当用户显式调用本 skill 
 
 # AgentImage
 
+> 页面视觉验收特别授权：用户已明确要求无视觉模型在 UI 修改后借 agent-image 审查时，
+> 可调用 `visual_review.py agent-image` 处理本次真实截图与边界检查；只限该验收场景，
+> 不把普通图片任务自动转发。无 Provider 时先完成非视觉检查并请用户复查，随后清理截图。
+
+
 AgentImage 是 AgentRelay 的图片识别中继：把本地图片发给已配置好、支持识图的
 线上模型 Provider，拿回详细描述。核心价值：**即使本地 Agent 模型（或 Commander
 的本地 9B 辅助模型）不支持识图，也能借线上模型理解图片，避免把识图压力放在

@@ -27,7 +27,8 @@ def _public(card):
             "workspace": card.workspace, "allowed_files": list(card.allowed_files),
             "edits": card.edits, "verification_commands": list(card.verification_commands),
             "attempts": card.attempts, "last_error": card.last_error, "recovery_reason": card.recovery_reason,
-            "attempt_history": card.attempt_history, "next_action": card.next_action}
+            "attempt_history": card.attempt_history, "next_action": card.next_action,
+            "change_contract": card.change_contract}
 
 
 def main(argv=None) -> int:

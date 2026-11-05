@@ -28,6 +28,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import unicodedata
@@ -87,7 +88,7 @@ LOCK_FILE = TRACKER_DIR / ".lock"
 RELAY_ESCALATION_WAIT_SECONDS = {1: 600, 2: 300, 3: 300}
 RELAY_MAX_SIGNALS = 3
 
-HOOK_CARD_DIVIDER = "────────────────────────────────────────"
+HOOK_CARD_DIVIDER = "────────────────────────"
 
 
 def normalize_agent_id(agent_id):
@@ -321,8 +322,8 @@ EXPLICIT_RELAY_META_TERMS = [
 ]
 
 TASK_APPROVAL_PATTERNS = [
-    r"^(?:确认|批准|同意)(?:执行|修改|继续|这个方案|该方案|上述方案|方案|计划|需求|确认卡|并|[,，。.!！]|$)",
-    r"^(?:可以|好的|行|继续|开始|执行|动手|做吧)(?:执行|修改|开始|继续|按|做|吧|[,，。.!！]|$)",
+    r"^(?:确认|批准|同意)(?:执行|实施|修改|继续|这个方案|该方案|上述方案|方案|计划|需求|确认卡|并|[,，。.!！]|$)",
+    r"^(?:可以|好的|行|继续|开始|执行|动手|做吧)(?:执行|实施|修改|开始|继续|按|做|吧|[,，。.!！]|$)",
     r"^(?:按|按照)(?:这个|上述|该|刚才的|以下)?(?:方案|计划|需求|确认卡|步骤)"
     r"(?:执行|实施|做|修改|继续|吧)",
     r"^(?:无需|不用|不必|跳过)(?:再次|再)?确认(?:[,，。.!！\s]|$)",
@@ -340,9 +341,41 @@ TASK_APPROVAL_QUESTIONS = [
     r"(?:吗|呢|么|是否|为什么|为何|怎么|如何|什么|风险|影响|区别)[?？。.!！]?$",
 ]
 
+GATE_RESPONSE_CANDIDATE_PATTERNS = TASK_APPROVAL_PATTERNS + [
+    r"^(?:嗯+|没问题|没意见|收到|明白|了解|知道了|可以|你看着办|就这么办)",
+    r"^(?:不行|不要|不用|先别|等等|稍等|取消|暂停|拒绝|算了|不批准|不同意)",
+    r"^\[?[123]\]?(?:[,，。.!！\s]|$)",
+    r"(?:吗|呢|么|是否|为什么|为何|怎么|如何|什么|风险|影响|区别)[?？。.!！]?$",
+]
+
+GATE_APPROVAL_BLOCKERS = TASK_APPROVAL_NEGATIONS + TASK_APPROVAL_QUESTIONS + [
+    r"(?:先说明|先说清楚|再考虑|还没决定|不确定|如果|假如|假设)",
+    r"\b(?:but|however|if|unless|maybe|perhaps)\b",
+    r"[?？]",
+]
+
+INFORMATIONAL_PROMPT_PATTERNS = [
+    r"^\s*(?:是否|为什么|为何|什么是|是什么|怎么|如何)",
+    r"(?:是干嘛的|是干什么的|什么意思|是什么机制|有什么作用|有什么影响)",
+    r"(?:解释|说明一下|介绍一下|告知我|告诉我|讲讲|说说)",
+    r"(?:吗|呢|么|还是|是否|为什么|为何|怎么|如何|什么)[?？。.!！\s]*$",
+    r"[?？]\s*$",
+]
+
+INFORMATIONAL_DIRECT_ACTION_PATTERNS = [
+    r"^\s*(?:请|麻烦|帮我|给我|现在|马上|立即|立刻)"
+    r"[^。！？!?\n]{0,24}(?:修复|修改|实现|安装|装上|运行|执行|删除|创建|写入|"
+    r"提交|部署|截图|验证|检查|审计|测试|重试|重装|同步|更新|清理|开始)",
+    r"^\s*(?:修复|修改|实现|安装|运行|执行|删除|创建|写入|提交|部署|截图|"
+    r"验证|检查|审计|测试|重试|重装|同步|更新|清理|开始)",
+    r"^\s*(?:能不能|能否|可否|可以|可不可以)"
+    r"[^。！？!?\n]{0,16}(?:帮我|给我)?"
+    r"[^。！？!?\n]{0,12}(?:修复|修改|实现|安装|装上|运行|执行|删除|截图|验证|检查|审计|测试|清理|更新)",
+]
+
 TASK_WRITE_ACTION_PATTERNS = [
-    r"(?:修改|新增|删除|重构|迁移|升级|替换|改造|修复|接入|集成|实现|搭建|部署|发布|安装|配置|调整)",
-    r"\b(?:implement|add|remove|delete|refactor|migrate|upgrade|replace|fix|integrate|build|deploy|install)\b",
+    r"(?:修改|新增|增加|添加|删除|重构|迁移|升级|替换|改成|改为|改造|修复|接入|集成|实现|搭建|部署|发布|安装|配置|调整)",
+    r"\b(?:implement|add|remove|delete|refactor|migrate|upgrade|replace|change\s+to|set\s+to|fix|integrate|build|deploy|install)\b",
 ]
 
 TASK_LARGE_PATTERNS = [
@@ -1164,8 +1197,19 @@ def strip_prompt_examples(prompt):
     return normalize_text(text)
 
 
+def is_informational_prompt(prompt):
+    """Return whether a message asks for an explanation instead of an action."""
+
+    candidate = strip_prompt_examples(prompt)
+    if not candidate:
+        return False
+    if matches_any_pattern(candidate, INFORMATIONAL_DIRECT_ACTION_PATTERNS):
+        return False
+    return matches_any_pattern(candidate, INFORMATIONAL_PROMPT_PATTERNS)
+
+
 def is_explicit_task_approval(prompt):
-    """识别用户对需求卡或危险工具确认卡的明确批准。"""
+    """Return a legacy keyword hint only; this function never authorizes."""
 
     candidate = strip_prompt_examples(prompt)
     if not candidate or len(candidate) > 240:
@@ -1190,10 +1234,114 @@ def is_explicit_task_approval(prompt):
     return matches_any_pattern(candidate, TASK_APPROVAL_PATTERNS)
 
 
-def classify_task_request(prompt):
-    """用确定性规则判断是否需要先展示任务确认卡。"""
+def prompt_sha256(prompt):
+    """Return the exact source hash used by semantic approval resolution."""
 
+    return hashlib.sha256(
+        normalize_text(prompt).encode("utf-8")
+    ).hexdigest()
+
+
+def pending_approval_scope(state):
+    """Describe only the approvals that are still pending in one session."""
+
+    gate = state.get("task_gate")
+    task_pending = (
+        isinstance(gate, dict)
+        and gate.get("status") == "awaiting_confirmation"
+    )
+    approvals = state.get("tool_approval")
+    pending_keys = (
+        approvals.get("pending_keys", [])
+        if isinstance(approvals, dict)
+        else []
+    )
+    pending_keys = [
+        item for item in pending_keys
+        if isinstance(item, str) and item
+    ]
+    contract = state.get("change_contract")
+    contract_pending = (
+        isinstance(contract, dict)
+        and not contract.get("approved")
+        and not contract.get("draft")
+    )
+    return {
+        "task_request_sha256": (
+            gate.get("request_sha256") if task_pending else None
+        ),
+        "tool_keys": pending_keys,
+        "contract_sha256": (
+            hashlib.sha256(
+                json.dumps(
+                    contract,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if contract_pending else None
+        ),
+    }
+
+
+def has_pending_approval(scope):
+    return bool(
+        isinstance(scope, dict)
+        and (
+            scope.get("task_request_sha256")
+            or scope.get("tool_keys")
+            or scope.get("contract_sha256")
+        )
+    )
+
+
+def is_gate_response_candidate(state, prompt):
+    """Return whether Agent approval semantics may need to resolve a gate.
+
+    This is deliberately not an authorization check. The main Agent sees the
+    full conversation and decides whether the reply approves, rejects, asks a
+    question, or changes scope.
+    """
+
+    if not has_pending_approval(pending_approval_scope(state)):
+        return False
+    candidate = strip_prompt_examples(prompt)
+    if not candidate or len(candidate) > 800:
+        return False
+    if candidate.startswith("/"):
+        return False
+    if matches_any_pattern(candidate, GATE_RESPONSE_CANDIDATE_PATTERNS):
+        return True
+    # Natural replies such as "那就照你说的办" are still candidates. Safety
+    # comes from the later semantic resolution, not from this prefilter.
+    return len(candidate) <= 160
+
+
+def approval_intent_blocker(prompt):
+    """Veto approve writes for replies that are clearly not approval."""
+
+    candidate = strip_prompt_examples(prompt)
+    if matches_any_pattern(candidate, GATE_APPROVAL_BLOCKERS):
+        return "用户消息含问句、否定、犹豫或条件，不能写回批准"
+    return None
+
+
+def classify_task_request(prompt, contract=None):
+    """Apply the persisted approval tolerance without weakening hard gates."""
     text = strip_prompt_examples(prompt)
+    try:
+        module = _shared_script_module("approval_policy")
+        policy = module.load_policy(CODEX_DIR)
+        file_count = len({value.lower() for value in TASK_FILE_REFERENCE_PATTERN.findall(text)})
+        domains = {value.lower() for value in re.findall(
+            "|".join(f"(?:{pattern})" for pattern in TASK_DOMAIN_PATTERNS), text, flags=re.IGNORECASE)}
+        required, reasons = module.should_confirm(text, policy["mode"], file_count, len(domains), contract)
+        return {"level": "large" if required and matches_any_pattern(text, TASK_LARGE_PATTERNS)
+                else "medium" if required else "small",
+                "requires_confirmation": required, "reasons": reasons, "mode": policy["mode"]}
+    except (ImportError, OSError, ValueError, TypeError):
+        pass
     if not text:
         return {
             "level": "small",
@@ -1657,6 +1805,86 @@ def _git_dangerous(arguments):
     return False
 
 
+SAFE_TEMP_SCREENSHOT_NAME = re.compile(
+    r"(?:agent[-_]?relay|screen[-_]?shot|capture|snapshot|review|"
+    r"verif(?:y|ication)|evidence|check)",
+    re.IGNORECASE,
+)
+SAFE_TEMP_SCREENSHOT_TARGET = re.compile(
+    r"(?:^|[-_])(?:dcm|dc-query)(?:[-_]|$)",
+    re.IGNORECASE,
+)
+SAFE_SCREENSHOT_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def _is_within(path, root):
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _safe_screenshot_cleanup(arguments):
+    """Allow only explicit, non-recursive cleanup of disposable image evidence."""
+
+    targets = []
+    options_done = False
+    for argument in arguments:
+        if not options_done and argument == "--":
+            options_done = True
+            continue
+        if not options_done and argument.startswith("-"):
+            if argument in {"-f", "--force", "-v", "--verbose"}:
+                continue
+            return False
+        targets.append(argument)
+    if not targets:
+        return False
+
+    temp_roots = []
+    for value in (tempfile.gettempdir(), os.environ.get("TMPDIR"), "/tmp", "/private/tmp"):
+        if not value:
+            continue
+        try:
+            root = Path(value).expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if root not in temp_roots:
+            temp_roots.append(root)
+    evidence_root = (TRACKER_DIR / "page-verification").resolve()
+
+    for argument in targets:
+        if any(char in argument for char in "*?[]{}"):
+            return False
+        raw = Path(argument).expanduser()
+        if not raw.is_absolute() or raw.is_symlink():
+            return False
+        try:
+            path = raw.resolve(strict=False)
+        except (OSError, RuntimeError):
+            return False
+        if path.suffix.lower() not in SAFE_SCREENSHOT_SUFFIXES:
+            return False
+        in_evidence = _is_within(path, evidence_root)
+        in_temp = any(_is_within(path, root) for root in temp_roots)
+        if not in_evidence and not in_temp:
+            return False
+        if (
+            not in_evidence
+            and not SAFE_TEMP_SCREENSHOT_NAME.search(path.name)
+            and not SAFE_TEMP_SCREENSHOT_TARGET.search(path.name)
+            and not SAFE_TEMP_SCREENSHOT_TARGET.search(path.parent.name)
+        ):
+            return False
+        try:
+            if path.exists() and not path.is_file():
+                return False
+        except OSError:
+            return False
+    return True
+
+
 def _segment_dangerous_reason(words, depth=0):
     if depth > 6 or not words:
         return None
@@ -1679,6 +1907,8 @@ def _segment_dangerous_reason(words, depth=0):
     if command == "eval":
         return _dangerous_shell_text(" ".join(arguments), depth + 1)
 
+    if command in {"rm", "unlink"} and _safe_screenshot_cleanup(arguments):
+        return None
     if command in {"rm", "rmdir", "unlink"}:
         return "删除文件或目录"
     if command == "find" and any(
@@ -1832,15 +2062,23 @@ def _card_values(value):
     return [text] if text else ["无"]
 
 
-def _card_field(label, value):
-    lines = [str(label)]
-    for item in _card_values(value):
-        lines.append(str(item))
+def _card_field(label, value, width=None):
+    values = _card_values(value)
+    label_width = width if width is not None else len(str(label))
+    prefix = f"  {str(label) + ':':<{label_width + 1}} "
+    lines = [prefix + values[0]]
+    continuation = " " * (label_width + 4)
+    lines.extend(continuation + item for item in values[1:])
     return lines
+
+
+def _card_section(title):
+    return ["", title]
 
 
 def _hook_card_choices():
     return [
+        "",
         HOOK_CARD_DIVIDER,
         "✅ [1] 批准执行",
         "🛠️ [2] 调整方案",
@@ -1899,38 +2137,58 @@ def render_task_gate_card(prompt, gate):
     if files:
         scope.append(f"文件：{'、'.join(files)}")
     else:
-        scope.append("文件：待读取相关代码后确认")
+        scope.append("文件：待读取相关代码后确认；未明确前不得写入")
 
     lines = [
-        "🧭 AgentRelay / 需求确认卡",
         HOOK_CARD_DIVIDER,
+        "「AgentRelay · 需求确认卡」",
+        HOOK_CARD_DIVIDER,
+        "",
+        "先确认目标、范围和禁止副作用；批准不等于无限授权。",
     ]
-    lines.extend(_card_field("🎯 任务", _task_card_id(request_hash)))
-    lines.extend(_card_field("📝 用户需求", _clip_card_text(prompt, 800)))
-    lines.extend(_card_field("🔎 触发原因", reasons))
+    contract = gate.get("change_contract")
+    has_contract = isinstance(contract, dict)
+    base_fields = [("任务", _task_card_id(request_hash)),
+                   ("用户需求", _clip_card_text(prompt, 800)),
+                   ("触发原因", reasons)]
+    if not has_contract:
+        base_fields.extend([
+            ("影响范围", scope),
+            ("目标外边界", "公共组件、兄弟元素和其他模块保持不变；连带影响需重新确认"),
+            ("复用优先", "先检索并复用项目已有组件/样式；确需新组件必须说明缺口并获明确授权"),
+        ])
+    width = max(len(label) for label, _ in base_fields)
+    for label, value in base_fields:
+        lines.extend(_card_field(label, value, width))
+    if has_contract:
+        try:
+            lines.extend(_card_section("目标与边界（必须逐项遵守）"))
+            fields = _shared_script_module("change_contract").card_fields(contract)
+            width = max(len(label) for label, _ in fields)
+            for label, value in fields:
+                lines.extend(_card_field(label, value, width))
+        except (ImportError, ValueError, TypeError):
+            pass
+    lines.extend(_card_field("当前状态", "等待批准 · 尚未修改文件 · waiting_for_approval"))
     lines.extend(_card_field(
-        "🧭 处理方式",
-        "先核对修改目标和影响范围；你批准后再动文件，完成后运行验证。",
+        "批准后",
+        "仅执行本卡明确的目标与边界；扩大范围、修改公共组件或产生连带影响必须重新确认。"
+        if has_contract else "仅执行当前展示的修改方案；新增范围必须重新确认。",
     ))
-    lines.extend(_card_field("📦 影响范围", scope))
-    lines.extend(_card_field("⏳ 当前状态", "waiting_for_approval"))
+    lines.extend(_card_field("主要风险", _task_gate_risks(prompt)))
     lines.extend(_card_field(
-        "✅ 批准后",
-        "执行当前卡片展示的修改方案，并运行专项检查和完整验证。",
-    ))
-    lines.extend(_card_field("⚠️ 主要风险", _task_gate_risks(prompt)))
-    lines.extend(_card_field(
-        "🧪 验证",
+        "验证",
         [
             "先运行与改动直接相关的测试或构建命令。",
             "确认通过后，再运行项目已有的完整测试。",
         ],
     ))
     lines.extend(_card_field(
-        "↩️ 回滚",
+        "回滚",
         "修改前保留原文件内容；验证失败时按文件恢复，并记录失败原因。",
     ))
     lines.extend(_hook_card_choices())
+    lines.append(HOOK_CARD_DIVIDER)
     return "\n".join(lines)
 
 
@@ -1975,43 +2233,55 @@ def render_tool_gate_card(tool_name, tool_input, reason):
     solution_key = build_solution_key(tool_name, tool_input) or tool_name
     targets = _tool_targets(tool_name, tool_input)
     title = (
-        "🛑 AgentRelay / 危险操作确认卡"
+        "「AgentRelay · 危险操作确认卡」"
         if danger
-        else "📝 AgentRelay / 写入确认卡"
+        else "「AgentRelay · 写入确认卡」"
     )
 
     lines = [
+        HOOK_CARD_DIVIDER,
         title,
         HOOK_CARD_DIVIDER,
+        "本次操作已暂停；只会对你看到的同一操作申请一次批准。",
+        _card_section("01 · 实际动作")[0],
     ]
-    lines.extend(_card_field("🎯 任务", _task_card_id(solution_key)))
-    lines.extend(_card_field("🧰 工具", normalize_text(tool_name) or "unknown"))
-    lines.extend(_card_field("📂 操作内容", targets or ["未提供具体路径或命令"]))
-    lines.extend(_card_field("⏳ 当前状态", "blocked_waiting_for_approval"))
+    action_fields = [("任务", _task_card_id(solution_key)),
+                     ("工具", normalize_text(tool_name) or "unknown"),
+                     ("操作内容", targets or ["未提供具体路径或命令"]),
+                     ("当前状态", "已阻断 · 等待批准")]
+    width = max(len(label) for label, _ in action_fields)
+    for label, value in action_fields:
+        lines.extend(_card_field(label, value, width))
+    lines.extend(_card_section("02 · 影响与边界"))
     lines.extend(_card_field(
-        "🧭 处理方式",
-        "这次操作会修改文件或执行高风险命令，所以先停下来让你确认。",
+        "主要风险",
+        [_clip_card_text(reason, 800)],
     ))
     lines.extend(_card_field(
-        "⚠️ 主要风险",
-        [
-            _clip_card_text(reason, 800),
-        ],
+        "批准边界",
+        "仅限完全相同的工具输入执行一次；命令、路径、参数或影响范围变化必须重新确认。",
+    ))
+    lines.extend(_card_section("03 · 执行后"))
+    lines.extend(_card_field(
+        "验证",
+        "检查实际 diff 与目标外副作用，再运行相关测试；目标外变化必须报告。",
     ))
     lines.extend(_card_field(
-        "🔐 批准边界",
-        "批准只对当前操作有效；命令、路径或参数变化时必须再次确认。",
-    ))
-    lines.extend(_card_field(
-        "🧪 验证",
-        "执行后检查实际变化，再运行与本次操作直接相关的测试或检查。",
-    ))
-    lines.extend(_card_field(
-        "↩️ 回滚",
+        "回滚",
         "修改类操作使用修改前备份或版本控制恢复；删除类操作可能无法恢复。",
     ))
     lines.extend(_hook_card_choices())
+    lines.append(HOOK_CARD_DIVIDER)
     return "\n".join(lines)
+
+
+def visible_hook_cards_enabled():
+    """Return portable text for hosts with a visible message channel."""
+    target = normalize_text(os.environ.get("AGENTRELAY_TARGET")).lower()
+    if target:
+        return target in {"codex", "claude", "pi", "hermes"}
+    return bool(os.environ.get("CODEX_HOME") or os.environ.get("CODEX_THREAD_ID")
+                or os.environ.get("CODEX_SESSION_ID"))
 
 
 def codex_hook_cards_enabled():
@@ -2038,7 +2308,7 @@ def emit_hook_context(event_name, context, system_message=None):
             "additionalContext": context,
         },
     }
-    if system_message and codex_hook_cards_enabled():
+    if system_message and visible_hook_cards_enabled():
         payload["systemMessage"] = system_message
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
@@ -2053,7 +2323,7 @@ def emit_pre_tool_deny(reason, system_message=None):
             "permissionDecisionReason": reason,
         },
     }
-    if system_message and codex_hook_cards_enabled():
+    if system_message and visible_hook_cards_enabled():
         payload["systemMessage"] = system_message
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
@@ -2061,7 +2331,8 @@ def emit_pre_tool_deny(reason, system_message=None):
 def approval_controls_snapshot(state, prompt):
     """保存待审批门禁，避免创建新问题时丢失用户刚提交的批准。"""
 
-    if not is_explicit_task_approval(prompt):
+    scope = pending_approval_scope(state)
+    if not is_gate_response_candidate(state, prompt):
         return None
 
     gate = state.get("task_gate")
@@ -2071,15 +2342,13 @@ def approval_controls_snapshot(state, prompt):
         if isinstance(approvals, dict)
         else []
     )
-    task_is_pending = (
-        isinstance(gate, dict)
-        and gate.get("status") == "awaiting_confirmation"
-    )
-    if not task_is_pending and not pending_keys:
+    contract = state.get("change_contract")
+    if not has_pending_approval(scope):
         return None
 
     return {
         "task_gate": dict(gate) if isinstance(gate, dict) else {},
+        "change_contract": dict(contract) if isinstance(contract, dict) else None,
         "tool_approval": {
             "pending_keys": [
                 item for item in pending_keys
@@ -2103,6 +2372,8 @@ def restore_approval_controls(state, snapshot):
     if not snapshot:
         return
     state["task_gate"] = dict(snapshot.get("task_gate") or {})
+    if isinstance(snapshot.get("change_contract"), dict):
+        state["change_contract"] = dict(snapshot["change_contract"])
     approvals = snapshot.get("tool_approval") or {}
     state["tool_approval"] = {
         "pending_keys": list(approvals.get("pending_keys") or []),
@@ -2118,6 +2389,219 @@ def _append_unique(values, value, limit):
     if value:
         result.append(value)
     return result[-limit:]
+
+
+def card_delivery_notice(gate, request_hash):
+    """One visible card per action; context must not request a second card."""
+    try:
+        first = _shared_script_module("approval_policy").mark_card_shown(gate, request_hash)
+    except (ImportError, ValueError, TypeError):
+        first = gate.get("card_shown_sha256") != request_hash
+    if first:
+        return True, (
+            "[AgentRelay 任务门禁 · 严格变更约束 · 确认卡已显示]\n用户已看到唯一一张需求卡/确认卡，不要重复展示或要求二次确认。"
+            "等待用户明确批准前只能只读检查，不得写入、调用 Fusion、Commander 或其他协作模型。"
+        )
+    return False, ""
+
+
+def _approval_scope_labels(scope):
+    labels = []
+    if scope.get("task_request_sha256"):
+        labels.append("当前任务方案")
+    if scope.get("contract_sha256"):
+        labels.append("当前 change_contract")
+    tool_count = len(scope.get("tool_keys") or [])
+    if tool_count:
+        labels.append(f"{tool_count} 个已展示的危险命令")
+    return labels
+
+
+def semantic_approval_notice(session_id, state, prompt):
+    """Ask the main Agent to resolve this reply using full conversation context."""
+
+    scope = pending_approval_scope(state)
+    if not has_pending_approval(scope):
+        return ""
+    source_hash = prompt_sha256(prompt)
+    state["semantic_approval_candidate"] = {
+        "source_sha256": source_hash,
+        "scope": scope,
+        "created_at": iso_now(),
+    }
+    tracker_path = shlex.quote(str(Path(__file__).resolve()))
+    python_path = shlex.quote(sys.executable)
+    session_value = shlex.quote(str(session_id))
+    approve_command = (
+        f"{python_path} {tracker_path} resolve-intent --session {session_value} "
+        f"--decision approve --source-sha256 {source_hash} "
+        "--reason '用户明确批准当前待确认范围'"
+    )
+    reject_command = (
+        f"{python_path} {tracker_path} resolve-intent --session {session_value} "
+        f"--decision reject --source-sha256 {source_hash} "
+        "--reason '用户明确拒绝当前待确认范围'"
+    )
+    return (
+        "[AgentRelay 语义审批桥]\n"
+        "Hook 只识别到这是一条待审批回复，不会根据关键词替用户授权。\n"
+        f"用户原话：{_clip_card_text(prompt, 500)}\n"
+        f"待审批范围：{'；'.join(_approval_scope_labels(scope))}\n"
+        f"消息摘要：{source_hash}\n"
+        "请结合确认卡、用户完整消息和当前对话自行判断。只有明确同意当前范围时，"
+        f"运行：{approve_command}\n"
+        "只有明确拒绝当前范围时，运行："
+        f"{reject_command}\n"
+        "问句、犹豫、否定、假设、补充条件或提出新范围时不要写回批准；先询问或更新确认卡。"
+        "写回只对上述待审批范围生效，不能扩大到其他文件、命令或任务。"
+    )
+
+
+def resolve_pending_intent(session_id, decision, source_sha256, reason):
+    """Atomically apply the Agent's contextual approve/reject decision."""
+
+    decision = normalize_text(decision).lower()
+    source_sha256 = normalize_text(source_sha256).lower()
+    reason = normalize_text(reason)
+    session_id = normalize_session_id(session_id)
+    if decision not in {"approve", "reject"}:
+        raise ValueError("decision 必须是 approve 或 reject")
+    if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
+        raise ValueError("source-sha256 格式无效")
+    if not session_id:
+        raise ValueError("resolve-intent 需要有效 session_id")
+
+    resolved_scope = {}
+    lock = acquire_lock()
+    try:
+        state = read_state(session_id=session_id)
+        current_hash = prompt_sha256(state.get("last_prompt"))
+        if not state.get("last_prompt") or source_sha256 != current_hash:
+            raise ValueError("source-sha256 与当前最后一条用户消息不一致")
+        if decision == "approve":
+            blocker = approval_intent_blocker(state.get("last_prompt"))
+            if blocker:
+                raise ValueError(blocker)
+
+        candidate = state.get("semantic_approval_candidate")
+        if (
+            not isinstance(candidate, dict)
+            or candidate.get("source_sha256") != source_sha256
+        ):
+            raise ValueError("当前消息没有有效的语义审批候选")
+
+        scope = pending_approval_scope(state)
+        if not has_pending_approval(scope):
+            raise ValueError("当前没有待审批任务、约束或危险命令")
+        if candidate.get("scope") != scope:
+            raise ValueError("待审批范围已变化，拒绝使用旧快照写回审批")
+
+        gate = state.get("task_gate")
+        if not isinstance(gate, dict):
+            gate = {}
+            state["task_gate"] = gate
+        approvals = state.get("tool_approval")
+        if not isinstance(approvals, dict):
+            approvals = {}
+            state["tool_approval"] = approvals
+        pending_keys = list(scope.get("tool_keys") or [])
+        task_pending = bool(scope.get("task_request_sha256"))
+        contract_pending = bool(scope.get("contract_sha256"))
+
+        if decision == "approve":
+            if task_pending:
+                gate["status"] = "approved"
+                gate["requires_confirmation"] = True
+                gate["approved_at"] = iso_now()
+            if contract_pending:
+                approve_change_contract(state)
+            for key in pending_keys:
+                approvals["approved_keys"] = _append_unique(
+                    approvals.get("approved_keys", []),
+                    key,
+                    20,
+                )
+            approvals["pending_keys"] = []
+        else:
+            if task_pending:
+                gate["status"] = "rejected"
+                gate["requires_confirmation"] = True
+                gate["rejected_at"] = iso_now()
+                reasons = list(gate.get("reasons") or [])
+                if "用户已拒绝当前待确认范围" not in reasons:
+                    reasons.append("用户已拒绝当前待确认范围")
+                gate["reasons"] = reasons
+            contract = state.get("change_contract")
+            if contract_pending and isinstance(contract, dict):
+                contract["rejected_at"] = iso_now()
+                contract["rejected"] = True
+            approvals["pending_keys"] = []
+
+        resolved_scope = {
+            "task": task_pending,
+            "contract": contract_pending,
+            "tool_count": len(pending_keys),
+        }
+        resolution = {
+            "decision": decision,
+            "source_sha256": source_sha256,
+            "reason": reason[:500],
+            "scope": resolved_scope,
+            "resolved_at": iso_now(),
+        }
+        state["last_intent_resolution"] = resolution
+        state.pop("semantic_approval_candidate", None)
+        write_state(state, session_id=session_id)
+    finally:
+        release_lock(lock)
+
+    log_event(
+        "approval_intent_resolved",
+        {
+            "session_id": session_id,
+            "decision": decision,
+            "source_sha256": source_sha256,
+            "reason": reason[:500],
+            "scope": resolved_scope,
+        },
+    )
+    return resolution
+
+
+def approval_settings_request(session_id, prompt):
+    """Handle the portable settings menu before task classification.
+
+    Only an exact slash command or a numeric answer to an open menu is consumed.
+    Changing tolerance never approves an already pending task or dangerous tool.
+    """
+    try:
+        module = _shared_script_module("approval_policy")
+        lock = acquire_lock()
+        try:
+            state = read_state(session_id=session_id)
+            request = module.command_request(
+                prompt, CODEX_DIR, bool(state.get("approval_settings_pending")),
+            )
+            if request is None:
+                if state.pop("approval_settings_pending", None):
+                    write_state(state, session_id=session_id)
+                return None
+            action = request["action"]
+            state["approval_settings_pending"] = action in {"menu", "invalid"}
+            write_state(state, session_id=session_id)
+        finally:
+            release_lock(lock)
+    except (ImportError, OSError, ValueError, TypeError) as exc:
+        log_event("approval_settings_error", {"error": str(exc)})
+        return None
+    context = {
+        "menu": "[AgentRelay 权限设置]\n设置卡已显示。请输入 1、2、3，或 0 取消；不要替用户选择，也不要再次生成设置卡。",
+        "invalid": "[AgentRelay 权限设置]\n输入无效，配置未修改。请用户回复 1、2、3，或 0 取消；不要替用户选择。",
+        "cancel": "[AgentRelay 权限设置]\n用户已退出设置，配置未修改；无需继续设置流程。",
+        "saved": f"[AgentRelay 权限设置]\n{request['message']}\n这是已经持久化并回读的设置结果，不要重复执行设置或把它当成任务批准。",
+    }[action]
+    emit_hook_context("UserPromptSubmit", context, system_message=request["message"])
+    return read_state(session_id=session_id)
 
 
 def update_task_gate_for_prompt(state, prompt):
@@ -2140,38 +2624,6 @@ def update_task_gate_for_prompt(state, prompt):
     approvals.setdefault("pending_keys", [])
     approvals.setdefault("approved_keys", [])
 
-    pending_danger = [
-        item for item in approvals.get("pending_keys", [])
-        if isinstance(item, str) and item
-    ]
-    approving = is_explicit_task_approval(prompt)
-    task_was_pending = gate.get("status") == "awaiting_confirmation"
-
-    if approving and (task_was_pending or pending_danger):
-        if task_was_pending:
-            gate["status"] = "approved"
-            gate["requires_confirmation"] = True
-            gate["approved_at"] = iso_now()
-        for key in pending_danger:
-            approvals["approved_keys"] = _append_unique(
-                approvals.get("approved_keys", []),
-                key,
-                20,
-            )
-        approvals["pending_keys"] = []
-
-        scope = []
-        if task_was_pending:
-            scope.append("当前任务的方案")
-        if pending_danger:
-            scope.append("已展示的危险命令，且仅限完全相同的输入执行一次")
-        return (
-            "[AgentRelay 审批已记录]\n"
-            f"用户已明确批准：{'；'.join(scope)}。\n"
-            "大型任务可以继续执行已展示方案；危险工具重试时必须保持完全"
-            "相同的工具输入。不要把这次批准扩展到其他命令或新的修改范围。"
-        )
-
     if gate.get("status") == "awaiting_confirmation":
         reasons = "；".join(str(value) for value in gate.get("reasons", []))
         if not reasons:
@@ -2184,7 +2636,11 @@ def update_task_gate_for_prompt(state, prompt):
             "也不要调用 Fusion、Commander 或其他协作模型。只读检查可以继续。"
         )
 
-    classification = classify_task_request(prompt)
+    classification = classify_task_request(
+        prompt,
+        contract=None if (state.get("change_contract") or {}).get("draft")
+        else state.get("change_contract"),
+    )
     if (
         gate.get("status") == "approved"
         and not classification["requires_confirmation"]
@@ -2263,15 +2719,32 @@ def evaluate_pre_tool_gate(tool_name, tool_input, session_id):
         if not isinstance(gate, dict):
             gate = {}
         if (
-            gate.get("status") == "awaiting_confirmation"
+            gate.get("status") in {"awaiting_confirmation", "rejected"}
             and tool_writes_files(tool_name, tool_input)
         ):
             write_state(state, session_id=session_id)
+            if gate.get("status") == "rejected":
+                return False, (
+                    "[AgentRelay 任务门禁]\n"
+                    "用户已拒绝当前待确认范围，不能继续写入代码或修改文件。\n"
+                    "如需继续，先提出新的方案并重新获得明确批准。"
+                )
+            scope_hint = "当前任务尚未获得用户批准，不能写入代码或修改文件。"
+            contract = state.get("change_contract")
+            if isinstance(contract, dict):
+                scope_hint += (
+                    f"\n目标：{contract.get('target_scope') or '按当前需求'}"
+                    f"\n允许文件：{'、'.join(contract.get('allowed_files') or ['未明确，禁止写入'])}"
+                    f"\n允许属性：{'、'.join(contract.get('allowed_properties') or ['仅限目标所需属性'])}"
+                    f"\n禁止副作用：{'、'.join(contract.get('forbidden_effects') or ['公共组件、兄弟元素、其他模块'])}"
+                    f"\n复用依据：{'、'.join(contract.get('reuse_evidence') or ['未提供，禁止另造同类组件'])}"
+                    "\n扩大范围或共享影响必须重新确认。"
+                )
+            else:
+                scope_hint += "\n目标外边界：公共组件、兄弟元素和其他模块保持不变；连带影响需重新确认。"
             return False, (
-                "[AgentRelay 任务门禁]\n"
-                "当前中大型任务尚未获得用户批准，不能写入代码或修改文件。\n"
-                "请先按 AgentRelay Skill 展示需求卡/确认卡；只读检查、搜索和"
-                "安全测试可以继续。"
+                "[AgentRelay 任务门禁]\n" + scope_hint +
+                "\n确认卡已显示时请勿重复展示；等待用户明确批准，只读检查可以继续。"
             )
     finally:
         release_lock(lock)
@@ -2356,6 +2829,9 @@ def prompt_belongs_to_current_problem(state, prompt):
     """保守判断新消息是否仍属于当前问题链。"""
 
     prompt = normalize_text(prompt)
+
+    if is_gate_response_candidate(state, prompt):
+        return True
 
     if matches_any_pattern(prompt, PAUSE_PROBLEM_PATTERNS):
         return False
@@ -3782,6 +4258,10 @@ def close_problem_state(state, status, reason=None):
     state["closed_reason"] = normalize_text(reason) or status
     state["closed_at"] = iso_now()
     state["turn_closed"] = True
+    try:
+        _shared_script_module("delivery_audit").close(CODEX_DIR, str(state.get("session_id") or ""))
+    except (ImportError, OSError, ValueError, TypeError) as exc:
+        log_event("delivery_audit_close_error", {"error": str(exc)})
     state["pending_tools"] = {}
     state["relay_collaboration_active"] = False
     archive_current_problem(state)
@@ -4270,9 +4750,9 @@ def handle_user_prompt(
             session_id=session_id
         )
 
-        pause_requested = matches_any_pattern(
-            prompt,
-            PAUSE_PROBLEM_PATTERNS,
+        pause_requested = (
+            matches_any_pattern(prompt, PAUSE_PROBLEM_PATTERNS)
+            and not is_gate_response_candidate(state, prompt)
         )
 
         # 没有当前问题
@@ -4791,8 +5271,23 @@ def handle_stop(session_id=None, last_assistant_message=None):
 
         accrue_active_time(state)
         assistant_message = normalize_text(last_assistant_message)
+        informational_reply = (
+            assistant_message.lstrip().startswith("<task-notification>")
+            or is_informational_prompt(assistant_message)
+            or bool(re.search(r"只是(?:询问|解释|历史待办)|不是(?:继续执行|用户授权)|无需(?:重复|继续)|不会再次", assistant_message))
+        )
         state["last_assistant_message"] = assistant_message
         stop_event_state = state
+
+        if informational_reply:
+            state["turn_closed"] = True
+            state["active_started_at"] = None
+            try:
+                _shared_script_module("delivery_audit").close(CODEX_DIR, str(session_id))
+            except (ImportError, OSError, ValueError, TypeError) as exc:
+                log_event("delivery_audit_close_error", {"error": str(exc)})
+            write_state(state, session_id=session_id)
+            return state
 
         # 助手已明确宣告解决时，优先按解决处理：
         # 此时再拦截本轮去提醒查归档/重试，只会打扰一个已经结束的问题。
@@ -5162,6 +5657,8 @@ def cli():
         retry --session SESSION_ID
         branch --session SESSION_ID
         resolve --session SESSION_ID
+        resolve-intent --session SESSION_ID --decision approve|reject
+                       --source-sha256 SHA256 --reason TEXT
         mark-relay --session SESSION_ID REASON
         reset --session SESSION_ID
     """
@@ -5238,6 +5735,59 @@ def cli():
                 "event_type": "TRACKER_SNAPSHOT",
             })
             print(json.dumps(snapshot, ensure_ascii=False))
+            return 0
+
+        if command == "resolve-intent":
+            values = {}
+            remaining = list(args)
+            for option, key in (
+                ("--decision", "decision"),
+                ("--source-sha256", "source_sha256"),
+                ("--reason", "reason"),
+            ):
+                if option not in remaining:
+                    continue
+                index = remaining.index(option)
+                if index + 1 >= len(remaining):
+                    print(
+                        f"Error: {option} requires a value",
+                        file=sys.stderr,
+                    )
+                    return 1
+                values[key] = remaining[index + 1]
+                remaining = remaining[:index] + remaining[index + 2:]
+            if remaining:
+                print(
+                    "Error: unexpected arguments: " + " ".join(remaining),
+                    file=sys.stderr,
+                )
+                return 1
+            if not values.get("decision") or not values.get("source_sha256"):
+                print(
+                    "Error: --decision and --source-sha256 are required",
+                    file=sys.stderr,
+                )
+                return 1
+            resolved_session = (
+                session_id
+                or normalize_session_id(os.environ.get("CODEX_SESSION_ID"))
+            )
+            try:
+                result = resolve_pending_intent(
+                    resolved_session,
+                    values["decision"],
+                    values["source_sha256"],
+                    values.get("reason") or "",
+                )
+            except ValueError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 2
+            print(
+                json.dumps(
+                    {"ok": True, **result},
+                    ensure_ascii=False,
+                )
+            )
             return 0
 
         # ----------------------------------------------------
@@ -5571,18 +6121,317 @@ def extract_last_assistant_message(data):
 # Hook 事件入口
 # ============================================================
 
+def fusion_assist_notice(session_id, prompt, stage):
+    """Suggest a real Fusion attempt; never pretend a reminder was a delegation."""
+    try:
+        state = read_state(session_id=session_id)
+        if state.get("task_gate", {}).get("status") == "awaiting_confirmation":
+            return ""
+        return _shared_script_module("fusion_assist").reminder(
+            CODEX_DIR, session_id, prompt, stage=stage)
+    except (ImportError, OSError, ValueError, TypeError) as exc:
+        log_event("fusion_assist_error", {"error": str(exc)})
+        return ""
+
+
+def fusion_assist_delivery(session_id, message):
+    """Require honest success/failure evidence at delivery, not a fabricated review."""
+    try:
+        module = _shared_script_module("fusion_assist")
+        state = module.read_state(CODEX_DIR, session_id)
+        if not state:
+            prompt = str(read_state(session_id=session_id).get("last_prompt") or "")
+            return module.reminder(CODEX_DIR, session_id, prompt, stage="delivery")
+        if state.get("should_notify") and state.get("notice"):
+            state["should_notify"] = False
+            module.write_state(CODEX_DIR, session_id, state)
+            return "[AgentRelay Fusion 结果]\n" + state["notice"]
+    except (ImportError, OSError, ValueError, TypeError) as exc:
+        log_event("fusion_assist_error", {"error": str(exc)})
+    return ""
+
+
+def _shared_script_module(name: str):
+    """Load an installed Skill script without duplicating tracker policy."""
+    import importlib
+    import importlib.util
+    try:
+        package_spec = importlib.util.find_spec("scripts")
+        if package_spec is not None and importlib.util.find_spec(f"scripts.{name}") is not None:
+            return importlib.import_module(f"scripts.{name}")
+    except ImportError:
+        pass
+    for base in (CODEX_DIR / "skills" / "agent-relay", Path(__file__).resolve().parent.parent):
+        if (base / "scripts" / f"{name}.py").is_file():
+            sys.path.insert(0, str(base / "scripts"))
+            return importlib.import_module(name)
+    raise ModuleNotFoundError(f"AgentRelay shared script not installed: {name}")
+
+
 def _page_verification_module():
     """Resolve scripts both from the source checkout and the installed Skill."""
-    import importlib
+    return _shared_script_module("page_verification")
+
+
+def ensure_change_contract(state, prompt, data):
+    """Create a draft for UI work even when the agent forgets to supply JSON."""
+    if isinstance(data.get("change_contract"), dict) or isinstance(state.get("change_contract"), dict):
+        return
+    text = normalize_text(prompt)
+    ui_terms = r"UI|界面|页面|样式|骨架|按钮|滚动条|输入框|布局|颜色|组件|骨架屏|导航|卡片|弹窗|字体|图标|文字|间距|圆角|阴影|对齐|宽度|高度"
+    ui_action = r"修改|改成|改为|调整|变更|替换|设置|增加|添加|删除|缩小|放大|移动|优化|修复|复刻|change|update|adjust|resize|move"
+    if not re.search(ui_terms, text, re.I) or not re.search(ui_action, text, re.I):
+        return
+    if not matches_any_pattern(text, TASK_WRITE_ACTION_PATTERNS) and not re.search(ui_action, text, re.I):
+        return
+    workspace = str(data.get("cwd") or os.getcwd())
+    files = _request_files(text)
     try:
-        return importlib.import_module("scripts.page_verification")
-    except ImportError:
-        for base in (CODEX_DIR / "skills" / "agent-relay", Path(__file__).resolve().parent.parent):
-            script_dir = base / "scripts"
-            if (script_dir / "page_verification.py").is_file():
-                sys.path.insert(0, str(script_dir))
-                return importlib.import_module("page_verification")
-        raise
+        module = _shared_script_module("change_contract")
+        scope_match = re.search(r"(.+?)(?:的)?(?:按钮|滚动条|输入框|骨架屏|骨架|组件|颜色|布局|样式)", text)
+        scope = scope_match.group(0)[:160] if scope_match else ""
+        contract = module.contract_for_prompt(text, workspace, files,
+                                               references=["用户当前请求（具体参考待确认）"])
+        contract["target_scope"] = scope
+        contract["reuse_checked"] = False
+        contract["draft"] = True
+        state["change_contract"] = contract
+    except (ImportError, ValueError, TypeError) as exc:
+        log_event("change_contract_error", {"error": str(exc)})
+
+
+def update_change_contract_for_prompt(state, prompt, data):
+    """Honor an explicit contract proposal; approval freezes the baseline once."""
+    candidate = data.get("change_contract")
+    if isinstance(candidate, dict):
+        current = state.get("change_contract")
+        if isinstance(current, dict) and current.get("approved") and candidate != current:
+            # A new scope is a new contract and must be approved again.
+            candidate = dict(candidate, approved=False, baseline={})
+        state["change_contract"] = dict(candidate)
+    contract = state.get("change_contract")
+    if not isinstance(contract, dict):
+        return ""
+    module = _shared_script_module("change_contract")
+    if not contract.get("workspace"):
+        contract["workspace"] = str(data.get("cwd") or os.getcwd())
+    gate = state.setdefault("task_gate", {})
+    gate["change_contract"] = contract
+    if not contract.get("approved"):
+        if contract.get("draft"):
+            return ("[AgentRelay 变更约束草案]\n已自动记录 UI 目标与边界；清晰小改按权限模式执行，"
+                    "复杂/共享影响或复用不明时再确认，不把辅助草案当第二次审批。")
+        gate["status"] = "awaiting_confirmation"
+        gate["requires_confirmation"] = True
+        gate.setdefault("reasons", ["严格变更约束需要用户确认"])
+        gate["request_sha256"] = hashlib.sha256(normalize_text(prompt).encode("utf-8")).hexdigest()
+        return ("[AgentRelay 严格变更约束]\n确认卡必须明确 UI 参考、创作权限、允许文件和禁止范围；"
+                "默认严格参考，不擅自优化，额外 Bug 只报告。批准后才可按约定写入。")
+    return ""
+
+
+def approve_change_contract(state):
+    contract = state.get("change_contract")
+    if (
+        not isinstance(contract, dict)
+        or contract.get("approved")
+        or contract.get("draft")
+    ):
+        return
+    module = _shared_script_module("change_contract")
+    state["change_contract"] = module.approve(contract)
+    state.setdefault("task_gate", {})["change_contract"] = state["change_contract"]
+
+
+def change_contract_block(session_id, data, tool_name, tool_input):
+    try:
+        contract = read_state(session_id=session_id).get("change_contract")
+        if not isinstance(contract, dict):
+            return None
+        return _shared_script_module("change_contract").check_tool_write(contract, tool_name, tool_input)
+    except (ImportError, OSError, ValueError, TypeError) as exc:
+        log_event("change_contract_error", {"error": str(exc)})
+        return None
+
+
+def change_contract_post_tool_block(session_id, tool_name, tool_input):
+    try:
+        contract = read_state(session_id=session_id).get("change_contract")
+        if not isinstance(contract, dict) or not contract.get("approved"):
+            return None
+        normalized = re.sub(r"[^a-z0-9_]+", "_", str(tool_name).lower())
+        if normalized not in {"bash", "shell", "exec_command", "execute_command", "run_command"}:
+            return None
+        violations = _shared_script_module("change_contract").diff_violations(contract)
+        if violations:
+            return "[AgentRelay 变更约束验收失败]\n" + "\n".join(violations) + "\n命令已造成越界修改，需恢复或重新获得批准。"
+    except (ImportError, OSError, ValueError, TypeError) as exc:
+        log_event("change_contract_error", {"error": str(exc)})
+    return None
+
+
+def change_contract_completion_block(session_id, message):
+    try:
+        contract = read_state(session_id=session_id).get("change_contract")
+        if not isinstance(contract, dict):
+            return None
+        return _shared_script_module("change_contract").completion_block(contract, message)
+    except (ImportError, OSError, ValueError, TypeError) as exc:
+        log_event("change_contract_error", {"error": str(exc)})
+        return None
+
+
+AUDIT_COMMAND_PATTERN = re.compile(r"^/agent-audit(?:\s+(status))?\s*$", re.I)
+
+
+def delivery_audit_status_request(session_id, prompt):
+    """Show the real audit checklist; never turn the command itself into a pass."""
+    if not AUDIT_COMMAND_PATTERN.match(str(prompt or "").strip()):
+        return None
+    try:
+        module = _shared_script_module("delivery_audit")
+        value = module.status(CODEX_DIR, session_id)
+        message = module.render_status(CODEX_DIR, session_id)
+    except (ImportError, OSError, ValueError, TypeError) as exc:
+        log_event("delivery_audit_error", {"error": str(exc)})
+        message = "「AgentRelay · 交付审计」\n审计模块不可用，尚未验证；请重新安装 AgentRelay。"
+        value = {"status": "unavailable"}
+    if value.get("status") == "not_started":
+        message += "\n当前没有已记录的修改。普通问答无需审计；有修改时 Hook 会自动建立待办。"
+    else:
+        message += ("\n这只是历史待办状态，不是继续执行的授权。若只是询问用途，仅解释即可；"
+                    "只有你明确要求继续当前修改任务时，才读取 diff、执行匹配检查并登记真实证据。"
+                    "不得因本提醒自动审计、修改或调用 Fusion。")
+    emit_hook_context(
+        "UserPromptSubmit",
+        "[AgentRelay 交付审计]\n已向用户显示真实审计状态。此命令仅用于查看，不是用户授权执行审计。"
+        "不得因为本提醒自动运行测试、修改文件、调用 Fusion 或开始新的审计；只有用户明确要求继续时才执行。"
+        "若用户只是询问用途，仅回答用途。命令本身不代表审计通过。",
+        system_message=message,
+    )
+    return read_state(session_id=session_id)
+
+
+def _delivery_audit_can_activate(tracker_state, task_id, current):
+    """Only a genuinely new write task may activate an audit; history cannot revive it."""
+    if current.get("status") == "closed":
+        return False
+    existing_task = str(current.get("task_id") or "").strip()
+    if existing_task and existing_task == str(task_id).strip():
+        return bool(current.get("active_edit"))
+    return bool(tracker_state.get("problem_active")) and not is_informational_prompt(
+        str(tracker_state.get("last_prompt") or "")
+    )
+
+
+def delivery_audit_begin(session_id, data, tool_name, tool_input):
+    """Track writes only when the active permission tier calls for an audit."""
+    if not tool_writes_files(tool_name, tool_input):
+        return
+    module = _shared_script_module("delivery_audit")
+    tracker_state = read_state(session_id=session_id)
+    request = str(tracker_state.get("initial_prompt") or tracker_state.get("last_prompt") or "")
+    if request.lstrip().startswith("<task-notification>"):
+        request = str(tracker_state.get("last_prompt") or "")
+    task_id = str(tracker_state.get("task_id") or tracker_state.get("problem_id") or "")
+    mode = _shared_script_module("approval_policy").load_policy(CODEX_DIR)["mode"]
+    workspace = Path(str(data.get("cwd") or os.getcwd())).expanduser().resolve()
+    current = module.read_state(CODEX_DIR, session_id)
+    targets = _tool_targets(tool_name, tool_input)
+    files = []
+    for value in list(current.get("files") or []) + targets:
+        path = Path(value).expanduser()
+        absolute = path.resolve() if path.is_absolute() else (workspace / path).resolve()
+        if absolute.is_file():
+            files.append(str(absolute))
+    style_change = bool(re.search(
+        r"颜色|圆角|按钮.*(?:方|圆)|配色|字号|字体|间距|边框|阴影|background|border-radius|font-size|padding|margin",
+        request, re.I,
+    )) and len(set(files)) == 1 and not re.search(r"公共组件|共享组件|全局|整个项目|全项目|跨模块|多页面|全部模块", request, re.I)
+    candidate = {
+        "request": request,
+        "files": sorted(set(files)),
+        "mode": mode,
+        "style_change": style_change,
+    }
+    if mode == "relaxed" and not style_change and not module._complex(candidate):
+        return
+    if style_change and mode != "strict" and not module._complex(candidate):
+        module.begin(CODEX_DIR, session_id, str(workspace), request,
+                     mode=mode, files=files, task_id=task_id, style_change=True,
+                     activate=_delivery_audit_can_activate(tracker_state, task_id, current))
+        return
+    module.begin(CODEX_DIR, session_id, str(workspace), request,
+                 mode=mode, files=files, task_id=task_id,
+                 activate=_delivery_audit_can_activate(tracker_state, task_id, current))
+
+
+def delivery_audit_completion_block(session_id, message):
+    try:
+        tracker_state = read_state(session_id=session_id)
+        if tracker_state.get("problem_status") in {"resolved", "completed", "closed"}:
+            return None
+        task_gate = tracker_state.get("task_gate")
+        if isinstance(task_gate, dict) and task_gate.get("status") == "awaiting_confirmation":
+            # Requirement confirmation is not delivery. An old audit from a
+            # previous task must not turn plan wording into a completion gate.
+            return None
+        module = _shared_script_module("delivery_audit")
+        audit_state = module.read_state(CODEX_DIR, session_id)
+        if not audit_state or audit_state.get("status") == "closed":
+            return None
+        if not audit_state.get("active_edit"):
+            # History alone never restarts an audit after Stop or a question.
+            return None
+        if not tracker_state.get("problem_active") or tracker_state.get("turn_closed"):
+            # A closed turn cannot reactivate an old audit merely because a new
+            # assistant message mentions completion. A new write creates a new cycle.
+            return None
+        current_task_id = str(
+            tracker_state.get("task_id") or tracker_state.get("problem_id") or ""
+        ).strip()
+        audit_task_id = str(audit_state.get("task_id") or "").strip()
+        if not audit_task_id or (
+            current_task_id and audit_task_id != current_task_id
+        ):
+            # Legacy evidence has no task identity. A different task id also
+            # cannot prove that it belongs to the current problem.
+            return None
+        if not module.completion_claim(message):
+            return None
+        mode = _shared_script_module("approval_policy").load_policy(CODEX_DIR)["mode"]
+        page = _page_verification_module()
+        page_state = page.read_state(CODEX_DIR, session_id)
+        if page_state.get("files") and not (audit_state.get("checks") or {}).get("visual"):
+            visual = page_state.get("visual_review") or {}
+            if visual.get("status") in {"passed", "user_review_required"}:
+                module.record_check(
+                    CODEX_DIR, session_id, "visual", visual["status"] == "passed",
+                    {"status": visual["status"], "mode": visual.get("mode"),
+                     "certification": visual.get("certification"),
+                     "page_gate_passed": visual["status"] == "passed" and page.verify_evidence(CODEX_DIR, session_id) is None,
+                     "user_review_required": visual["status"] != "passed"},
+                )
+        reason = module.completion_block(CODEX_DIR, session_id, mode, message)
+        if reason and module.status(CODEX_DIR, session_id).get("status") != "passed":
+            reason += "\n输入 /agent-audit 查看当前待办。"
+        return reason
+    except ImportError as exc:
+        log_event("delivery_audit_import_error", {"error": str(exc)})
+        safe_session = re.sub(r"[^A-Za-z0-9_-]", "", str(session_id))
+        pending = CODEX_DIR / "agent_relay_tracker" / "delivery-audit" / f"{safe_session}.json"
+        if not pending.is_file():
+            return None
+        return ("[AgentRelay 交付审计] 已存在待审计任务，但审计模块不可用，"
+                "不能声称已完成审计；请重新安装 AgentRelay。")
+    except (OSError, ValueError, TypeError) as exc:
+        log_event("delivery_audit_error", {"error": str(exc)})
+        safe_session = re.sub(r"[^A-Za-z0-9_-]", "", str(session_id))
+        pending = CODEX_DIR / "agent_relay_tracker" / "delivery-audit" / f"{safe_session}.json"
+        if not pending.is_file():
+            return None
+        return ("[AgentRelay 交付审计] 无法读取或核验当前交付审计，不能声称完成。"
+                "请修复审计模块或状态文件后重新运行 /agent-audit。")
 
 
 def record_page_verification_edit(session_id, data, tool_name, tool_input, tool_output,
@@ -5602,16 +6451,64 @@ def record_page_verification_edit(session_id, data, tool_name, tool_input, tool_
 
 def page_completion_block_reason(session_id, message):
     try:
+        tracker_state = read_state(session_id=session_id)
+        if tracker_state.get("problem_status") in {"resolved", "completed", "closed"}:
+            return None
         module = _page_verification_module()
         if module.completion_claim(message):
-            return module.verify_evidence(CODEX_DIR, session_id)
+            audit_state = _shared_script_module("delivery_audit").read_state(CODEX_DIR, session_id)
+            if audit_state.get("style_change") and audit_state.get("mode") != "strict":
+                page_state = module.read_state(CODEX_DIR, session_id)
+                target = page_state.get("target_review") or {}
+                if not target.get("target_verified"):
+                    return "[AgentRelay 轻量样式验收] 请先验证目标样式与关键边界，小修改无需完整审计。"
+                if page_state.get("invariants_before") and any(
+                    not item.get("passed") for item in page_state.get("unchanged_results") or []
+                ):
+                    return "[AgentRelay 轻量样式验收] 目标外位置尺寸或计算样式发生变化。"
+                return None
+            return module.verify_evidence(CODEX_DIR, session_id, message)
     except (ImportError, OSError, ValueError, TypeError) as exc:
         log_event("page_verification_check_error", {"error": str(exc)})
     return None
 
 
+def visual_review_block_reason(session_id, message):
+    """Require scope-aware visual acceptance, not merely an existing screenshot."""
+    try:
+        page = _page_verification_module()
+        visual = _shared_script_module("visual_review")
+        if not page.completion_claim(message) and not visual.visual_claim(message):
+            return None
+        state = page.read_state(CODEX_DIR, session_id)
+        if not state.get("files"):
+            if re.search(r"视觉验收通过|页面[^\n。！？]{0,50}(?:检查通过|验证通过)|亲自检查了截图[^\n。！？]{0,60}(?:正常|无问题|没有大块空白)", message, re.I):
+                return (
+                    "[AgentRelay 视觉验收] 当前没有页面文件修改记录或逐项视觉认证，"
+                    "不能把读取图片直接扩大为页面视觉验收通过。仅查看用户图片不需要页面审计。"
+                )
+            return None
+        audit_state = _shared_script_module("delivery_audit").read_state(CODEX_DIR, session_id)
+        if audit_state.get("style_change") and audit_state.get("mode") != "strict":
+            target = state.get("target_review") or {}
+            if not target.get("target_verified"):
+                return "[AgentRelay 轻量样式验收] 请完成目标样式与关键边界检查；小修改无需完整审计。"
+            if state.get("invariants_before") and any(
+                not item.get("passed") for item in state.get("unchanged_results") or []
+            ):
+                return "[AgentRelay 轻量样式验收] 目标外位置尺寸或计算样式发生变化，需修复或重新确认。"
+            return None
+        return visual.completion_block(CODEX_DIR, session_id, message)
+    except (ImportError, OSError, ValueError, TypeError) as exc:
+        log_event("visual_review_error", {"error": str(exc)})
+        return None
+
+
 def pending_page_verification_reason(session_id):
     try:
+        tracker_state = read_state(session_id=session_id)
+        if tracker_state.get("problem_status") in {"resolved", "completed", "closed"}:
+            return None
         return _page_verification_module().verify_evidence(CODEX_DIR, session_id)
     except (ImportError, OSError, ValueError, TypeError) as exc:
         log_event("page_verification_check_error", {"error": str(exc)})
@@ -5673,11 +6570,35 @@ def handle_hook_event(
         )
 
     if event_name == "UserPromptSubmit":
+        prompt = extract_prompt(data)
+        if str(prompt or "").lstrip().startswith("<task-notification>"):
+            return read_state(session_id=session_id)
+        if is_informational_prompt(prompt) and not approval_controls_snapshot(
+            read_state(session_id=session_id), prompt,
+        ):
+            state = read_state(session_id=session_id)
+            # A question about an already-visible gate still needs semantic
+            # review so it can be explicitly treated as a non-approval.
+            if not is_gate_response_candidate(state, prompt):
+                # Questions and status notifications are not a license to resume work.
+                emit_hook_context(
+                    "UserPromptSubmit",
+                    "[AgentRelay 问答模式]\n当前只是询问或系统通知，不继承旧审计，不自动修改、测试、调用 Fusion 或开始新审计。",
+                )
+                return state
         pending_page_reason = pending_page_verification_reason(session_id)
-        if pending_page_reason:
+        if pending_page_reason and not is_explicit_task_approval(prompt) \
+                and not AUDIT_COMMAND_PATTERN.match(str(prompt or "").strip()) \
+                and not is_informational_prompt(prompt):
             emit_hook_context("UserPromptSubmit", pending_page_reason)
             return read_state(session_id=session_id)
-        prompt = extract_prompt(data)
+        settings_state = approval_settings_request(session_id, prompt)
+        if settings_state is not None:
+            return settings_state
+        audit_state = delivery_audit_status_request(session_id, prompt)
+        if audit_state is not None:
+            return audit_state
+        fusion_notice = fusion_assist_notice(session_id, prompt, "prompt")
         approval_controls = approval_controls_snapshot(
             read_state(session_id=session_id),
             prompt,
@@ -5687,20 +6608,28 @@ def handle_hook_event(
             session_id=session_id,
         )
         restore_approval_controls(state, approval_controls)
+        if approval_controls:
+            notice = semantic_approval_notice(session_id, state, prompt)
+            write_state(state, session_id=session_id)
+            emit_hook_context("UserPromptSubmit", notice)
+            return state
+        ensure_change_contract(state, prompt, data)
+        contract_notice = update_change_contract_for_prompt(state, prompt, data)
         notice = update_task_gate_for_prompt(
             state,
             prompt,
         )
+        if contract_notice:
+            notice = contract_notice + ("\n" + notice if notice else "")
+        if fusion_notice:
+            notice = fusion_notice + ("\n" + notice if notice else "")
         system_message = None
         gate = state.get("task_gate")
-        if (
-            notice.startswith("[AgentRelay 任务门禁]")
-            and isinstance(gate, dict)
-            and gate.get("status") == "awaiting_confirmation"
-            and gate.get("card_shown_sha256") != gate.get("request_sha256")
-        ):
-            system_message = render_task_gate_card(prompt, gate)
-            gate["card_shown_sha256"] = gate.get("request_sha256")
+        if isinstance(gate, dict) and gate.get("status") == "awaiting_confirmation":
+            show_card, delivery_notice = card_delivery_notice(gate, gate.get("request_sha256"))
+            if show_card:
+                system_message = render_task_gate_card(prompt, gate)
+                notice = delivery_notice
         write_state(state, session_id=session_id)
         emit_hook_context(
             "UserPromptSubmit",
@@ -5716,6 +6645,10 @@ def handle_hook_event(
         tool_input = extract_tool_input(
             data
         )
+        contract_reason = change_contract_block(session_id, data, tool_name, tool_input)
+        if contract_reason:
+            emit_pre_tool_deny(contract_reason, system_message=render_tool_gate_card(tool_name, tool_input, contract_reason))
+            return read_state(session_id=session_id)
         allowed, deny_reason = evaluate_pre_tool_gate(
             tool_name,
             tool_input,
@@ -5750,6 +6683,18 @@ def handle_hook_event(
         tool_output = extract_tool_output(data)
         if event_name == "PostToolUse":
             record_page_verification_edit(session_id, data, tool_name, tool_input, tool_output)
+            try:
+                delivery_audit_begin(session_id, data, tool_name, tool_input)
+            except (ImportError, OSError, ValueError, TypeError) as exc:
+                log_event("delivery_audit_error", {"error": str(exc)})
+            contract_reason = change_contract_post_tool_block(session_id, tool_name, tool_input)
+            if contract_reason:
+                emit_hook_context("PostToolUse", contract_reason)
+            else:
+                progress_notice = fusion_assist_notice(
+                    session_id, str(data.get("prompt") or read_state(session_id=session_id).get("last_prompt") or ""), "progress")
+                if progress_notice:
+                    emit_hook_context("PostToolUse", progress_notice)
         return handle_post_tool_use(
             tool_name=tool_name,
             tool_input=tool_input,
@@ -5762,7 +6707,15 @@ def handle_hook_event(
 
     if event_name == "Stop":
         message = extract_last_assistant_message(data)
-        reason = page_completion_block_reason(session_id, message)
+        reason = change_contract_completion_block(session_id, message)
+        if not reason:
+            reason = page_completion_block_reason(session_id, message)
+        if not reason:
+            reason = visual_review_block_reason(session_id, message)
+        if not reason:
+            reason = delivery_audit_completion_block(session_id, message)
+        if not reason:
+            reason = fusion_assist_delivery(session_id, message)
         if reason:
             print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False), flush=True)
             return read_state(session_id=session_id)

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 import difflib
@@ -133,6 +133,7 @@ class ConfirmationCard:
     attempt_history: list[dict] = field(default_factory=list)
     # Complex work confirms its requirement scope before this second action.
     next_action: str = "execute"
+    change_contract: dict | None = None
 
 
 class ConfirmationStore:
@@ -163,7 +164,7 @@ class ConfirmationStore:
             try:
                 value = json.loads(path.read_text(encoding="utf-8"))
                 history = [x for x in value.get("attempt_history", []) if isinstance(x, dict)]
-                card = ConfirmationCard(str(value["task_id"]), str(value["action"]), tuple(value.get("scope", ())), tuple(value.get("acceptance_criteria", ())), str(value.get("status", "pending")), str(value.get("request", "")), value.get("workspace"), tuple(value.get("allowed_files", ())), dict(value.get("edits", {})), tuple(value.get("verification_commands", ())), int(value.get("attempts", 0)), str(value.get("last_error", "")), str(value.get("recovery_reason", "")), history, str(value.get("next_action", "execute")))
+                card = ConfirmationCard(str(value["task_id"]), str(value["action"]), tuple(value.get("scope", ())), tuple(value.get("acceptance_criteria", ())), str(value.get("status", "pending")), str(value.get("request", "")), value.get("workspace"), tuple(value.get("allowed_files", ())), dict(value.get("edits", {})), tuple(value.get("verification_commands", ())), int(value.get("attempts", 0)), str(value.get("last_error", "")), str(value.get("recovery_reason", "")), history, str(value.get("next_action", "execute")), value.get("change_contract"))
                 if card.status not in self.TRANSITIONS:
                     continue
                 self.cards[card.task_id] = card
@@ -179,9 +180,7 @@ class ConfirmationStore:
         card = self.cards[task_id]
         if status not in self.TRANSITIONS.get(card.status, set()):
             raise ValueError(f"非法确认卡状态迁移: {card.status} -> {status}")
-        updated = ConfirmationCard(card.task_id, card.action, card.scope, card.acceptance_criteria, status,
-                                   card.request, card.workspace, card.allowed_files, card.edits, card.verification_commands,
-                                   card.attempts, card.last_error, card.recovery_reason, card.attempt_history, card.next_action)
+        updated = replace(card, status=status)
         self.cards[task_id] = updated
         self._persist(updated)
         return updated
@@ -206,7 +205,7 @@ class ConfirmationStore:
             approved.workspace, approved.allowed_files, approved.edits,
             approved.verification_commands, approved.attempts,
             approved.last_error, approved.recovery_reason, history,
-            approved.next_action,
+            approved.next_action, approved.change_contract,
         )
         return self.create(execution)
 
@@ -220,7 +219,7 @@ class ConfirmationStore:
         if history:
             event = {"type": event_type, "at": datetime.now(timezone.utc).isoformat(), "message": str(message)[:300]}
             history[-1] = {**history[-1], "events": list(history[-1].get("events", [])) + [event]}
-            updated = ConfirmationCard(card.task_id,card.action,card.scope,card.acceptance_criteria,card.status,card.request,card.workspace,card.allowed_files,card.edits,card.verification_commands,card.attempts,card.last_error,card.recovery_reason,history)
+            updated = replace(card, attempt_history=history)
             self.cards[task_id] = updated; self._persist(updated); return updated
         return card
 
@@ -231,9 +230,7 @@ class ConfirmationStore:
         if action not in {"fail", "retry"}:
             raise ValueError("恢复操作必须是 fail 或 retry")
         status = "failed" if action == "fail" else "approved"
-        updated = ConfirmationCard(card.task_id, card.action, card.scope, card.acceptance_criteria, status,
-                                   card.request, card.workspace, card.allowed_files, card.edits, card.verification_commands,
-                                   card.attempts, card.last_error, reason, card.attempt_history)
+        updated = replace(card, status=status, recovery_reason=reason)
         self.cards[task_id] = updated; self._persist(updated)
         return updated
 
@@ -241,9 +238,7 @@ class ConfirmationStore:
         card = self.cards[task_id]
         if card.status != "executing":
             raise ValueError(f"状态 {card.status} 不允许标记中断")
-        updated = ConfirmationCard(card.task_id, card.action, card.scope, card.acceptance_criteria, "recovery_required",
-                                   card.request, card.workspace, card.allowed_files, card.edits, card.verification_commands,
-                                   card.attempts, card.last_error, reason, card.attempt_history)
+        updated = replace(card, status="recovery_required", recovery_reason=reason)
         self.cards[task_id] = updated; self._persist(updated)
         return updated
 
@@ -654,7 +649,8 @@ class Orchestrator:
 
     def create_requirement(self, task_id: str, request: str, complexity: int, modules: Iterable[str], files: Iterable[str], *,
                            workspace: str | Path | None = None, edits: dict[str, str] | None = None,
-                           verification_commands: Iterable[str] = ()) -> tuple[RequirementCard, RequirementAssessment, ConfirmationCard]:
+                           verification_commands: Iterable[str] = (),
+                           change_contract: dict | None = None) -> tuple[RequirementCard, RequirementAssessment, ConfirmationCard]:
         modules = tuple(modules); files = tuple(files)
         task_type = classify_task(request, complexity, modules)
         commander = task_type == TaskType.PROJECT_COMMANDER_TASK
@@ -709,7 +705,7 @@ class Orchestrator:
         confirm = ConfirmationCard(task_id, "confirm_requirement", files, tuple(card.acceptance_criteria),
                                    request=request, workspace=str(workspace) if workspace else None,
                                    allowed_files=files, edits=dict(edits or {}), verification_commands=checks,
-                                   next_action=next_action)
+                                   next_action=next_action, change_contract=change_contract)
         self.confirmations.create(confirm)
         return card, assessment, confirm
 
@@ -717,7 +713,8 @@ class Orchestrator:
                                  modules: Iterable[str], files: Iterable[str], *,
                                  workspace: str | Path | None = None,
                                  edits: dict[str, str] | None = None,
-                                 verification_commands: Iterable[str] = ()) -> tuple[RequirementAssessment, ConfirmationCard]:
+                                 verification_commands: Iterable[str] = (),
+                                 change_contract: dict | None = None) -> tuple[RequirementAssessment, ConfirmationCard]:
         """Create one ordinary confirmation card for several small changes."""
         files = tuple(files)
         parts = [part.strip(" ，,。；;") for part in request.replace("以及", "并").replace("同时", "并").split("并")]
@@ -730,6 +727,7 @@ class Orchestrator:
             ("执行以下确认的修改：" + "；".join(requested_changes), "不修改未授权文件", "修改后通过验证"),
             request=request, workspace=str(workspace) if workspace else None,
             allowed_files=files, edits=dict(edits or {}), verification_commands=checks,
+            change_contract=change_contract,
         )
         self.confirmations.create(confirmation)
         return assessment, confirmation
@@ -754,12 +752,15 @@ class Orchestrator:
             raise PermissionError("任务没有确认卡，拒绝执行")
         if card.status != "approved":
             raise PermissionError(f"确认卡状态 {card.status} 不允许执行")
-        executing = self.confirmations.transition(task_id, "executing")
-        executing = ConfirmationCard(executing.task_id, executing.action, executing.scope, executing.acceptance_criteria,
-                                     executing.status, executing.request, executing.workspace, executing.allowed_files,
-                                     executing.edits, executing.verification_commands, executing.attempts + 1,
-                                     executing.last_error, executing.recovery_reason,
-                                     executing.attempt_history + [{"attempt": executing.attempts + 1, "started_at": datetime.now(timezone.utc).isoformat(), "finished_at": "", "status": "executing", "error": ""}])
+        executing = replace(self.confirmations.transition(task_id, "executing"),
+                            attempts=card.attempts + 1,
+                            attempt_history=card.attempt_history + [{"attempt": card.attempts + 1, "started_at": datetime.now(timezone.utc).isoformat(), "finished_at": "", "status": "executing", "error": ""}])
+        if executing.change_contract:
+            try:
+                from .change_contract import approve
+            except ImportError:
+                from change_contract import approve
+            executing = replace(executing, change_contract=approve(executing.change_contract))
         self.confirmations.cards[task_id] = executing
         self.confirmations._persist(executing)
         self.confirmations.add_event(task_id, "worker_started")
@@ -771,6 +772,20 @@ class Orchestrator:
                 task_id, executing.request or executing.action, executing.allowed_files or executing.scope,
                 workspace=run_workspace, edits=run_edits, verification_commands=commands)
             successful = result.status == "success" and review.approved and verification.passed
+            contract_violations = []
+            if executing.change_contract:
+                try:
+                    from .change_contract import diff_violations
+                except ImportError:
+                    from change_contract import diff_violations
+                contract_violations = diff_violations(executing.change_contract)
+                if not executing.change_contract.get("reference_verified"):
+                    contract_violations.append("尚未对照指定 UI 参考完成真实验收")
+                elif not executing.change_contract.get("reference_evidence"):
+                    contract_violations.append("缺少 UI 参考核对证据")
+                if executing.change_contract.get("unchanged_checks") and not executing.change_contract.get("unchanged_verified"):
+                    contract_violations.append("尚未验证目标外没有副作用")
+                successful = successful and not contract_violations
             self.confirmations.add_event(task_id, "verification_started")
             if not successful:
                 self.confirmations.add_event(task_id, "verification_failed", "verification failed")
@@ -778,15 +793,12 @@ class Orchestrator:
             current = self.confirmations.cards[task_id]
             history = list(current.attempt_history)
             if history:
-                history[-1] = {**history[-1], "finished_at": datetime.now(timezone.utc).isoformat(), "status": "completed" if successful else "failed", "error": "" if successful else (result.failure_reason or "verification failed")}
-                current = ConfirmationCard(current.task_id,current.action,current.scope,current.acceptance_criteria,current.status,current.request,current.workspace,current.allowed_files,current.edits,current.verification_commands,current.attempts,current.last_error,current.recovery_reason,history)
+                history[-1] = {**history[-1], "finished_at": datetime.now(timezone.utc).isoformat(), "status": "completed" if successful else "failed", "error": "" if successful else (result.failure_reason or "; ".join(contract_violations) or "verification failed")}
+                current = replace(current, attempt_history=history)
                 self.confirmations.cards[task_id]=current; self.confirmations._persist(current)
             if not successful:
                 failed = self.confirmations.cards[task_id]
-                failed = ConfirmationCard(failed.task_id, failed.action, failed.scope, failed.acceptance_criteria,
-                                          failed.status, failed.request, failed.workspace, failed.allowed_files,
-                                          failed.edits, failed.verification_commands, failed.attempts,
-                                          result.failure_reason or "verification failed", failed.recovery_reason)
+                failed = replace(failed, last_error=result.failure_reason or "; ".join(contract_violations) or "verification failed")
                 self.confirmations.cards[task_id] = failed; self.confirmations._persist(failed)
             return {"result": result, "review": review, "verification": verification,
                     "status": "completed" if successful else "failed"}
@@ -1002,8 +1014,10 @@ class Orchestrator:
             coordinator = CommanderProviderCoordinator(runtime_path, profiles)
             runtime = CommanderRuntime(runtime_path, max_agents=max_agents, coordinator=coordinator)
             configs = model_configs or {}
+            contract = confirmation.change_contract if confirmation else None
             agents = [runtime.create(item.role, task_id, model_config={"provider": "codex-self",
-                        "task_id": task_id, "goal": item.goal, **dict(configs.get(item.role, {}))}) for item in role_plan]
+                        "task_id": task_id, "goal": item.goal,
+                        "change_contract": contract, **dict(configs.get(item.role, {}))}) for item in role_plan]
             for agent in agents:
                 runtime.prepare_workspace(agent, source)
                 child = TaskContext(f"{task_id}:{agent.role}", str(agent.workspace), request)
@@ -1071,6 +1085,13 @@ class Orchestrator:
                         "完成后用简洁文字报告：完成内容、修改文件、验证结果、风险和建议。"
                     )
                 model = agent.model_config.get("model")
+                contract = agent.model_config.get("change_contract")
+                if isinstance(contract, dict):
+                    try:
+                        from .change_contract import child_prompt
+                    except ImportError:
+                        from change_contract import child_prompt
+                    prompt = child_prompt(contract) + "\n\n" + prompt
                 return list(command_prefix) + (["-m", str(model)] if model else []) + ["--skip-git-repo-check", "--sandbox", "workspace-write",
                         "--approve-for-me", "--ephemeral", "--color", "never", prompt]
 
@@ -1169,12 +1190,8 @@ class Orchestrator:
             self.confirmations.transition(merge_id, "completed")
         else:
             current = self.confirmations.cards[merge_id]
-            failed = ConfirmationCard(current.task_id, current.action, current.scope,
-                                      current.acceptance_criteria, "failed", current.request,
-                                      current.workspace, current.allowed_files, current.edits,
-                                      current.verification_commands, current.attempts,
-                                      str(result.get("errors") or result.get("skipped") or "merge failed"),
-                                      current.recovery_reason, current.attempt_history, current.next_action)
+            failed = replace(current, status="failed",
+                             last_error=str(result.get("errors") or result.get("skipped") or "merge failed"))
             self.confirmations.cards[merge_id] = failed
             self.confirmations._persist(failed)
         summary = runtime.summarize([], plan, result)

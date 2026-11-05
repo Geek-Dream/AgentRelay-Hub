@@ -639,6 +639,13 @@ class CommanderProcess:
             child_env["AGENTRELAY_COMMANDER_ROLE"] = str(agent.role)
             child_env["AGENTRELAY_COMMANDER_REQUEST"] = str(getattr(context, "user_request", ""))
             child_env["AGENTRELAY_COMMANDER_WORKSPACE"] = str(agent.workspace)
+        contract = agent.model_config.get("change_contract")
+        if isinstance(contract, dict):
+            try:
+                from .change_contract import with_child_environment
+            except ImportError:
+                from change_contract import with_child_environment
+            child_env = with_child_environment(contract, child_env)
         process = subprocess.Popen(command, cwd=agent.workspace, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True, env=child_env)
         self.processes[agent.agent_id] = process

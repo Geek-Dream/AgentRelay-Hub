@@ -27,7 +27,7 @@ class TargetError(RuntimeError):
 
 
 HOOK_TIMEOUT = 15
-CLAUDE_EVENTS = ("SessionStart", "UserPromptSubmit", "PostToolUse", "Stop")
+CLAUDE_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
 HERMES_EVENTS = {
     "pre_llm_call": "UserPromptSubmit",
     "post_tool_call": "PostToolUse",
@@ -115,7 +115,7 @@ def agent_targets(home: Path | None = None) -> dict[str, dict]:
             "detect": "kimi",
             "level": "full",
             "level_note": "完整支持：写入 $KIMI_CODE_HOME/config.toml 的 [[hooks]]；提醒经 Stop 事件注入上下文，失败重试经 PostToolUseFailure 计数",
-            "skill_dir": user_home / ".agents" / "skills" / "agent-relay",
+            "skill_dir": kimi_code_home() / "skills" / "agent-relay",
             "hook_dir": base / "hooks",
             "config_path": kimi_code_home() / "config.toml",
         },
@@ -416,6 +416,12 @@ const FUSION = firstExisting([
   join(HOME_PI_SKILLS, "agent-fusion", "scripts", "agent_fusion.py"),
   join(CODEX_HOME, "skills", "agent-fusion", "scripts", "agent_fusion.py"),
 ]);
+const APPROVAL = firstExisting([
+  process.env.AGENTRELAY_APPROVAL,
+  join(PI_SKILLS, "agent-relay", "scripts", "approval_policy.py"),
+  join(HOME_PI_SKILLS, "agent-relay", "scripts", "approval_policy.py"),
+  join(CODEX_HOME, "skills", "agent-relay", "scripts", "approval_policy.py"),
+]);
 const VENV_PYTHONS = IS_WIN
   ? [
       join(VENV, "Scripts", "python.exe"),
@@ -484,7 +490,7 @@ function runPython(script, args, options) {{
 function relay(payload) {{
   const res = runPython(
     SHIM,
-    ["--target", "pi", "--event", "UserPromptSubmit"],
+    ["--target", "pi", "--event", payload.hook_event_name || "UserPromptSubmit"],
     {{
       input: JSON.stringify(payload),
       encoding: "utf-8",
@@ -494,9 +500,15 @@ function relay(payload) {{
   if (!res || res.status !== 0 || !res.stdout) return "";
   try {{
     const out = JSON.parse(String(res.stdout).trim());
-    return out?.hookSpecificOutput?.additionalContext ?? out?.additionalContext ?? "";
+    return {{
+      context: out?.hookSpecificOutput?.additionalContext ?? out?.additionalContext ?? "",
+      card: out?.systemMessage ?? "",
+      denial: out?.hookSpecificOutput?.permissionDecision === "deny"
+        ? String(out?.hookSpecificOutput?.permissionDecisionReason || out?.systemMessage || "操作未获批准")
+        : "",
+    }};
   }} catch {{
-    return "";
+    return {{ context: "", card: "", denial: "" }};
   }}
 }}
 
@@ -516,6 +528,78 @@ function fusion(args) {{
     status: res?.status ?? null,
     error: String(res?.stderr ?? "").trim(),
   }};
+}}
+
+function approval(args) {{
+  const res = runPython(APPROVAL, args, {{ encoding: "utf-8", timeout: 5000 }});
+  return {{
+    stdout: String(res?.stdout ?? "").trim(),
+    stderr: String(res?.stderr ?? res?.error?.message ?? "").trim(),
+    status: res?.status ?? null,
+  }};
+}}
+
+function approvalResult(outcome) {{
+  try {{
+    return JSON.parse(outcome.stdout);
+  }} catch {{
+    return null;
+  }}
+}}
+
+const APPROVAL_MENU_MODES = [
+  {{ id: "1", mode: "strict", label: "严格", description: "写入先确认；完整需求/diff/行为/视觉/主审/独立审计通过才完成" }},
+  {{ id: "2", mode: "standard", label: "标准（默认）", description: "小改轻量检查；单点样式只验目标/边界，复杂/共享/高风险自动升级" }},
+  {{ id: "3", mode: "relaxed", label: "宽松", description: "小任务不做正式审计；大型/多文件/多目标/共享/高风险才审计" }},
+];
+
+function approvalMenuText(item) {{
+  return item.id + ". " + item.label + " - " + item.description;
+}}
+
+async function approvalMenu(ctx) {{
+  const selected = await ctx.ui.select(
+    "Agent Approval 权限设置\\n选择 1、2、3；取消不会修改配置。切换模式不会批准当前待确认任务。",
+    APPROVAL_MENU_MODES.map(approvalMenuText),
+  );
+  const item = APPROVAL_MENU_MODES.find((entry) => approvalMenuText(entry) === selected);
+  if (!item) return;
+  await approvalCommand(item.id, ctx);
+}}
+
+async function approvalCommand(args, ctx) {{
+  const value = String(args || "").trim();
+  if (!value) {{
+    if (!ctx.hasUI) {{
+      ctx.ui.notify("非交互模式请使用：/agent-approval [1|2|3]", "warning");
+      return;
+    }}
+    await approvalMenu(ctx);
+    return;
+  }}
+  if (!/^[1-3]$/.test(value)) {{
+    ctx.ui.notify("权限模式请输入 1、2、3：1=严格，2=标准（默认），3=宽松", "warning");
+    return;
+  }}
+  const outcome = approval([value]);
+  const result = approvalResult(outcome);
+  if (outcome.status !== 0 || !result?.mode) {{
+    ctx.ui.notify("权限设置保存失败：" + (outcome.stderr || "无法读取设置结果"), "error");
+    return;
+  }}
+  const verify = approvalResult(approval(["show"]));
+  if (verify?.mode !== result.mode) {{
+    ctx.ui.notify("权限设置回读不一致，请检查配置目录写入权限", "error");
+    return;
+  }}
+  const item = APPROVAL_MENU_MODES.find((entry) => entry.mode === result.mode);
+  ctx.ui.notify(
+    "Agent Approval 已保存并回读验证\\n"
+      + item.id + ". " + item.label + "：" + item.description + "\\n"
+      + "配置：" + result.path + "\\n"
+      + "当前待确认任务仍需单独批准；危险命令和越界门禁不变。",
+    "info",
+  );
 }}
 
 function parseFusionOutput(output) {{
@@ -987,6 +1071,16 @@ export default function agentRelay(pi) {{
     }},
   }});
 
+  pi.registerCommand("agent-approval", {{
+    description: "设置权限与交付审计：1=严格完整审计，2=标准轻量/必要升级，3=宽松保留底线",
+    handler: approvalCommand,
+  }});
+
+  pi.registerCommand("设置", {{
+    description: "打开 Agent Approval 权限设置",
+    handler: approvalCommand,
+  }});
+
   pi.registerCommand("agent-fusion", {{
     description: "管理 AgentRelay Fusion；无参数进入中文选择菜单",
     handler: fusionCommand,
@@ -999,25 +1093,40 @@ export default function agentRelay(pi) {{
   pi.on("before_agent_start", (event, ctx) => {{
     const fusionState = fusionStatus();
     syncFusionTool(pi, fusionState);
-    const relayContent = relay({{
+    const relayResult = relay({{
       hook_event_name: "UserPromptSubmit",
       session_id: contextSessionId(ctx),
       cwd: ctx?.cwd ?? process.cwd(),
       prompt: event?.prompt ?? event?.message ?? "",
     }});
+    if (relayResult.card) ctx?.ui?.notify(relayResult.card, "info");
     const fusionContent = fusionGuidance(fusionState);
     const result = {{}};
     if (fusionContent) {{
       result.systemPrompt = String(event?.systemPrompt || "") + "\\n\\n" + fusionContent;
     }}
-    if (relayContent) {{
+    if (relayResult.context) {{
       result.message = {{
         customType: "agent-relay",
-        content: relayContent,
+        content: relayResult.context,
         display: false,
       }};
     }}
     return Object.keys(result).length > 0 ? result : undefined;
+  }});
+
+  pi.on("tool_call", (event, ctx) => {{
+    const result = relay({{
+      hook_event_name: "PreToolUse",
+      session_id: contextSessionId(ctx),
+      cwd: ctx?.cwd ?? process.cwd(),
+      tool_name: event?.toolName,
+      tool_input: event?.input ?? {{}},
+      tool_use_id: event?.toolCallId,
+    }});
+    if (result.card) ctx?.ui?.notify(result.card, result.denial ? "warning" : "info");
+    if (result.denial) return {{ block: true, reason: result.denial }};
+    return undefined;
   }});
 }}
 """

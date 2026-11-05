@@ -81,17 +81,23 @@ SCRIPT_FILES = (
     "task_scheduler.py",
     "config_manager.py",
     "config_web.py",
+    "approval_policy.py",
+    "delivery_audit.py",
+    "change_contract.py",
     "page_verification.py",
     "verify_page.py",
+    "visual_review.py",
+    "verification_state.py",
     "generic_web_adapter.py",
     "diagnose_web_provider.py",
     "agent_relay_archive.py",
     "agent_fusion.py",
     "fusion_mode.py",
     "fusion_runner.py",
+    "fusion_assist.py",
 )
 CONFIG_FILES = ("model_registry.json",)
-REFERENCE_FILES = ("orchestrator-v1.md",)
+REFERENCE_FILES = ("orchestrator-v1.md", "delivery-audit-gstack.md")
 TRACKED_EVENTS = (
     "SessionStart",
     "UserPromptSubmit",

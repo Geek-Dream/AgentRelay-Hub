@@ -36,9 +36,10 @@ except ImportError:
 CARD_STYLE_CHOICES = ("default", "codex", "auto")
 ANSI_RED_BOLD = "\033[1;31m"
 ANSI_BLUE_BOLD = "\033[1;34m"
+ANSI_CYAN_BOLD = "\033[1;36m"
 ANSI_GREEN = "\033[32m"
 ANSI_RESET = "\033[0m"
-CODEX_DIVIDER = "────────────────────────────────────────"
+CODEX_DIVIDER = "────────────────────────"
 _CJK_TEXT = re.compile(r"[\u3400-\u9fff]")
 
 
@@ -58,6 +59,29 @@ def _line(title: str, value) -> str:
     if isinstance(value, (list, tuple)):
         value = "、".join(str(item) for item in value) or "无"
     return f"{title}: {value or '无'}"
+
+
+def _aligned_lines(fields, *, colored: bool = False, risk: bool = False) -> list[str]:
+    """Align values within one section; long labels don't widen other sections."""
+    visible = [(str(label), field_value) for label, field_value in fields
+               if field_value not in (None, "", (), []) or label in {"最近错误", "恢复原因"}]
+    width = max((len(label) for label, _ in visible), default=0)
+    lines = []
+    for label, value in visible:
+        values = ["、".join(str(item) for item in value)] if isinstance(value, (list, tuple)) else _display_values(value)
+        prefix = f"{label + ':':<{width + 1}} "
+        content = _paint(values[0], ANSI_RED_BOLD) if risk else _paint_technical(values[0])
+        lines.append(_paint(f"{label + ':':<{width + 1}}", ANSI_BLUE_BOLD) + " " + content if colored
+                     else prefix + values[0])
+        continuation = " " * (width + 2)
+        lines.extend(continuation + (_paint_technical(item) if colored else item) for item in values[1:])
+    return lines
+
+
+def _present_line(title: str, value) -> str | None:
+    if value in (None, "", (), [], 0):
+        return None
+    return _line(title, value)
 
 
 def resolve_card_style(
@@ -124,7 +148,8 @@ def _confirmation_choices(action: str | None) -> tuple[str, str, str]:
 
 def _render_codex_requirement_card(card: dict) -> str:
     lines = [
-        _paint("AgentRelay / 需求卡", ANSI_RED_BOLD),
+        CODEX_DIVIDER,
+        _paint("「AgentRelay · 需求卡」", ANSI_RED_BOLD),
         CODEX_DIVIDER,
     ]
     fields = (
@@ -137,65 +162,102 @@ def _render_codex_requirement_card(card: dict) -> str:
         ("当前功能", card.get("current_state")),
         ("目标功能", card.get("target_state")),
     )
-    for label, value in fields:
-        lines.extend(_codex_field(label, value))
-    lines.extend(
-        _codex_field(
-            "风险",
-            card.get("risk_analysis") or card.get("risks"),
-            risk=True,
-        )
-    )
-    lines.extend(_codex_field("验证", card.get("verification_plan")))
-    lines.extend(_codex_field("回滚", card.get("rollback_plan")))
+    lines.extend(_aligned_lines(fields, colored=True))
+    lines.extend(_aligned_lines([("风险", card.get("risk_analysis") or card.get("risks"))],
+                                colored=True, risk=True))
+    lines.extend(_aligned_lines([
+        ("验证", card.get("verification_plan")),
+        ("回滚", card.get("rollback_plan")),
+    ], colored=True))
+    lines.append(CODEX_DIVIDER)
     return "\n".join(lines)
+
+
+def _contract_fields(value: dict) -> list[tuple[str, str]]:
+    contract = value.get("change_contract")
+    if not isinstance(contract, dict):
+        return []
+    try:
+        from .change_contract import card_fields
+    except ImportError:
+        from change_contract import card_fields
+    return card_fields(contract)
+
+
+def _confirmation_summary(value: dict) -> str:
+    action = value.get("action")
+    if action == "confirm_requirement":
+        return "先确认需求、目标与边界；此步不授权修改代码。"
+    if action == "enable_commander":
+        return "确认在下列边界内启用 Commander；子 Agent 继承同一约束。"
+    contract = value.get("change_contract")
+    if isinstance(contract, dict) and contract.get("target_scope"):
+        return f"只修改「{contract['target_scope']}」，不得影响其他元素或模块。"
+    return "仅批准下列明确范围内的修改；新增文件、数据或业务范围需重新确认。"
 
 
 def _render_codex_confirmation_card(value: dict) -> str:
     action = value.get("action")
     lines = [
-        _paint("AgentRelay / 确认卡", ANSI_RED_BOLD),
         CODEX_DIVIDER,
+        _paint("「AgentRelay · 执行确认卡」", ANSI_RED_BOLD),
+        CODEX_DIVIDER,
+        _confirmation_summary(value),
+        "",
+        _paint("01 · 当前决定", ANSI_CYAN_BOLD),
     ]
     fields = (
         ("任务", value.get("task_id")),
         ("状态", value.get("status")),
         ("当前确认", _confirmation_action_label(action)),
         ("授权文件", value.get("allowed_files") or value.get("scope")),
+    )
+    lines.extend(_aligned_lines(fields, colored=True))
+    contract_fields = _contract_fields(value)
+    if contract_fields:
+        lines.append(_paint("02 · 目标与边界（必须逐项遵守）", ANSI_CYAN_BOLD))
+        lines.extend(_aligned_lines(contract_fields, colored=True))
+    lines.append(_paint("03 · 验收与执行", ANSI_CYAN_BOLD))
+    execution_fields = [
         ("验证命令", value.get("verification_commands")),
         ("验收条件", value.get("acceptance_criteria")),
         ("工作区", value.get("workspace")),
         ("修改尝试", value.get("attempts")),
         ("最近错误", value.get("last_error")),
         ("恢复原因", value.get("recovery_reason")),
-    )
-    for label, field_value in fields:
-        lines.extend(_codex_field(label, field_value))
+    ]
+    lines.extend(_aligned_lines(execution_fields, colored=True))
     if value.get("status") == "pending":
         first, second, third = _confirmation_choices(action)
         lines.extend([
+            "",
             CODEX_DIVIDER,
             _paint(f"[1] {first}", ANSI_GREEN),
             _paint(f"[2] {second}", ANSI_BLUE_BOLD),
             _paint(f"[3] {third}", ANSI_RED_BOLD),
         ])
+    lines.append(CODEX_DIVIDER)
     return "\n".join(lines)
 
 
 def render_requirement_card(card: dict, *, style: str | None = None) -> str:
     if resolve_card_style(style) == "codex":
         return _render_codex_requirement_card(card)
-    lines = ["需求卡", f"任务: {card.get('task_id', '')}",
-             _line("用户需求", card.get("user_requirement") or card.get("original_request")),
-             _line("需求评估", card.get("requirement_assessment")),
-             _line("大白话", card.get("plain_explanation")),
-             _line("影响模块", card.get("affected_modules")),
-             _line("影响文件", card.get("affected_files") or card.get("expected_files")),
-             _line("当前功能", card.get("current_state")),
-             _line("目标功能", card.get("target_state")),
-             _line("风险", card.get("risk_analysis") or card.get("risks")),
-             _line("验证", card.get("verification_plan")),
-             _line("回滚", card.get("rollback_plan"))]
+    lines = [CODEX_DIVIDER, "「AgentRelay · 需求卡」", CODEX_DIVIDER, ""]
+    lines.extend(_aligned_lines([
+        ("任务", card.get("task_id", "")),
+        ("用户需求", card.get("user_requirement") or card.get("original_request")),
+        ("需求评估", card.get("requirement_assessment")),
+        ("大白话", card.get("plain_explanation")),
+        ("影响模块", card.get("affected_modules")),
+        ("影响文件", card.get("affected_files") or card.get("expected_files")),
+        ("当前功能", card.get("current_state")),
+        ("目标功能", card.get("target_state")),
+        ("风险", card.get("risk_analysis") or card.get("risks")),
+        ("验证", card.get("verification_plan")),
+        ("回滚", card.get("rollback_plan")),
+    ]))
+    lines.append(CODEX_DIVIDER)
     return "\n".join(lines)
 
 
@@ -207,16 +269,28 @@ def render_confirmation_card(
     value = asdict(card) if isinstance(card, ConfirmationCard) else dict(card)
     if resolve_card_style(style) == "codex":
         return _render_codex_confirmation_card(value)
-    lines = ["确认卡", f"任务: {value.get('task_id', '')}",
-             _line("状态", value.get("status")),
-             _line("当前确认", _confirmation_action_label(value.get("action"))),
-             _line("授权文件", value.get("allowed_files") or value.get("scope")),
-             _line("验证命令", value.get("verification_commands")),
-             _line("验收条件", value.get("acceptance_criteria")),
-             _line("工作区", value.get("workspace")),
-             _line("修改尝试", value.get("attempts")),
-             _line("最近错误", value.get("last_error")),
-             _line("恢复原因", value.get("recovery_reason"))]
+    lines = [CODEX_DIVIDER, "「AgentRelay · 执行确认卡」", CODEX_DIVIDER, _confirmation_summary(value), "",
+             "01 · 当前决定"]
+    lines.extend(_aligned_lines([
+        ("任务", value.get("task_id", "")),
+        ("状态", value.get("status")),
+        ("当前确认", _confirmation_action_label(value.get("action"))),
+        ("授权文件", value.get("allowed_files") or value.get("scope")),
+    ]))
+    contract_fields = _contract_fields(value)
+    if contract_fields:
+        lines.extend(["", "02 · 目标与边界（必须逐项遵守）"])
+        lines.extend(_aligned_lines(contract_fields))
+    lines.extend(["", "03 · 验收与执行"])
+    lines.extend(_aligned_lines([
+        ("验证命令", value.get("verification_commands")),
+        ("验收条件", value.get("acceptance_criteria")),
+        ("工作区", value.get("workspace")),
+        ("修改尝试", value.get("attempts")),
+        ("最近错误", value.get("last_error")),
+        ("恢复原因", value.get("recovery_reason")),
+    ]))
+    lines.append(CODEX_DIVIDER)
     return "\n".join(lines)
 
 

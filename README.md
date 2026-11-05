@@ -56,6 +56,8 @@ Commander = 临时项目组，按任务拆分多个隔离 Agent
 - 🛑 需要确认时，Agent 必须先展示需求卡/确认卡，批准前不能写文件。
 - ⚠️ 遇到删除、破坏性 Git、依赖安装、数据库迁移、部署等高风险命令时直接拦下。
 - ✅ 批准只对当前方案生效；危险命令只允许完全相同的输入重试一次。
+- 🧠 你回复 `好的`、`OK`、`没问题`、`执行吧`、`行吧`、`1` 等自然语言时，由主 Agent
+  结合上下文理解；Hook 只生成语义审批候选，不再靠固定关键词直接授权。
 
 ### 👑 AgentRelay 里还有 Commander
 
@@ -104,13 +106,14 @@ Commander 适合跨模块或高风险任务：
 
 ## 🚦 什么时候会触发？
 
-采用和 Pi 类似的两层方式：Hook 做轻量预检，主 Agent 做最终语义判断。
+采用和 Pi 类似的两层方式：Hook 做轻量预检和状态校验，主 Agent 做最终语义判断。
 
 | 触发场景 | 系统会做什么 |
 |---|---|
 | 📝 你提交一个中大型任务 | `UserPromptSubmit` 注入任务门禁，要求先展示确认卡 |
 | 🧱 任务尚未批准但要写文件 | `PreToolUse` 硬阻断写入，只读检查和安全测试仍可继续 |
 | ⚠️ 即将执行高风险命令 | 硬阻断并给出安全门禁，要求先解释影响、等待确认 |
+| 🧠 有待审批项时收到自然回复 | Hook 注入“语义审批桥”，主 Agent 判断后通过当前消息哈希写回 |
 | 🔁 同一问题重复失败 | 生成“可以找外援”的候选提醒 |
 | ⏱️ 单问题有效处理时间过长 | 达到门槛后生成候选提醒 |
 | 🗣️ 你明确说“现在调用 DeepSeek”“让 Fusion 看一下” | 进入显式协作流程 |
@@ -118,6 +121,11 @@ Commander 适合跨模块或高风险任务：
 
 Hook 不会因为看到“AgentRelay”“模型”几个字就替 Agent 认定你在下命令。是否调用外援、
 调用哪个 Provider，仍由主 Agent 结合完整语境判断。
+
+审批同样不让用户背固定口令。Hook 只识别“这可能是对当前确认卡的回复”，并把当前
+`source-sha256` 和待审批范围交给主 Agent。主 Agent 判断为明确批准或拒绝后，才调用
+`resolve-intent` 写回；问句、否定、假设、条件和新范围不能批准。旧消息哈希、范围变化后的
+快照和重复写回都会被拒绝，危险命令仍只放行完全相同的输入一次。
 
 ### 🧾 确认卡到底会显示什么？
 
@@ -445,7 +453,7 @@ $CODEX_HOME/agent_relay_tracker/logs/error.log
 ## 🛡️ 安全边界
 
 - 🚫 不绕过 CAPTCHA，不保存账号密码
-- 🔒 任务门禁只做本地规则预检，不额外调用第二个模型
+- 🔒 任务门禁只做本地规则预检和状态校验，不额外调用第二个模型；自然语言含义由当前主 Agent 判断
 - 🛑 Codex 当前不支持 Hook 原生 `ask` 审批按钮；AgentRelay 用
   `deny + systemMessage 纯文本 emoji 确认卡 + 原输入重试` 实现安全确认
 - 🧠 外部模型建议必须由主 Agent 验证，不能直接当作最终答案
@@ -565,6 +573,124 @@ AgentRelay 使用简单的时间与失败阶梯，不靠无限轮询：
 - 子 Agent 不允许再次启动 Fusion 或 Commander
 - Commander 运行时持有最高优先级锁，Fusion 会在下一次模型或工具调用前暂停
 - 被中断的 Fusion 会生成交接快照，不会静默丢失工作
+
+### 🔐 权限容忍度：一次动作，一张确认卡
+
+直接输入 `/agent-approval` 或 `/设置`，可查看当前模式及每档说明，再回复数字：
+
+```text
+[1] strict    严格：所有新增、修改、删除先确认
+[2] standard  标准（默认）：清晰小改免确认，多文件、多领域、大工程、共享或模糊需求先确认
+[3] relaxed   宽松：危险命令、大工程、共享影响和越界仍需确认
+```
+
+也支持 `/agent-approval 2` 一步切换。Pi 使用原生选择菜单；其他已接入 Hook 的宿主显示
+设置卡并读取下一次数字回复，菜单未打开时不会把单独的 `1`、`2`、`3` 当成设置。
+切换后立即回读配置验证；不会批准当前待确认任务，也不会放宽危险命令或元素边界。
+Kimi 等没有普通可见卡的宿主、OpenCode 及不支持 Hook 的 DeepSeek CLI，请使用下面的
+本地脚本菜单，不承诺宿主内自动选择界面。
+
+```bash
+scripts/approval_policy.py            # 显示菜单；交互终端可继续输入 1/2/3
+scripts/approval_policy.py 2          # 直接选择 standard
+scripts/approval_policy.py show
+scripts/approval_policy.py set strict
+scripts/approval_policy.py set standard
+scripts/approval_policy.py set relaxed
+```
+
+配置保存在 `~/.codex/agent_relay_tracker/approval-policy.json`。同一动作只显示一张
+`systemMessage` 确认卡，模型上下文只提示等待批准，不再生成第二张默认卡。
+危险命令、共享影响、未批准的元素级约束不被宽松模式豁免。
+
+### 🧩 多 Agent 与跨平台确认卡
+
+卡片使用共享纯文本核心（中文标题 + 上下分割线 + 仅操作项 emoji），按宿主能力适配：
+
+| 宿主 | 可见确认卡 | 写入/危险阻断 | 边界 |
+|---|---|---|---|
+| Codex | `systemMessage` | 完整 Hook | 协议与模型上下文分离 |
+| Claude Code | `systemMessage` | 完整 Hook，含 `PreToolUse` | 安装时合并现有 hooks |
+| Pi | `ctx.ui.notify` | `tool_call` 阻断 | 模型仍收隐藏 message，卡片对用户可见 |
+| Hermes | `systemMessage` 协议输出 + `context` | 按宿主已有事件 | `pre_llm_call/post_tool_call/subagent_stop`；可见性需宿主实测 |
+| Kimi | 不承诺普通可见卡 | Stop 阻断原因回写 | stderr + 退出码 2；其余提示只给模型 |
+| OpenCode | 手动确认流程 | 不承诺自动 Hook | 当前为 skill-only |
+| DeepSeek CLI | 不支持自动卡 | 不支持 | 没有 Hook/Skill/插件机制 |
+
+Windows 使用 Python argv、`subprocess.list2cmdline` 与 `agentrelay-env/Scripts/python.exe`；
+不依赖 macOS 路径或 `/bin/sh`。真实 Windows 端到端仍需在 Windows 主机验证，不能用 macOS
+测试代替。
+
+### 🔎 分档交付审计：通过后才汇报
+
+AgentRelay 参考 [gstack](https://github.com/garrytan/gstack) 的 review/QA 闭环，
+把**需求对照、真实 diff、测试/行为、页面视觉和最终审查**绑定到当前工作区版本。
+参考来源、提交号与 MIT 许可见 `skills/agent-relay/references/delivery-audit-gstack.md`；
+不需要安装 gstack，也不使用其遥测或安装器。
+
+`/agent-approval` 同时选择权限和审计深度：
+
+| 模式 | 日常流程 | 完成前要求 |
+|---|---|---|
+| `strict` | 所有写入先确认 | 逐项需求、完整 diff、真实行为、主审、独立审查；页面另需目标/边界/视觉认证 |
+| `standard`（默认） | 普通代码小改轻量检查 | 单点颜色/圆角/按钮方圆/字号/间距只验目标、关键边界和基本交互；复杂/共享/高风险自动升级 |
+| `relaxed` | 小任务不做正式审计 | 仅大型、多文件、多目标、共享或高风险任务审计；危险命令、越界和虚假完成不豁免 |
+
+修改后输入 `/agent-audit` 查看待办。该命令只展示状态，不会自动把审计标成通过，也不是要求
+Agent 立即执行的授权。普通问答、概念解释和 Hook 提醒本身不会触发审计；只有当前修改任务
+需要该档位审计时才执行。已结束任务或新问题的旧待办不能反复拦截新问答。
+当前主 Agent 能读图时默认使用原生视觉，未调用 agent-image 不等于没有视觉。
+
+主 Agent 必须真实读取 diff、逐项对照原始需求，并用 `delivery_audit.py run-behavior`
+执行项目已有测试或本地行为探针，再用 `record` 保存证据。测试数量为 0、退出码非 0、
+后续文件变化、未完成的页面视觉认证都会阻断完成。
+
+需要独立审查时，只有真实 Fusion `delegate` 成功才能登记；未配置或调用失败由主 Agent
+完成本地对抗性审查并如实标记独立覆盖缺失。无视觉不强制截图，但必须完成结构化浏览器
+检查并请求用户复查，不能声称视觉通过。
+
+```bash
+AUDIT="${CODEX_HOME:-$HOME/.codex}/skills/agent-relay/scripts/delivery_audit.py"
+python3 "$AUDIT" status --home "${CODEX_HOME:-$HOME/.codex}" --session "<session_id>"
+python3 "$AUDIT" run-behavior --home "${CODEX_HOME:-$HOME/.codex}" \
+  --session "<session_id>" --cmd "python -m unittest discover -s tests" --kind test
+```
+
+### 🎨 严格变更约束：默认按参考，授权后发挥
+
+- 默认严格按指定 UI 参考修改；只有明确授权“自由发挥/自由优化”才可调整设计，
+  但不因此扩大文件、接口、数据或业务范围。
+- 确认卡明确具体参考、创作权限、允许文件、禁止范围和额外 Bug 只报告；
+  名单外写入会被 Hook 阻断，范围变化必须重新批准。
+- 批准后冻结基线，样式任务冻结接口、字段、数据、排序和业务逻辑；最终用真实 diff 验收。
+- 浏览器能运行不等于参考一致。对照截图/报告后，用
+  `scripts/change_contract.py verify-reference --session <session_id> --evidence <路径>`
+  绑定参考验收证据；报告逐项使用 `项目: 实际对照结果`，必须覆盖目标和目标外检查，
+  任意非空文件或只存在截图不能替代对照。缺证据或越界不能声称完成。
+- 作用域以用户指定对象为准：指定模块/容器/元素就只改它；只有明确全局/全部才可改公共组件。
+  `target_scope` 限定 DOM/模块，`allowed_properties` 限定属性，`forbidden_effects` 冻结兄弟元素、
+  父布局和其他模块；局部需求写共享文件会被阻断，连带影响必须重新确认。
+- `unchanged_checks` 明确目标外验收，例如导出按钮仍在最右侧、其他模块滚动条不变；
+  参考证据必须同时覆盖目标和这些无副作用检查。
+- Commander/Fusion 子 Agent 通过环境和任务提示继承同一约束，不能在隔离工作区自由扩大范围。
+
+- **目标元素验收**：`verify_page.py --target-selector` 修改前采集计算样式、位置尺寸和局部截图，
+  修改后 `--after` 验证目标确实达成；自动继承 before 的 `--invariant`，对照目标外位置尺寸及计算样式。
+  验收后再次编辑会使证据失效，缺目标/边界证据不放行。
+- **真实视觉审查**：有视觉时实际读取整页与局部截图，再用 `visual_review.py record --passed`
+  逐项传 `--observation 'target=实际观察'`、`--observation '<目标外项>=实际观察'` 和
+  `--self-reviewed --attestation '已逐项读取截图并对照页面'`。多目标用 `--target-item` 和
+  `--item-screenshot` 绑定每项独立截图；相同图片哈希、缺少逐项观察或拿点击/DOM/尺寸测量
+  代替视觉检查都会被拒绝。完成声明声称的象限、表格或页面范围超过认证目标数时，Hook 阻断，
+  不能把“只看了其中一个”写成全量通过。
+- **无视觉降级**：`verify_page.py --no-screenshots` 用真实 Chromium 完成 DOM/布局、控制台、文件哈希、
+  按钮点击/输入和目标外检查；`visual_review.py nonvisual` 只登记结构化证据，最终必须请用户复查，
+  不能声称视觉通过。agent-image 也必须逐项给出实际观察，Provider 失败则降级。
+- **复用优先**：普通 UI 请求自动生成约束草案；公共组件/样式证据必须真实存在，禁止绕过公共实现
+  自绘同类骨架。确需新组件必须明确授权。草案不重复审批，strict/standard/relaxed 仍按权限模式执行。
+- **清理证据**：视觉审查通过后优先运行 `visual_review.py cleanup`；未登记的临时截图用
+  `--screenshot` 显式逐张列出。宿主若拒绝 `rm -f`，立即逐张执行绝对路径 `unlink` 并回查，
+  不重复同一命令；只保留文字结果，清理后不再要求图片文件存在。
 
 ### 👑 Commander 如何避免写坏项目？
 

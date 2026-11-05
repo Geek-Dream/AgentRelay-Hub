@@ -14,6 +14,21 @@ Fusion 永不启动另一个 Fusion，也永不启动 Commander。Commander 拥�
 
 ## 委派决策
 
+## 默认辅助、忘记调用补救与失败降级
+
+- 对独立调查、批量阅读、代码审查、回归复核等适合委派的任务，先查 `delegable` 并实际
+  `delegate`；只检查状态或收到提醒不等于 Fusion 已工作，不能声称“已复核”。
+- `scripts/fusion_assist.py remind --session <id> --home <CODEX_HOME> --prompt <任务>`
+  在任务开始、进度和交付前提供补救提示；Hook 不偷偷联网，主 Agent 必须实际 delegate。
+- `scripts/fusion_assist.py delegate --session <id> --home <CODEX_HOME> --prompt <任务> --workspace <路径>`
+  通过现有 `agent_fusion.py delegate` 调用一次，并把结果写入会话级 `fusion-assist` 证据。
+- 未配置 Provider、Commander/Fusion 子会话或不适合的任务直接本地处理，不打扰。
+  API 过期、网络失败或调用异常后主 Agent 继续完成任务；回复说明“Fusion 调用失败，
+  请检查 Provider；本次任务由主 Agent 继续完成”。同一会话最多提醒 3 次，之后静默。
+- Fusion 成功也需主 Agent 审查与独立验收；没有真实成功结果不能说 Fusion 已复核。
+- `AGENTRELAY_FUSION_ASSIST=off` 可关闭辅助提醒，不改变现有 Fusion 开关或 Provider。
+
+
 像 Pi 的双 Agent harness 一样，主 Agent 应保留计划、歧义解释和最终验收，把高输出量或可
 隔离的执行工作默认交给 Fusion。判断依据是任务会产生多少输出，而不是步骤数。
 

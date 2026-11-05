@@ -46,6 +46,16 @@ class AgentTargetRegistryTests(unittest.TestCase):
         self.assertEqual(registry["opencode"]["level"], "skill-only")
         self.assertTrue(any(a["id"] == "deepseek-cli" for a in targets.UNSUPPORTED_AGENTS))
 
+    def test_kimi_skill_dir_uses_kimi_code_home(self):
+        kimi_home = Path(tempfile.mkdtemp(prefix="agentrelay-kimi-home-"))
+        self.addCleanup(shutil.rmtree, kimi_home, True)
+        with patch.dict(os.environ, {"KIMI_CODE_HOME": str(kimi_home)}):
+            registry = targets.agent_targets()
+        self.assertEqual(
+            Path(registry["kimi"]["skill_dir"]),
+            kimi_home / "skills" / "agent-relay",
+        )
+
     def test_detect_agents_returns_bool_map(self):
         detected = targets.detect_agents(targets.agent_targets())
         self.assertEqual(
@@ -171,6 +181,13 @@ class ClaudeRegistrationTests(unittest.TestCase):
         self.settings.write_text("{not json", encoding="utf-8")
         with self.assertRaises(targets.TargetError):
             targets.register_claude(self.settings, "cmd")
+
+    def test_registration_covers_pre_tool_gate(self):
+        self.assertTrue(targets.register_claude(self.settings, "python agent_relay_hook.py"))
+        config = json.loads(self.settings.read_text(encoding="utf-8"))
+        for event in targets.CLAUDE_EVENTS:
+            self.assertIsNotNone(targets.find_agent_relay_hook(config["hooks"][event]))
+        self.assertIn("PreToolUse", config["hooks"])
 
 
 @unittest.skipUnless(HAS_YAML, "PyYAML 未安装")
@@ -302,8 +319,17 @@ class PiExtensionTests(unittest.TestCase):
         self.assertIn("AGENTRELAY_SHIM", content)
         self.assertIn("AGENTRELAY_FUSION", content)
         self.assertIn('import { Type } from "typebox"', content)
-        self.assertIn("before_agent_start", content)
+        self.assertIn('pi.on("tool_call"', content)
+        self.assertIn('ctx?.ui?.notify', content)
+        self.assertIn('block: true, reason: result.denial', content)
+        self.assertIn('out?.systemMessage', content)
+        self.assertIn('display: false', content)
         self.assertIn('registerCommand("agent-fusion"', content)
+        self.assertIn('registerCommand("agent-approval"', content)
+        self.assertIn('registerCommand("设置"', content)
+        self.assertIn("async function approvalCommand", content)
+        self.assertIn("async function approvalMenu", content)
+        self.assertIn("APPROVAL_MENU_MODES", content)
         self.assertIn('name: FUSION_TOOL_NAME', content)
         self.assertIn('FUSION_TOOL_NAME = "agent_fusion_delegate"', content)
         self.assertIn("parameters: fusionDelegateSchema", content)
@@ -375,7 +401,10 @@ class PiExtensionTests(unittest.TestCase):
             encoding="utf-8",
         )
         fake_shim = tmp / "agentrelay_hook_shim.py"
-        fake_shim.write_text("print('{}')\n", encoding="utf-8")
+        fake_shim.write_text("import json\n"
+                             "print(json.dumps({'systemMessage': '「AgentRelay · 写入确认卡」', "
+                             "'hookSpecificOutput': {'permissionDecision': 'deny', "
+                             "'permissionDecisionReason': 'scope denied'}}))\n", encoding="utf-8")
 
         driver = tmp / "runtime-driver.mjs"
         driver.write_text(
@@ -383,18 +412,28 @@ class PiExtensionTests(unittest.TestCase):
             "const active = ['read', 'bash'];\n"
             "let tool;\n"
             "const handlers = new Map();\n"
+            "const commands = new Map();\n"
             "const pi = {\n"
             "  registerTool(value) { tool = value; },\n"
-            "  registerCommand() {},\n"
+            "  registerCommand(name, value) { commands.set(name, value); },\n"
             "  on(name, handler) { handlers.set(name, handler); },\n"
             "  getActiveTools() { return [...active]; },\n"
             "  setActiveTools(names) { active.splice(0, active.length, ...names); },\n"
             "};\n"
+            "const notifications = [];\n"
+            "const selections = [];\n"
             "const ctx = {\n"
             "  cwd: '/workspace/project',\n"
             "  sessionManager: { getSessionId() { return 'session-123'; } },\n"
+            "  hasUI: true,\n"
+            "  ui: {\n"
+            "    notify(message, type) { notifications.push({message, type}); },\n"
+            "    async select(prompt, choices) { selections.push({prompt, choices}); return choices[1]; },\n"
+            "  },\n"
             "};\n"
             "await agentRelay(pi);\n"
+            "await commands.get('agent-approval').handler('', ctx);\n"
+            "await commands.get('设置').handler('1', ctx);\n"
             "await handlers.get('session_start')({}, ctx);\n"
             "const prompt = await handlers.get('before_agent_start')(\n"
             "  { prompt: 'inspect tests', systemPrompt: 'BASE PROMPT' }, ctx);\n"
@@ -419,6 +458,8 @@ class PiExtensionTests(unittest.TestCase):
             "  undefined,\n"
             "  ctx,\n"
             ");\n"
+            "const toolGate = await handlers.get('tool_call')(\n"
+            "  { toolName: 'write', input: { path: 'page.css' }, toolCallId: 'write-1' }, ctx);\n"
             "console.log(JSON.stringify({\n"
             "  toolName: tool.name,\n"
             "  executionMode: tool.executionMode,\n"
@@ -429,6 +470,9 @@ class PiExtensionTests(unittest.TestCase):
             "  update,\n"
             "  result,\n"
             "  skipped,\n"
+            "  toolGate,\n"
+            "  notifications,\n"
+            "  selections,\n"
             "}));\n",
             encoding="utf-8",
         )
@@ -440,6 +484,7 @@ class PiExtensionTests(unittest.TestCase):
             "AGENTRELAY_PYTHON": sys.executable,
             "AGENTRELAY_FUSION": str(fake_fusion),
             "AGENTRELAY_SHIM": str(fake_shim),
+            "AGENTRELAY_APPROVAL": str(PROJECT_ROOT / "scripts" / "approval_policy.py"),
             "FUSION_RECORD": str(record),
         }
         completed = subprocess.run(
@@ -472,6 +517,15 @@ class PiExtensionTests(unittest.TestCase):
             runtime["skipped"]["details"]["reason"],
             "FUSION_PROVIDER_NOT_CONFIGURED",
         )
+
+        self.assertEqual(runtime["toolGate"], {"block": True, "reason": "scope denied"})
+        self.assertTrue(any("写入确认卡" in item["message"] for item in runtime["notifications"]))
+        self.assertEqual(len(runtime["selections"]), 1)
+        self.assertIn("1. 严格", runtime["selections"][0]["choices"][0])
+        self.assertTrue(any("2. 标准（默认）" in item["message"] for item in runtime["notifications"]))
+        self.assertTrue(any("1. 严格" in item["message"] for item in runtime["notifications"]))
+        saved_policy = json.loads((tmp / ".codex" / "agent_relay_tracker" / "approval-policy.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved_policy["mode"], "strict")
 
         calls = [
             json.loads(line)
@@ -626,6 +680,22 @@ class KimiEndToEndTests(unittest.TestCase):
         self.assertEqual(stop.returncode, 2, f"stdout={stop.stdout} stderr={stop.stderr}")
         self.assertIn("AgentRelay", stop.stderr)
         self.assertIn("候选", stop.stderr)
+
+    def test_missing_delivery_audit_module_only_blocks_pending_audit(self):
+        tmp = Path(tempfile.mkdtemp(prefix="agentrelay-audit-fallback-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        session = "audit-fallback"
+        with patch.object(tracker, "CODEX_DIR", tmp), patch.object(
+            tracker, "_shared_script_module", side_effect=ImportError("missing")
+        ):
+            self.assertIsNone(
+                tracker.delivery_audit_completion_block(session, "测试通过")
+            )
+            pending = tmp / "agent_relay_tracker" / "delivery-audit" / f"{session}.json"
+            pending.parent.mkdir(parents=True)
+            pending.write_text("{}", encoding="utf-8")
+            reason = tracker.delivery_audit_completion_block(session, "测试通过")
+        self.assertIn("审计模块不可用", reason)
 
 
 if __name__ == "__main__":

@@ -923,6 +923,13 @@ def run_sidekick(
             task_text = prompt.strip() + "\n\n## Context from the main agent\n" + context.strip()
         else:
             task_text = prompt.strip()
+        try:
+            from .change_contract import child_prompt, from_environment
+        except ImportError:
+            from change_contract import child_prompt, from_environment
+        contract = from_environment(dict(environ or os.environ))
+        if contract:
+            task_text = child_prompt(contract) + "\n\n" + task_text
         session.setdefault("messages", []).append({
             "role": "user",
             "content": task_text,
