@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -70,35 +71,59 @@ SKIP_FAILURES = {"FUSION_PROVIDER_NOT_CONFIGURED", "FUSION_DISABLED", "COMMANDER
 def record_result(home: Path, session_id: str, result: Mapping[str, Any]) -> dict[str, Any]:
     state = read_state(home, session_id)
     status = str(result.get("status") or "failed")
-    previous_notices = int(state.get("failure_notices") or 0)
-    failure = status != "success" and str(result.get("error") or "") not in SKIP_FAILURES
-    notices = min(MAX_FAILURE_NOTICES, previous_notices + 1) if failure else previous_notices
+    error = str(result.get("error") or "")
+    failure = status != "success" and error not in SKIP_FAILURES
+    same_failure = state.get("last_error") == error and state.get("status") == status
+    notices = int(state.get("failure_notices") or 0)
+    should_notify = failure and not same_failure and notices < MAX_FAILURE_NOTICES
+    if should_notify:
+        notices += 1
+    display_state = "completed" if status == "success" else "retryable" if failure else "unavailable"
     state.update(status=status, result=dict(result), failure_notices=notices,
+                 last_error=error, display_state=display_state,
+                 delivery_state="completed" if status == "success" else "interrupted" if failure else "unavailable",
                  updated_at=time.time(), reminded=True)
     if failure:
-        should_notify = previous_notices < MAX_FAILURE_NOTICES
-        state["notice"] = ("Fusion 调用失败，请检查 Provider；本次任务由主 Agent 继续完成。"
-                           if should_notify else "")
+        state["notice"] = (
+            f"Fusion 暂不可用（{error or '调用失败'}）。主 Agent 已继续本地处理；"
+            "该任务可重试，同一错误不会重复提醒。"
+        )
         state["should_notify"] = should_notify
     elif status != "success":
-        state["notice"] = "Fusion 当前不可用，已由主 Agent 继续处理；无需配置时不提醒。"
+        state["notice"] = "Fusion 当前未配置或不可用，已由主 Agent 继续处理；无需额外提醒。"
         state["should_notify"] = False
     else:
-        state["notice"] = "Fusion 已完成辅助调用；主 Agent 仍需审查结果并独立验收。"
+        state["notice"] = "Fusion 辅助结果已保存，等待主 Agent 审查与独立验收。"
         state["should_notify"] = True
     write_state(home, session_id, state)
     return state
 
 
-def delegate(home: Path, session_id: str, prompt: str, *, workspace: str,
-             context: str = "", environ: Mapping[str, str] | None = None) -> dict[str, Any]:
-    """Delegate exactly once through the existing CLI, then persist honest evidence."""
+def request_identity(session_id: str, prompt: str, workspace: str, context: str = "") -> str:
+    payload = json.dumps([session_id, str(Path(workspace).expanduser().resolve()), prompt, context], ensure_ascii=False)
+    return "fusion-request-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+
+def begin_request(home: Path, session_id: str, prompt: str, *, workspace: str,
+                  context: str = "") -> dict[str, Any]:
+    """Persist intent before delivery so an interruption never becomes a new task."""
+    state = read_state(home, session_id)
+    request_id = request_identity(session_id, prompt, workspace, context)
+    state.update(
+        request_id=request_id, prompt=prompt, workspace=str(Path(workspace).expanduser().resolve()),
+        context=context, delivery_state="dispatched", status="dispatched",
+        updated_at=time.time(), reminded=True,
+    )
+    write_state(home, session_id, state)
+    return state
+
+
+def _invoke(home: Path, session_id: str, prompt: str, *, workspace: str,
+            context: str = "", environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     fusion_script = home / "skills" / "agent-fusion" / "scripts" / "agent_fusion.py"
     if not fusion_script.is_file():
-        result = {"status": "failed", "error": "FUSION_SCRIPT_MISSING",
-                  "message": "Fusion 脚本不存在，主 Agent 继续本地处理"}
-        record_result(home, session_id, result)
-        return result
+        return {"status": "failed", "error": "FUSION_SCRIPT_MISSING",
+                "message": "Fusion 脚本不存在，主 Agent 继续本地处理"}
     python = Path(os.environ.get("AGENTRELAY_PYTHON", ""))
     if not python.is_file():
         python = home / "agentrelay-env" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -112,12 +137,33 @@ def delegate(home: Path, session_id: str, prompt: str, *, workspace: str,
                                    env=dict(environ or os.environ), timeout=120, check=False)
         line = next((item for item in completed.stdout.splitlines()
                      if item.startswith("AGENT_FUSION_RESULT=")), "")
-        result = json.loads(line.removeprefix("AGENT_FUSION_RESULT=")) if line else {
+        return json.loads(line.removeprefix("AGENT_FUSION_RESULT=")) if line else {
             "status": "failed", "error": "FUSION_RESULT_MISSING",
             "message": completed.stderr.strip()[:500] or "Fusion 未返回结果",
         }
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        result = {"status": "failed", "error": "FUSION_PROVIDER_CALL_FAILED", "message": str(exc)[:500]}
+        return {"status": "failed", "error": "FUSION_PROVIDER_CALL_FAILED", "message": str(exc)[:500]}
+
+
+def delegate(home: Path, session_id: str, prompt: str, *, workspace: str,
+             context: str = "", environ: Mapping[str, str] | None = None,
+             retry: bool = False) -> dict[str, Any]:
+    """Reuse one durable request across reminders, restarts and explicit retries."""
+    request_id = request_identity(session_id, prompt, workspace, context)
+    previous = read_state(home, session_id)
+    if previous.get("request_id") == request_id and previous.get("result") and not retry:
+        result = dict(previous["result"], request_id=request_id, deduplicated=True)
+        record_result(home, session_id, result)
+        return result
+    if previous.get("request_id") == request_id and previous.get("delivery_state") in {"dispatched", "interrupted"} and not retry:
+        result = {"status": "failed", "error": "FUSION_RETRY_REQUIRED",
+                  "message": "上次委派在投递后未完成，需明确重试；未自动再次调用 Provider。",
+                  "request_id": request_id}
+        record_result(home, session_id, result)
+        return result
+    state = begin_request(home, session_id, prompt, workspace=workspace, context=context)
+    result = dict(_invoke(home, session_id, prompt, workspace=workspace,
+                          context=context, environ=environ), request_id=request_id)
     record_result(home, session_id, result)
     return result
 
@@ -125,7 +171,7 @@ def delegate(home: Path, session_id: str, prompt: str, *, workspace: str,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("remind", "delegate", "status"):
+    for name in ("remind", "delegate", "status", "retry"):
         item = sub.add_parser(name)
         item.add_argument("--session", required=True)
         item.add_argument("--home", type=Path, required=True)
@@ -135,9 +181,10 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "remind":
         print(reminder(args.home, args.session, args.prompt, stage="prompt"))
-    elif args.command == "delegate":
+    elif args.command in {"delegate", "retry"}:
         print(json.dumps(delegate(args.home, args.session, args.prompt,
-                                  workspace=args.workspace, context=args.context), ensure_ascii=False))
+                                  workspace=args.workspace, context=args.context,
+                                  retry=args.command == "retry"), ensure_ascii=False))
     else:
         print(json.dumps(read_state(args.home, args.session), ensure_ascii=False))
     return 0

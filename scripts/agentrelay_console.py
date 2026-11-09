@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import shutil
 import sys
+import unicodedata
 
 try:
     from .model_router import ModelRouter, ProviderRouteMemory
@@ -39,7 +40,7 @@ ANSI_BLUE_BOLD = "\033[1;34m"
 ANSI_CYAN_BOLD = "\033[1;36m"
 ANSI_GREEN = "\033[32m"
 ANSI_RESET = "\033[0m"
-CODEX_DIVIDER = "────────────────────────"
+CODEX_DIVIDER = "--------------------------------"
 _CJK_TEXT = re.compile(r"[\u3400-\u9fff]")
 
 
@@ -61,19 +62,22 @@ def _line(title: str, value) -> str:
     return f"{title}: {value or '无'}"
 
 
+def _display_width(value: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1 for char in str(value))
+
+
 def _aligned_lines(fields, *, colored: bool = False, risk: bool = False) -> list[str]:
-    """Align values within one section; long labels don't widen other sections."""
+    """Use the same readable field/continuation layout for every card entry."""
     visible = [(str(label), field_value) for label, field_value in fields
                if field_value not in (None, "", (), []) or label in {"最近错误", "恢复原因"}]
-    width = max((len(label) for label, _ in visible), default=0)
+    width = max((_display_width(label) for label, _ in visible), default=0)
     lines = []
     for label, value in visible:
         values = ["、".join(str(item) for item in value)] if isinstance(value, (list, tuple)) else _display_values(value)
-        prefix = f"{label + ':':<{width + 1}} "
-        content = _paint(values[0], ANSI_RED_BOLD) if risk else _paint_technical(values[0])
-        lines.append(_paint(f"{label + ':':<{width + 1}}", ANSI_BLUE_BOLD) + " " + content if colored
-                     else prefix + values[0])
-        continuation = " " * (width + 2)
+        prefix = f"- {label}：{' ' * (width - _display_width(label))} "
+        content = _paint(values[0], ANSI_RED_BOLD) if risk and label == "风险" else _paint_technical(values[0])
+        lines.append(_paint(prefix, ANSI_BLUE_BOLD) + content if colored else prefix + values[0])
+        continuation = " " * (width + 5)
         lines.extend(continuation + (_paint_technical(item) if colored else item) for item in values[1:])
     return lines
 
@@ -139,37 +143,51 @@ def _confirmation_action_label(action: str | None) -> str:
 
 
 def _confirmation_choices(action: str | None) -> tuple[str, str, str]:
-    if action == "confirm_requirement":
-        return ("确认需求", "调整方案", "取消任务")
-    if action == "enable_commander":
-        return ("启用审查", "调整方案", "取消任务")
-    return ("批准执行", "调整方案", "取消任务")
+    return ("确认审批", "修改需求", "拒绝审批")
+
+
+def _choice_lines(*, colored: bool = False) -> list[str]:
+    choices = ("确认审批", "修改需求", "拒绝审批")
+    colors = (ANSI_GREEN, ANSI_BLUE_BOLD, ANSI_RED_BOLD)
+    return [
+        CODEX_DIVIDER,
+        *[
+            _paint(f"{index}. {label}", color) if colored else f"{index}. {label}"
+            for index, (label, color) in enumerate(zip(choices, colors), 1)
+        ],
+        CODEX_DIVIDER,
+    ]
+
+
+def _task_summary(card: dict) -> str:
+    return str(card.get("user_requirement") or card.get("original_request")
+               or card.get("request") or card.get("action") or "未提供具体任务")
 
 
 def _render_codex_requirement_card(card: dict) -> str:
     lines = [
-        CODEX_DIVIDER,
-        _paint("「AgentRelay · 需求卡」", ANSI_RED_BOLD),
+        _paint("「需求卡」", ANSI_RED_BOLD),
         CODEX_DIVIDER,
     ]
     fields = (
-        ("任务", card.get("task_id")),
-        ("用户需求", card.get("user_requirement") or card.get("original_request")),
+        ("任务", _task_summary(card)),
+        ("任务ID", card.get("task_id")),
         ("需求评估", card.get("requirement_assessment")),
         ("大白话", card.get("plain_explanation")),
         ("影响模块", card.get("affected_modules")),
         ("影响文件", card.get("affected_files") or card.get("expected_files")),
         ("当前功能", card.get("current_state")),
         ("目标功能", card.get("target_state")),
-    )
-    lines.extend(_aligned_lines(fields, colored=True))
-    lines.extend(_aligned_lines([("风险", card.get("risk_analysis") or card.get("risks"))],
-                                colored=True, risk=True))
-    lines.extend(_aligned_lines([
         ("验证", card.get("verification_plan")),
         ("回滚", card.get("rollback_plan")),
-    ], colored=True))
-    lines.append(CODEX_DIVIDER)
+    )
+    lines.extend(_aligned_lines(fields, colored=True))
+    lines.extend(_aligned_lines([
+        ("风险", card.get("risk_analysis") or card.get("risks")),
+        ("验证", card.get("verification_plan")),
+        ("回滚", card.get("rollback_plan")),
+    ], colored=True, risk=True))
+    lines.extend(_choice_lines(colored=True))
     return "\n".join(lines)
 
 
@@ -199,15 +217,12 @@ def _confirmation_summary(value: dict) -> str:
 def _render_codex_confirmation_card(value: dict) -> str:
     action = value.get("action")
     lines = [
+        _paint("「确认卡」", ANSI_RED_BOLD),
         CODEX_DIVIDER,
-        _paint("「AgentRelay · 执行确认卡」", ANSI_RED_BOLD),
-        CODEX_DIVIDER,
-        _confirmation_summary(value),
-        "",
-        _paint("01 · 当前决定", ANSI_CYAN_BOLD),
     ]
     fields = (
-        ("任务", value.get("task_id")),
+        ("任务", _task_summary(value)),
+        ("任务ID", value.get("task_id")),
         ("状态", value.get("status")),
         ("当前确认", _confirmation_action_label(action)),
         ("授权文件", value.get("allowed_files") or value.get("scope")),
@@ -215,9 +230,7 @@ def _render_codex_confirmation_card(value: dict) -> str:
     lines.extend(_aligned_lines(fields, colored=True))
     contract_fields = _contract_fields(value)
     if contract_fields:
-        lines.append(_paint("02 · 目标与边界（必须逐项遵守）", ANSI_CYAN_BOLD))
         lines.extend(_aligned_lines(contract_fields, colored=True))
-    lines.append(_paint("03 · 验收与执行", ANSI_CYAN_BOLD))
     execution_fields = [
         ("验证命令", value.get("verification_commands")),
         ("验收条件", value.get("acceptance_criteria")),
@@ -228,25 +241,17 @@ def _render_codex_confirmation_card(value: dict) -> str:
     ]
     lines.extend(_aligned_lines(execution_fields, colored=True))
     if value.get("status") == "pending":
-        first, second, third = _confirmation_choices(action)
-        lines.extend([
-            "",
-            CODEX_DIVIDER,
-            _paint(f"[1] {first}", ANSI_GREEN),
-            _paint(f"[2] {second}", ANSI_BLUE_BOLD),
-            _paint(f"[3] {third}", ANSI_RED_BOLD),
-        ])
-    lines.append(CODEX_DIVIDER)
+        lines.extend(_choice_lines(colored=True))
     return "\n".join(lines)
 
 
 def render_requirement_card(card: dict, *, style: str | None = None) -> str:
     if resolve_card_style(style) == "codex":
         return _render_codex_requirement_card(card)
-    lines = [CODEX_DIVIDER, "「AgentRelay · 需求卡」", CODEX_DIVIDER, ""]
+    lines = ["「需求卡」", CODEX_DIVIDER]
     lines.extend(_aligned_lines([
-        ("任务", card.get("task_id", "")),
-        ("用户需求", card.get("user_requirement") or card.get("original_request")),
+        ("任务", _task_summary(card)),
+        ("任务ID", card.get("task_id", "")),
         ("需求评估", card.get("requirement_assessment")),
         ("大白话", card.get("plain_explanation")),
         ("影响模块", card.get("affected_modules")),
@@ -257,7 +262,7 @@ def render_requirement_card(card: dict, *, style: str | None = None) -> str:
         ("验证", card.get("verification_plan")),
         ("回滚", card.get("rollback_plan")),
     ]))
-    lines.append(CODEX_DIVIDER)
+    lines.extend(_choice_lines())
     return "\n".join(lines)
 
 
@@ -269,19 +274,17 @@ def render_confirmation_card(
     value = asdict(card) if isinstance(card, ConfirmationCard) else dict(card)
     if resolve_card_style(style) == "codex":
         return _render_codex_confirmation_card(value)
-    lines = [CODEX_DIVIDER, "「AgentRelay · 执行确认卡」", CODEX_DIVIDER, _confirmation_summary(value), "",
-             "01 · 当前决定"]
+    lines = ["「确认卡」", CODEX_DIVIDER]
     lines.extend(_aligned_lines([
-        ("任务", value.get("task_id", "")),
+        ("任务", _task_summary(value)),
+        ("任务ID", value.get("task_id", "")),
         ("状态", value.get("status")),
         ("当前确认", _confirmation_action_label(value.get("action"))),
         ("授权文件", value.get("allowed_files") or value.get("scope")),
     ]))
     contract_fields = _contract_fields(value)
     if contract_fields:
-        lines.extend(["", "02 · 目标与边界（必须逐项遵守）"])
         lines.extend(_aligned_lines(contract_fields))
-    lines.extend(["", "03 · 验收与执行"])
     lines.extend(_aligned_lines([
         ("验证命令", value.get("verification_commands")),
         ("验收条件", value.get("acceptance_criteria")),
@@ -290,7 +293,7 @@ def render_confirmation_card(
         ("最近错误", value.get("last_error")),
         ("恢复原因", value.get("recovery_reason")),
     ]))
-    lines.append(CODEX_DIVIDER)
+    lines.extend(_choice_lines())
     return "\n".join(lines)
 
 

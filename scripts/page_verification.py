@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
 import os
 import re
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -40,6 +42,14 @@ META_PATTERN = re.compile(
 )
 QUOTED_SPAN = re.compile(r"“[^”\n]{0,300}”|‘[^’\n]{0,300}’|\"[^\"\n]{0,300}\"|'[^'\n]{0,300}'")
 CLAUSE_SPLIT = re.compile(r"[。！？\n；;]+")
+SESSION_ENV_KEYS = (
+    "CODEX_SESSION_ID",
+    "CODEX_THREAD_ID",
+    "PI_SESSION_ID",
+    "CLAUDE_SESSION_ID",
+    "HERMES_SESSION_ID",
+)
+SESSION_BINDING_TTL_SECONDS = 12 * 60 * 60
 
 
 def _digest(path: Path) -> str:
@@ -64,6 +74,206 @@ def read_state(codex_home: Path, session_id: str) -> dict[str, Any]:
 
 def write_state(codex_home: Path, session_id: str, state: dict[str, Any]) -> Path:
     return _verification_state.write_state(codex_home, session_id, state)
+
+
+def session_bindings_path(codex_home: Path) -> Path:
+    return (
+        codex_home.expanduser().resolve()
+        / "agent_relay_tracker"
+        / "page-verification"
+        / "session-bindings.json"
+    )
+
+
+def _valid_session_id(value: Any) -> str:
+    session_id = str(value or "").strip()
+    return session_id if re.fullmatch(r"[A-Za-z0-9_-]+", session_id) else ""
+
+
+def wait_for_visual_settle(page, timeout_ms: int = 2500) -> None:
+    """Wait for finite page animations and a stable paint before screenshots."""
+    page.evaluate(
+        """async timeoutMs => {
+            const nextPaint = () => new Promise(resolve => {
+                requestAnimationFrame(() => requestAnimationFrame(resolve));
+            });
+            if (document.fonts?.ready) {
+                try {
+                    await document.fonts.ready;
+                } catch (_) {
+                    // Font loading failure is reported by the browser elsewhere.
+                }
+            }
+            await nextPaint();
+            const pending = document.getAnimations().filter(animation => {
+                const timing = animation.effect?.getComputedTiming?.();
+                return animation.playState !== 'finished'
+                    && timing
+                    && Number.isFinite(timing.endTime);
+            });
+            if (pending.length) {
+                let timer;
+                try {
+                    await Promise.race([
+                        Promise.allSettled(pending.map(animation => animation.finished)),
+                        new Promise((_, reject) => {
+                            timer = setTimeout(
+                                () => reject(new Error(
+                                    `visual animations did not settle within ${timeoutMs}ms`
+                                )),
+                                timeoutMs,
+                            );
+                        }),
+                    ]);
+                } finally {
+                    clearTimeout(timer);
+                }
+            }
+            await nextPaint();
+        }""",
+        timeout_ms,
+    )
+
+
+def _timestamp(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _process_ancestors(pid: int | None = None) -> list[int]:
+    """Return stable parent IDs so a host can identify its own Hook child."""
+    if os.name == "nt":
+        return []
+    current = int(pid or os.getpid())
+    ancestors: list[int] = []
+    seen: set[int] = set()
+    for _ in range(16):
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "ppid=", "-p", str(current)],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                check=False,
+            )
+            parent = int(result.stdout.strip())
+        except (OSError, ValueError, subprocess.SubprocessError):
+            break
+        if parent <= 1 or parent in seen:
+            break
+        ancestors.append(parent)
+        seen.add(parent)
+        current = parent
+    return ancestors
+
+
+def bind_workspace_session(
+    codex_home: Path,
+    session_id: str,
+    cwd: str,
+    *,
+    host: str = "",
+    environ: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Bind a real Hook session to its workspace without using a global latest session."""
+    session_id = _valid_session_id(session_id)
+    if not session_id:
+        raise ValueError("session binding requires a valid session id")
+    workspace = _workspace(cwd)
+    env = os.environ if environ is None else environ
+    path = session_bindings_path(codex_home)
+    binding = {
+        "workspace": str(workspace),
+        "session_id": session_id,
+        "host": str(host or env.get("AGENTRELAY_TARGET") or "").strip().lower(),
+        "updated_at": time.time(),
+        "ancestor_pids": _process_ancestors(),
+        "thread_id": str(
+            env.get("CODEX_THREAD_ID")
+            or env.get("CODEX_SESSION_ID")
+            or env.get("PI_SESSION_ID")
+            or ""
+        ).strip(),
+    }
+    with _verification_state.session_lock(codex_home, "__workspace_session_bindings__"):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            value = {}
+        entries = value.get("bindings") if isinstance(value, dict) else []
+        cutoff = time.time() - SESSION_BINDING_TTL_SECONDS
+        kept = [
+            item for item in entries or []
+            if isinstance(item, dict)
+            and not (
+                str(item.get("workspace") or "") == str(workspace)
+                and str(item.get("session_id") or "") == session_id
+            )
+            and _timestamp(item.get("updated_at")) >= cutoff
+        ][-63:]
+        kept.append(binding)
+        _verification_state.write_state_unlocked(
+            path,
+            {"version": 1, "bindings": kept},
+        )
+    return binding
+
+
+def resolve_current_session(
+    codex_home: Path,
+    *,
+    cwd: str | None = None,
+    environ: dict[str, str] | None = None,
+) -> str:
+    """Resolve one session conservatively; ambiguity requires explicit --session."""
+    env = os.environ if environ is None else environ
+    env_sessions = list(dict.fromkeys(
+        value
+        for key in SESSION_ENV_KEYS
+        if (value := _valid_session_id(env.get(key)))
+    ))
+    if len(env_sessions) == 1:
+        return env_sessions[0]
+    if len(env_sessions) > 1:
+        return ""
+
+    path = session_bindings_path(codex_home)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    workspace = str(_workspace(cwd))
+    cutoff = time.time() - SESSION_BINDING_TTL_SECONDS
+    entries = [
+        item for item in (value.get("bindings") if isinstance(value, dict) else []) or []
+        if isinstance(item, dict)
+        and str(item.get("workspace") or "") == workspace
+        and _timestamp(item.get("updated_at")) >= cutoff
+        and _valid_session_id(item.get("session_id"))
+    ]
+    host = str(env.get("AGENTRELAY_TARGET") or "").strip().lower()
+    if host:
+        entries = [
+            item for item in entries
+            if not str(item.get("host") or "").strip()
+            or str(item.get("host") or "").strip().lower() == host
+        ]
+    sessions = {str(item["session_id"]) for item in entries}
+    if len(sessions) == 1:
+        return sessions.pop()
+
+    current_ancestors = set(_process_ancestors())
+    if current_ancestors:
+        matched = {
+            str(item["session_id"])
+            for item in entries
+            if current_ancestors.intersection(item.get("ancestor_pids") or [])
+        }
+        if len(matched) == 1:
+            return matched.pop()
+    return ""
 
 
 def _candidate_paths(tool_input: Any) -> list[str]:
@@ -254,58 +464,201 @@ def _visual_certificate_reason(review: dict[str, Any], message: str = "") -> str
     return str(reason or "")
 
 
-def verify_evidence(codex_home: Path, session_id: str, message: str = "") -> str | None:
-    """Return a blocking reason, or None when current page bytes were really checked."""
+def _verification_detail(
+    code: str,
+    reason: str,
+    *,
+    phase: str,
+    next_command: str = "",
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "code": code,
+        "phase": phase,
+        "reason": reason,
+        "next_command": next_command,
+    }
+
+
+def _verify_page_command(codex_home: Path, session_id: str, state: dict[str, Any]) -> str:
+    parts = [
+        "python3",
+        "scripts/verify_page.py",
+        "--session",
+        shlex.quote(session_id),
+    ]
+    files = state.get("files") or {}
+    if any(Path(value).name != "config_web.py" for value in files):
+        parts.extend(["--url", "<本地页面URL>"])
+    if state.get("target_expected"):
+        parts.extend(["--target-selector", "<目标选择器>", "--after"])
+    return " ".join(parts)
+
+
+def _visual_command(codex_home: Path, session_id: str, command: str) -> str:
+    return " ".join([
+        "python3",
+        "scripts/visual_review.py",
+        command,
+        "--session",
+        shlex.quote(session_id),
+        "--home",
+        shlex.quote(str(codex_home.expanduser().resolve())),
+    ])
+
+
+def verification_preflight(
+    codex_home: Path,
+    session_id: str,
+    message: str = "",
+) -> dict[str, Any]:
+    """Return the exact page-verification phase that still blocks delivery."""
     state = read_state(codex_home, session_id)
     files = state.get("files")
     if not isinstance(files, dict) or not files:
         if state.get("target_before") or state.get("target_review"):
-            return _instruction("页面目标验收缺少被修改文件记录，无法核对证据是否仍然有效。")
+            return _verification_detail(
+                "page_file_record_missing",
+                "页面目标验收缺少被修改文件记录，无法核对证据是否仍然有效。",
+                phase="browser",
+                next_command=_verify_page_command(codex_home, session_id, state),
+            )
         if completion_claim(message):
-            return _instruction("页面完成声明缺少本轮页面文件修改记录，无法核对浏览器证据。")
-        return None
+            return _verification_detail(
+                "page_file_record_missing",
+                "页面完成声明缺少本轮页面文件修改记录，无法核对浏览器证据。",
+                phase="browser",
+                next_command=_verify_page_command(codex_home, session_id, state),
+            )
+        return {"ok": True, "code": "page_verification_not_required", "phase": "complete"}
     evidence = state.get("verification")
     if not isinstance(evidence, dict) or evidence.get("status") != "passed":
-        return _instruction("本轮修改了页面，但没有成功的真实浏览器检查记录。")
+        return _verification_detail(
+            "browser_verification_missing",
+            "本轮修改了页面，但没有成功的真实浏览器检查记录。",
+            phase="browser",
+            next_command=_verify_page_command(codex_home, session_id, state),
+        )
     if any(Path(value).name != "config_web.py" for value in files) and not evidence.get("url"):
-        return _instruction("修改了配置中心以外的页面，必须用 --url 指定实际运行的本地页面重新检查。")
+        return _verification_detail(
+            "browser_url_missing",
+            "修改了配置中心以外的页面，必须用 --url 指定实际运行的本地页面重新检查。",
+            phase="browser",
+            next_command=_verify_page_command(codex_home, session_id, state),
+        )
     if not evidence.get("browser"):
-        return _instruction("验证记录缺少真实浏览器。")
+        return _verification_detail(
+            "browser_missing",
+            "验证记录缺少真实浏览器。",
+            phase="browser",
+            next_command=_verify_page_command(codex_home, session_id, state),
+        )
     for value, changed in files.items():
         path = Path(value)
         if not path.is_file() or not isinstance(changed, dict):
-            return _instruction(f"页面文件无法核对：{value}")
+            return _verification_detail(
+                "page_file_missing",
+                f"页面文件无法核对：{value}",
+                phase="browser",
+                next_command=_verify_page_command(codex_home, session_id, state),
+            )
         current_digest = _source_digest(path)
         if current_digest != changed.get("sha256"):
-            return _instruction(f"页面文件在检查后又有修改，必须重新检查：{value}")
+            return _verification_detail(
+                "browser_verification_stale",
+                f"页面文件在检查后又有修改，必须重新检查：{value}",
+                phase="browser",
+                next_command=_verify_page_command(codex_home, session_id, state),
+            )
         checked = (evidence.get("files") or {}).get(value)
         if not isinstance(checked, dict) or checked.get("sha256") != current_digest:
-            return _instruction(f"浏览器证据没有覆盖当前页面文件：{value}")
+            return _verification_detail(
+                "browser_evidence_missing_file",
+                f"浏览器证据没有覆盖当前页面文件：{value}",
+                phase="browser",
+                next_command=_verify_page_command(codex_home, session_id, state),
+            )
     if state.get("target_before") and not state.get("target_review"):
-        return _instruction("只有修改前目标快照，尚未完成 --after 目标验收，不能声称修改成功。")
+        return _verification_detail(
+            "target_review_missing",
+            "只有修改前目标快照，尚未完成 --after 目标验收，不能声称修改成功。",
+            phase="target",
+            next_command=_verify_page_command(codex_home, session_id, state),
+        )
     if state.get("target_review"):
         reason = _target_review_reason(state)
         if reason:
-            return _instruction(reason)
+            return _verification_detail(
+                "target_review_invalid",
+                reason,
+                phase="target",
+                next_command=_verify_page_command(codex_home, session_id, state),
+            )
     if not state.get("cleanup_completed"):
         for value in evidence.get("screenshots") or []:
             if not isinstance(value, str) or not Path(value).is_file():
-                return _instruction("浏览器截图不存在，不能声称页面已检查。")
-        return _instruction("视觉审查后必须运行 visual_review.py cleanup 删除截图，不能保留垃圾。")
+                return _verification_detail(
+                    "screenshot_missing",
+                    "浏览器截图不存在，不能声称页面已检查。",
+                    phase="browser",
+                    next_command=_verify_page_command(codex_home, session_id, state),
+                )
+        review = state.get("visual_review") or {}
+        if not isinstance(review, dict) or review.get("status") != "passed":
+            return _verification_detail(
+                "visual_review_missing",
+                "真实浏览器检查已通过，但还没有逐项视觉审查记录。",
+                phase="visual",
+                next_command=_visual_command(codex_home, session_id, "record"),
+            )
+        return _verification_detail(
+            "screenshot_cleanup_missing",
+            "视觉审查已完成，但截图尚未清理，不能保留交付垃圾。",
+            phase="cleanup",
+            next_command=_visual_command(codex_home, session_id, "cleanup"),
+        )
     if not state.get("visual_review", {}).get("screenshots_deleted"):
-        return _instruction("清理状态缺少截图删除证据，不能把清理当作验收。")
+        return _verification_detail(
+            "screenshot_cleanup_invalid",
+            "清理状态缺少截图删除证据，不能把清理当作验收。",
+            phase="cleanup",
+            next_command=_visual_command(codex_home, session_id, "cleanup"),
+        )
     review = state.get("visual_review") or {}
     if review.get("status") == "user_review_required":
-        return _instruction("当前模型无视觉或视觉审查未通过，仍需用户复查，不能声称视觉验收通过。")
+        return _verification_detail(
+            "visual_user_review_required",
+            "当前模型无视觉或视觉审查未通过，仍需用户复查，不能声称视觉验收通过。",
+            phase="visual",
+        )
     if review.get("status") != "passed":
-        return _instruction("缺少逐项真实视觉审查，不能声称页面完成。")
+        return _verification_detail(
+            "visual_review_missing",
+            "缺少逐项真实视觉审查，不能声称页面完成。",
+            phase="visual",
+            next_command=_visual_command(codex_home, session_id, "record"),
+        )
     certificate_reason = _visual_certificate_reason(review, message)
     if certificate_reason:
-        return _instruction(certificate_reason)
-    return None
+        return _verification_detail(
+            "visual_certificate_invalid",
+            certificate_reason,
+            phase="visual",
+            next_command=_visual_command(codex_home, session_id, "record"),
+        )
+    return {"ok": True, "code": "page_verification_passed", "phase": "complete"}
 
 
-def _instruction(reason: str) -> str:
-    return ("[AgentRelay 页面验证门禁] " + reason +
-            " 不得声称页面已完成或验证通过。请运行 scripts/verify_page.py（真实 Chromium），"
-            "检查控制台、主要导航、主题和桌面/移动截图；失败要如实报告，修复后重新验证。")
+def verify_evidence(codex_home: Path, session_id: str, message: str = "") -> str | None:
+    """Return a compact blocking reason, or None when current page bytes were checked."""
+    result = verification_preflight(codex_home, session_id, message)
+    return None if result.get("ok") else _instruction(result)
+
+
+def _instruction(detail: dict[str, Any]) -> str:
+    message = "[AgentRelay 页面验证门禁] " + str(detail.get("reason") or "")
+    command = str(detail.get("next_command") or "").strip()
+    if command:
+        message += " 下一步：" + command + "。"
+    message += " 门禁通过前不要写“已完成”“刷新即可”或“验证通过”。"
+    return message

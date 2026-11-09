@@ -36,6 +36,17 @@ class ApprovalPolicyTests(unittest.TestCase):
         self.assertTrue(policy.should_confirm("同时修改前端和后端", "standard", 1, 2)[0])
         self.assertTrue(policy.should_confirm("修改页面并参考当前项目风格自由发挥", "standard", 1, 1)[0])
 
+    def test_reference_ui_follow_up_requires_confirmation(self):
+        prompt = (
+            "没错，但是你应该仔细看，他有一个点击事件，点击之后，他有一个遮罩层，"
+            "这个得注意，得和修改完成的一样"
+        )
+        confirm, reasons = policy.should_confirm(prompt, "standard", 0, 0)
+        self.assertTrue(confirm)
+        self.assertIn("参考图或截图", "；".join(reasons))
+        self.assertFalse(policy.should_confirm("你现在启动这个前端，并且使用5181端口", "standard")[0])
+        self.assertFalse(policy.should_confirm("截图里的遮罩是什么作用？", "standard")[0])
+
     def test_pending_contract_cannot_be_bypassed_by_relaxed_mode(self):
         contract = {"approved": False, "target_scope": "A 模块滚动条"}
         self.assertTrue(policy.should_confirm("修改滚动条", "relaxed", contract=contract)[0])
@@ -77,11 +88,64 @@ class ApprovalPolicyTests(unittest.TestCase):
         self.assertNotEqual(invalid.returncode, 0)
         self.assertIn("1、2、3", invalid.stderr)
 
+    def test_policy_snapshot_binds_approval_to_current_mode(self):
+        policy.save_policy(self.home, "standard")
+        snapshot = policy.snapshot(self.home)
+        self.assertEqual(snapshot["mode"], "standard")
+        self.assertTrue(snapshot["policy_version"])
+
+    def test_resume_requires_reconfirmation_when_policy_tightens(self):
+        policy.save_policy(self.home, "relaxed")
+        snapshot = policy.snapshot(self.home)
+        policy.save_policy(self.home, "strict")
+        self.assertFalse(policy.resume_allowed(self.home, snapshot))
+        policy.save_policy(self.home, "standard")
+        self.assertFalse(policy.resume_allowed(self.home, snapshot))
+        policy.save_policy(self.home, "relaxed")
+        self.assertTrue(policy.resume_allowed(self.home, snapshot))
+
     def test_visible_card_is_only_marked_once_per_request(self):
         gate = {}
         self.assertTrue(policy.mark_card_shown(gate, "hash-1"))
         self.assertFalse(policy.mark_card_shown(gate, "hash-1"))
         self.assertTrue(policy.mark_card_shown(gate, "hash-2"))
+
+    def test_work_profile_is_required_only_for_write_tasks(self):
+        question = policy.select_work_profile("解释一下确认卡有什么作用", "standard")
+        self.assertFalse(question["required"])
+        self.assertIsNone(question["profile"])
+        simple = policy.select_work_profile("修改按钮颜色", "standard", file_count=1)
+        self.assertTrue(simple["required"])
+        self.assertEqual(simple["profile"], "light")
+        self.assertFalse(simple["card_required"])
+
+    def test_complex_and_strict_tasks_cannot_choose_below_minimum_profile(self):
+        complex_task = policy.select_work_profile(
+            "同时修改前端和后端，并更新数据库迁移", "standard", file_count=3, domain_count=3,
+        )
+        self.assertEqual(complex_task["minimum"], "strict")
+        with self.assertRaisesRegex(ValueError, "不能降档"):
+            policy.select_work_profile(
+                "同时修改前端和后端，并更新数据库迁移", "standard",
+                requested="light", file_count=3, domain_count=3,
+            )
+        strict_task = policy.select_work_profile("修改按钮颜色", "strict", file_count=1)
+        self.assertEqual(strict_task["minimum"], "strict")
+        with self.assertRaisesRegex(ValueError, "不能降档"):
+            policy.select_work_profile(
+                "修改按钮颜色", "strict", requested="standard", file_count=1,
+            )
+
+    def test_user_required_review_forces_highest_profile(self):
+        prompt = "修复这个 bug，必须完整审查并运行全量测试，不能只看 diff"
+        selected = policy.select_work_profile(prompt, "standard", file_count=1)
+        self.assertEqual(selected["minimum"], "user_required")
+        self.assertEqual(selected["profile"], "user_required")
+        self.assertTrue(selected["card_required"])
+        with self.assertRaisesRegex(ValueError, "不能降档"):
+            policy.select_work_profile(
+                prompt, "strict", requested="strict", file_count=1,
+            )
 
 
 if __name__ == "__main__":

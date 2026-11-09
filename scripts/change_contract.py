@@ -21,6 +21,13 @@ WRITE_TOOLS = {"write", "edit", "multiedit", "notebookedit", "apply_patch", "app
                "replacefilecontent"}
 COMMAND_TOOLS = {"bash", "shell", "exec_command", "execute_command", "run_command"}
 COMPLETION = re.compile(r"(?:已完成|已修复|验证通过|测试通过|检查通过)")
+CONFIRMATION_CARD_FIELDS = (
+    ("phenomenon", "现象"),
+    ("expected", "期望"),
+    ("location", "定位"),
+    ("boundary", "边界"),
+    ("doubts", "疑点"),
+)
 REFERENCE_COMPARISON = re.compile(
     r"(?:对照|比较|对比|一致|相同|相符|符合|差异|compared?|comparison|same|match|diff)",
     re.IGNORECASE,
@@ -110,6 +117,81 @@ def card_fields(contract: dict[str, Any]) -> list[tuple[str, str]]:
     fields.append(("验收", "参考一致；真实 diff 无越界；数据、接口与逻辑保持冻结" if contract.get("style_only")
                    else "参考一致；真实 diff 无越界文件"))
     return fields
+
+
+def _required_card_text(card: dict[str, Any], key: str, label: str) -> str:
+    value = card.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"确认卡缺少「{label}」或内容为空")
+    return value.strip()
+
+
+def validate_confirmation_card(card: dict[str, Any]) -> bool:
+    """Validate the five-column requirement card before it is shown or stored."""
+    if not isinstance(card, dict):
+        raise ValueError("确认卡必须是结构化对象")
+    for key, label in CONFIRMATION_CARD_FIELDS[:-1]:
+        _required_card_text(card, key, label)
+
+    doubts = card.get("doubts")
+    if not isinstance(doubts, list) or not doubts:
+        raise ValueError("确认卡缺少「疑点」或内容为空")
+    for index, doubt in enumerate(doubts, 1):
+        if not isinstance(doubt, dict):
+            raise ValueError(f"疑点 {index} 必须包含问题和推荐方案")
+        question = str(doubt.get("question") or "").strip()
+        recommendation = str(doubt.get("recommendation") or "").strip()
+        if not question:
+            raise ValueError(f"疑点 {index} 缺少问题描述")
+        if not recommendation:
+            raise ValueError(f"疑点 {index} 缺少推荐方案")
+    return True
+
+
+def confirmation_card_fields(card: dict[str, Any]) -> list[tuple[str, str]]:
+    """Render a validated five-column card using stable user-facing labels."""
+    validate_confirmation_card(card)
+    fields = [
+        (label, str(card[key]).strip())
+        for key, label in CONFIRMATION_CARD_FIELDS[:-1]
+    ]
+    doubts = [
+        f"{str(item['question']).strip()} -> 推荐方案：{str(item['recommendation']).strip()}"
+        for item in card["doubts"]
+    ]
+    fields.append(("疑点", "\n".join(doubts)))
+    return fields
+
+
+def draft_confirmation_card(prompt: str, *, allowed_files: Iterable[str] = (),
+                            modules: Iterable[str] = (), profile: str = "standard") -> dict[str, Any]:
+    """Build an honest draft from request facts without inventing code locations."""
+    request = re.sub(r"\s+", " ", str(prompt or "")).strip() or "用户尚未提供具体描述"
+    file_list = [str(value).strip() for value in allowed_files if str(value).strip()]
+    module_list = [str(value).strip() for value in modules if str(value).strip()]
+    location = []
+    if module_list:
+        location.append("涉及模块：" + "、".join(module_list))
+    if file_list:
+        location.append("已声明文件：" + "、".join(file_list))
+    location.append("具体代码位置须先只读定位，批准前不得写入")
+    boundary = (
+        f"仅允许修改已声明文件：{'、'.join(file_list)}；名单外文件、公共实现和兄弟元素保持冻结"
+        if file_list else
+        "允许文件须在只读定位后补充；批准前不得写入，名单外文件、公共实现和兄弟元素保持冻结"
+    )
+    return {
+        "version": 1,
+        "profile": profile,
+        "phenomenon": f"用户请求：{request}",
+        "expected": "按用户明确要求完成，并以真实 diff、目标行为和匹配测试证据验收；不把运行成功等同于需求完成",
+        "location": "；".join(location),
+        "boundary": boundary,
+        "doubts": [{
+            "question": "是否已经存在可直接复用的组件、样式或测试工具？",
+            "recommendation": "先只读检索现有实现和既有改动；发现共享影响或范围扩大时更新确认卡并重新征求批准",
+        }],
+    }
 
 
 def tool_targets(tool_name: str, tool_input: Any) -> list[str]:

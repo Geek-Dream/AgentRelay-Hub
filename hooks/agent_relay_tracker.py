@@ -88,7 +88,7 @@ LOCK_FILE = TRACKER_DIR / ".lock"
 RELAY_ESCALATION_WAIT_SECONDS = {1: 600, 2: 300, 3: 300}
 RELAY_MAX_SIGNALS = 3
 
-HOOK_CARD_DIVIDER = "────────────────────────"
+HOOK_CARD_DIVIDER = "--------------------------------"
 
 
 def normalize_agent_id(agent_id):
@@ -376,6 +376,14 @@ INFORMATIONAL_DIRECT_ACTION_PATTERNS = [
 TASK_WRITE_ACTION_PATTERNS = [
     r"(?:修改|新增|增加|添加|删除|重构|迁移|升级|替换|改成|改为|改造|修复|接入|集成|实现|搭建|部署|发布|安装|配置|调整)",
     r"\b(?:implement|add|remove|delete|refactor|migrate|upgrade|replace|change\s+to|set\s+to|fix|integrate|build|deploy|install)\b",
+]
+
+TASK_USER_REQUIRED_PATTERNS = [
+    r"必须(?:完整|严格|深度|逐项)?(?:审查|检查|验证|测试|核对)",
+    r"(?:完整|严格|深度|逐项)(?:审查|检查|验证)",
+    r"(?:运行|执行)?(?:全量|全部|完整)(?:测试|回归|验证)",
+    r"不能只看\s*diff|不能只跑(?:一个|单个)",
+    r"must\s+(?:fully\s+)?(?:review|verify|test)|full\s+(?:review|test)",
 ]
 
 TASK_LARGE_PATTERNS = [
@@ -1337,9 +1345,19 @@ def classify_task_request(prompt, contract=None):
         domains = {value.lower() for value in re.findall(
             "|".join(f"(?:{pattern})" for pattern in TASK_DOMAIN_PATTERNS), text, flags=re.IGNORECASE)}
         required, reasons = module.should_confirm(text, policy["mode"], file_count, len(domains), contract)
+        work_profile = module.select_work_profile(
+            text, policy["mode"], file_count=file_count, domain_count=len(domains),
+        )
+        if work_profile.get("card_required"):
+            required = True
+            reasons = list(dict.fromkeys([
+                *reasons,
+                *(work_profile.get("reasons") or []),
+            ]))
         return {"level": "large" if required and matches_any_pattern(text, TASK_LARGE_PATTERNS)
                 else "medium" if required else "small",
-                "requires_confirmation": required, "reasons": reasons, "mode": policy["mode"]}
+                "requires_confirmation": required, "reasons": reasons, "mode": policy["mode"],
+                "work_profile": work_profile}
     except (ImportError, OSError, ValueError, TypeError):
         pass
     if not text:
@@ -1347,9 +1365,14 @@ def classify_task_request(prompt, contract=None):
             "level": "small",
             "requires_confirmation": False,
             "reasons": [],
+            "work_profile": {
+                "required": False, "profile": None, "minimum": None,
+                "card_required": False, "reasons": [],
+            },
         }
 
     write_requested = matches_any_pattern(text, TASK_WRITE_ACTION_PATTERNS)
+    user_required = matches_any_pattern(text, TASK_USER_REQUIRED_PATTERNS)
     large_scope = matches_any_pattern(text, TASK_LARGE_PATTERNS)
     medium_scope = matches_any_pattern(text, TASK_MEDIUM_PATTERNS)
     multi_request = matches_any_pattern(text, TASK_MULTI_REQUEST_PATTERNS)
@@ -1378,18 +1401,37 @@ def classify_task_request(prompt, contract=None):
     if write_requested and medium_scope:
         reasons.append("包含重构、迁移、配置、依赖或部署操作")
 
+    if user_required and write_requested:
+        reasons.append("用户明确要求完整检查或全量验证")
+        reasons.append("非轻量任务需要现象、期望、定位、边界、疑点五栏确认卡")
+
     if reasons:
         level = "large" if large_scope and write_requested else "medium"
+        minimum = "user_required" if user_required and write_requested else "strict"
         return {
             "level": level,
             "requires_confirmation": True,
             "reasons": reasons,
+            "work_profile": {
+                "required": write_requested,
+                "profile": minimum if write_requested else None,
+                "minimum": minimum if write_requested else None,
+                "card_required": write_requested,
+                "reasons": reasons,
+            },
         }
 
     return {
         "level": "small",
         "requires_confirmation": False,
         "reasons": [],
+        "work_profile": {
+            "required": write_requested,
+            "profile": "light" if write_requested else None,
+            "minimum": "light" if write_requested else None,
+            "card_required": False,
+            "reasons": [],
+        },
     }
 
 
@@ -1907,8 +1949,6 @@ def _segment_dangerous_reason(words, depth=0):
     if command == "eval":
         return _dangerous_shell_text(" ".join(arguments), depth + 1)
 
-    if command in {"rm", "unlink"} and _safe_screenshot_cleanup(arguments):
-        return None
     if command in {"rm", "rmdir", "unlink"}:
         return "删除文件或目录"
     if command == "find" and any(
@@ -2062,12 +2102,17 @@ def _card_values(value):
     return [text] if text else ["无"]
 
 
+def _card_label_width(label):
+    return sum(2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1 for char in str(label))
+
+
 def _card_field(label, value, width=None):
     values = _card_values(value)
-    label_width = width if width is not None else len(str(label))
-    prefix = f"  {str(label) + ':':<{label_width + 1}} "
+    label_width = width if width is not None else _card_label_width(label)
+    padding = " " * max(0, label_width - _card_label_width(label))
+    prefix = f"- {label}：{padding} "
     lines = [prefix + values[0]]
-    continuation = " " * (label_width + 4)
+    continuation = " " * (label_width + 5)
     lines.extend(continuation + item for item in values[1:])
     return lines
 
@@ -2077,13 +2122,12 @@ def _card_section(title):
 
 
 def _hook_card_choices():
-    return [
-        "",
-        HOOK_CARD_DIVIDER,
-        "✅ [1] 批准执行",
-        "🛠️ [2] 调整方案",
-        "⛔ [3] 取消任务",
-    ]
+    """Hook systemMessage is informational; the host has no clickable choices."""
+    return [HOOK_CARD_DIVIDER]
+
+
+def _task_card_summary(prompt):
+    return _clip_card_text(prompt, 160) or "未提供具体任务"
 
 
 def _task_card_id(seed):
@@ -2140,55 +2184,58 @@ def render_task_gate_card(prompt, gate):
         scope.append("文件：待读取相关代码后确认；未明确前不得写入")
 
     lines = [
+        "「需求卡」",
         HOOK_CARD_DIVIDER,
-        "「AgentRelay · 需求确认卡」",
-        HOOK_CARD_DIVIDER,
-        "",
-        "先确认目标、范围和禁止副作用；批准不等于无限授权。",
     ]
     contract = gate.get("change_contract")
     has_contract = isinstance(contract, dict)
-    base_fields = [("任务", _task_card_id(request_hash)),
-                   ("用户需求", _clip_card_text(prompt, 800)),
+    base_fields = [("任务", _task_card_summary(prompt)),
+                   ("任务ID", _task_card_id(request_hash)),
                    ("触发原因", reasons)]
+    work_profile = gate.get("work_profile")
+    if isinstance(work_profile, dict) and work_profile.get("required"):
+        base_fields.insert(2, (
+            "工作档",
+            f"{work_profile.get('profile') or '待选择'}"
+            f"（最低 {work_profile.get('minimum') or work_profile.get('profile') or 'light'}；"
+            f"确认卡 {'是' if work_profile.get('card_required') else '否'}）",
+        ))
+        if work_profile.get("card_required"):
+            try:
+                confirmation_module = _shared_script_module("change_contract")
+                draft = confirmation_module.draft_confirmation_card(
+                    prompt,
+                    allowed_files=(contract or {}).get("allowed_files") or files,
+                    modules=modules,
+                    profile=str(work_profile.get("profile") or "strict"),
+                )
+                base_fields.extend(confirmation_module.confirmation_card_fields(draft))
+                gate["confirmation_card"] = draft
+            except (ImportError, ValueError, TypeError):
+                pass
     if not has_contract:
         base_fields.extend([
             ("影响范围", scope),
             ("目标外边界", "公共组件、兄弟元素和其他模块保持不变；连带影响需重新确认"),
             ("复用优先", "先检索并复用项目已有组件/样式；确需新组件必须说明缺口并获明确授权"),
         ])
-    width = max(len(label) for label, _ in base_fields)
-    for label, value in base_fields:
-        lines.extend(_card_field(label, value, width))
     if has_contract:
         try:
-            lines.extend(_card_section("目标与边界（必须逐项遵守）"))
-            fields = _shared_script_module("change_contract").card_fields(contract)
-            width = max(len(label) for label, _ in fields)
-            for label, value in fields:
-                lines.extend(_card_field(label, value, width))
+            base_fields.extend(_shared_script_module("change_contract").card_fields(contract))
         except (ImportError, ValueError, TypeError):
             pass
-    lines.extend(_card_field("当前状态", "等待批准 · 尚未修改文件 · waiting_for_approval"))
-    lines.extend(_card_field(
-        "批准后",
-        "仅执行本卡明确的目标与边界；扩大范围、修改公共组件或产生连带影响必须重新确认。"
-        if has_contract else "仅执行当前展示的修改方案；新增范围必须重新确认。",
-    ))
-    lines.extend(_card_field("主要风险", _task_gate_risks(prompt)))
-    lines.extend(_card_field(
-        "验证",
-        [
-            "先运行与改动直接相关的测试或构建命令。",
-            "确认通过后，再运行项目已有的完整测试。",
-        ],
-    ))
-    lines.extend(_card_field(
-        "回滚",
-        "修改前保留原文件内容；验证失败时按文件恢复，并记录失败原因。",
-    ))
+    base_fields.extend([
+        ("当前状态", "等待批准 · 尚未修改文件 · waiting_for_approval"),
+        ("批准后", "仅执行本卡明确的目标与边界；扩大范围、修改公共组件或产生连带影响必须重新确认。"
+         if has_contract else "仅执行当前展示的修改方案；新增范围必须重新确认。"),
+        ("主要风险", _task_gate_risks(prompt)),
+        ("验证", ["先运行与改动直接相关的测试或构建命令。", "确认通过后，再运行项目已有的完整测试。"]),
+        ("回滚", "修改前保留原文件内容；验证失败时按文件恢复，并记录失败原因。"),
+    ])
+    width = max(_card_label_width(label) for label, _ in base_fields)
+    for label, value in base_fields:
+        lines.extend(_card_field(label, value, width))
     lines.extend(_hook_card_choices())
-    lines.append(HOOK_CARD_DIVIDER)
     return "\n".join(lines)
 
 
@@ -2232,56 +2279,34 @@ def render_tool_gate_card(tool_name, tool_input, reason):
     danger = _tool_gate_is_danger(reason)
     solution_key = build_solution_key(tool_name, tool_input) or tool_name
     targets = _tool_targets(tool_name, tool_input)
-    title = (
-        "「AgentRelay · 危险操作确认卡」"
-        if danger
-        else "「AgentRelay · 写入确认卡」"
-    )
+    title = "「危险操作确认卡」" if danger else "「确认卡」"
 
     lines = [
-        HOOK_CARD_DIVIDER,
         title,
         HOOK_CARD_DIVIDER,
-        "本次操作已暂停；只会对你看到的同一操作申请一次批准。",
-        _card_section("01 · 实际动作")[0],
     ]
-    action_fields = [("任务", _task_card_id(solution_key)),
+    action_fields = [("任务", _task_card_summary(reason)),
+                     ("任务ID", _task_card_id(solution_key)),
                      ("工具", normalize_text(tool_name) or "unknown"),
                      ("操作内容", targets or ["未提供具体路径或命令"]),
                      ("当前状态", "已阻断 · 等待批准")]
-    width = max(len(label) for label, _ in action_fields)
+    action_fields.extend([
+        ("主要风险", [_clip_card_text(reason, 800)]),
+        ("批准边界", "仅限完全相同的工具输入执行一次；命令、路径、参数或影响范围变化必须重新确认。"),
+        ("验证", "检查实际 diff 与目标外副作用，再运行相关测试；目标外变化必须报告。"),
+        ("回滚", "修改类操作使用修改前备份或版本控制恢复；删除类操作可能无法恢复。"),
+    ])
+    width = max(_card_label_width(label) for label, _ in action_fields)
     for label, value in action_fields:
         lines.extend(_card_field(label, value, width))
-    lines.extend(_card_section("02 · 影响与边界"))
-    lines.extend(_card_field(
-        "主要风险",
-        [_clip_card_text(reason, 800)],
-    ))
-    lines.extend(_card_field(
-        "批准边界",
-        "仅限完全相同的工具输入执行一次；命令、路径、参数或影响范围变化必须重新确认。",
-    ))
-    lines.extend(_card_section("03 · 执行后"))
-    lines.extend(_card_field(
-        "验证",
-        "检查实际 diff 与目标外副作用，再运行相关测试；目标外变化必须报告。",
-    ))
-    lines.extend(_card_field(
-        "回滚",
-        "修改类操作使用修改前备份或版本控制恢复；删除类操作可能无法恢复。",
-    ))
     lines.extend(_hook_card_choices())
-    lines.append(HOOK_CARD_DIVIDER)
     return "\n".join(lines)
 
 
 def visible_hook_cards_enabled():
-    """Return portable text for hosts with a visible message channel."""
+    """Default to the direct Codex Hook; explicit targets retain their adapters."""
     target = normalize_text(os.environ.get("AGENTRELAY_TARGET")).lower()
-    if target:
-        return target in {"codex", "claude", "pi", "hermes"}
-    return bool(os.environ.get("CODEX_HOME") or os.environ.get("CODEX_THREAD_ID")
-                or os.environ.get("CODEX_SESSION_ID"))
+    return target not in {"kimi", "opencode", "deepseek-cli"}
 
 
 def codex_hook_cards_enabled():
@@ -2432,9 +2457,28 @@ def semantic_approval_notice(session_id, state, prompt):
     tracker_path = shlex.quote(str(Path(__file__).resolve()))
     python_path = shlex.quote(sys.executable)
     session_value = shlex.quote(str(session_id))
+    gate = state.get("task_gate")
+    work_profile = gate.get("work_profile") if isinstance(gate, dict) else None
+    minimum_profile = (
+        str(work_profile.get("minimum") or work_profile.get("profile") or "")
+        if isinstance(work_profile, dict) and work_profile.get("required")
+        else ""
+    )
+    if not minimum_profile:
+        pending_profile = _pending_work_profile(state)
+        if pending_profile:
+            minimum_profile = str(
+                pending_profile.get("minimum")
+                or pending_profile.get("profile")
+                or ""
+            )
+    profile_argument = (
+        f" --work-profile {shlex.quote(minimum_profile)}"
+        if minimum_profile else ""
+    )
     approve_command = (
         f"{python_path} {tracker_path} resolve-intent --session {session_value} "
-        f"--decision approve --source-sha256 {source_hash} "
+        f"--decision approve --source-sha256 {source_hash}{profile_argument} "
         "--reason '用户明确批准当前待确认范围'"
     )
     reject_command = (
@@ -2448,7 +2492,13 @@ def semantic_approval_notice(session_id, state, prompt):
         f"用户原话：{_clip_card_text(prompt, 500)}\n"
         f"待审批范围：{'；'.join(_approval_scope_labels(scope))}\n"
         f"消息摘要：{source_hash}\n"
-        "请结合确认卡、用户完整消息和当前对话自行判断。只有明确同意当前范围时，"
+        + (
+            f"本次写任务最低工作档为 {minimum_profile}。批准命令中的工作档是"
+            " Hook 给出的最低建议；你必须确认它适合当前任务，也可改成更强的 "
+            "light/standard/strict/user_required，但不能降档。\n"
+            if minimum_profile else ""
+        )
+        + "请结合确认卡、用户完整消息和当前对话自行判断。只有明确同意当前范围时，"
         f"运行：{approve_command}\n"
         "只有明确拒绝当前范围时，运行："
         f"{reject_command}\n"
@@ -2457,7 +2507,164 @@ def semantic_approval_notice(session_id, state, prompt):
     )
 
 
-def resolve_pending_intent(session_id, decision, source_sha256, reason):
+def _pending_work_profile(state, requested=None):
+    """Derive the profile for an approval that predates profile selection."""
+
+    contract = state.get("change_contract")
+    contract_pending = (
+        isinstance(contract, dict)
+        and not contract.get("approved")
+        and not contract.get("draft")
+    )
+    gate = state.get("task_gate")
+    task_pending = (
+        isinstance(gate, dict)
+        and gate.get("status") == "awaiting_confirmation"
+    )
+    if not contract_pending and not task_pending:
+        return None
+
+    module = _shared_script_module("approval_policy")
+    mode = module.load_policy(CODEX_DIR)["mode"]
+    text = str(state.get("last_prompt") or "")
+    files = (
+        contract.get("allowed_files") or []
+        if isinstance(contract, dict)
+        else []
+    )
+    file_count = len({
+        str(value).strip().lower()
+        for value in files
+        if str(value).strip()
+    })
+    profile = module.select_work_profile(
+        text,
+        mode,
+        requested=normalize_text(requested).lower() or None,
+        file_count=file_count,
+    )
+    if not profile.get("required") and contract_pending:
+        target = str(contract.get("target_scope") or "").strip()
+        profile = module.select_work_profile(
+            "修改 " + " ".join(value for value in (text, target) if value),
+            mode,
+            requested=normalize_text(requested).lower() or None,
+            file_count=file_count,
+        )
+    if not profile.get("required"):
+        selected = normalize_text(requested).lower()
+        if not selected:
+            return None
+        profile = {
+            "required": True,
+            "profile": selected,
+            "minimum": "light",
+            "card_required": selected != "light",
+            "reasons": ["审批写任务时必须显式记录工作档"],
+        }
+    return profile
+
+
+def _apply_work_profile_selection(gate, requested, reason=""):
+    """Record the Agent's explicit profile without merging it into user approval."""
+
+    module = _shared_script_module("approval_policy")
+    work_profile = gate.get("work_profile")
+    if not isinstance(work_profile, dict) or not work_profile.get("required"):
+        raise ValueError("当前任务不需要选择工作档")
+    requested = normalize_text(requested).lower()
+    if requested not in module.WORK_PROFILES:
+        raise ValueError(
+            "工作档必须是 " + ", ".join(module.WORK_PROFILES)
+        )
+    minimum = str(
+        work_profile.get("minimum") or work_profile.get("profile") or "light"
+    )
+    if minimum not in module.WORK_PROFILE_STRENGTH:
+        raise ValueError(f"任务最低工作档无效：{minimum}")
+    if (
+        module.WORK_PROFILE_STRENGTH[requested]
+        < module.WORK_PROFILE_STRENGTH[minimum]
+    ):
+        raise ValueError(
+            f"工作档不能降档：任务最低要求 {minimum}，当前选择 {requested}"
+        )
+    selected = dict(work_profile)
+    card_required = requested != "light"
+    selected.update({
+        "profile": requested,
+        "card_required": card_required,
+        "selection_source": "agent",
+        "selected_at": iso_now(),
+        "selection_reason": normalize_text(reason)[:500],
+    })
+    if card_required:
+        card_reason = "主 Agent 选择非轻量工作档，需要先确认五栏需求卡"
+        selected["reasons"] = list(dict.fromkeys([
+            *(selected.get("reasons") or []),
+            card_reason,
+        ]))
+        if gate.get("status") == "clear":
+            gate["status"] = "awaiting_confirmation"
+            gate["requires_confirmation"] = True
+            gate["reasons"] = list(dict.fromkeys([
+                *(gate.get("reasons") or []),
+                card_reason,
+            ]))
+            gate["requested_at"] = iso_now()
+            gate["notified_sha256"] = gate.get("request_sha256")
+            gate["card_shown_sha256"] = None
+    gate["work_profile"] = selected
+    return selected
+
+
+def select_task_work_profile(session_id, requested, reason=""):
+    """Persist an explicit profile choice for a clear, non-card write task."""
+
+    session_id = normalize_session_id(session_id)
+    if not session_id:
+        raise ValueError("select-work-profile 需要有效 session_id")
+    lock = acquire_lock()
+    try:
+        state = read_state(session_id=session_id)
+        gate = state.get("task_gate")
+        if not isinstance(gate, dict):
+            raise ValueError("当前没有可选择的写任务")
+        selected = _apply_work_profile_selection(gate, requested, reason)
+        state["task_gate"] = gate
+        card = None
+        if (
+            selected.get("card_required")
+            and gate.get("status") == "awaiting_confirmation"
+        ):
+            card = render_task_gate_card(
+                str(state.get("last_prompt") or ""),
+                gate,
+            )
+        write_state(state, session_id=session_id)
+    finally:
+        release_lock(lock)
+    log_event(
+        "work_profile_selected",
+        {
+            "session_id": session_id,
+            "profile": selected.get("profile"),
+            "minimum": selected.get("minimum"),
+        },
+    )
+    return {
+        "profile": selected.get("profile"),
+        "minimum": selected.get("minimum"),
+        "card_required": bool(selected.get("card_required")),
+        "status": gate.get("status"),
+        "selection_source": "agent",
+        **({"card": card} if card else {}),
+    }
+
+
+def resolve_pending_intent(
+    session_id, decision, source_sha256, reason, work_profile=None,
+):
     """Atomically apply the Agent's contextual approve/reject decision."""
 
     decision = normalize_text(decision).lower()
@@ -2509,10 +2716,36 @@ def resolve_pending_intent(session_id, decision, source_sha256, reason):
         contract_pending = bool(scope.get("contract_sha256"))
 
         if decision == "approve":
+            approval_snapshot = _shared_script_module("approval_policy").snapshot(CODEX_DIR)
+            approvals["approval_policy"] = approval_snapshot
+            selected_profile = gate.get("work_profile")
+            if (
+                (task_pending or contract_pending)
+                and (
+                    not isinstance(selected_profile, dict)
+                    or not selected_profile.get("required")
+                )
+            ):
+                pending_profile = _pending_work_profile(
+                    state,
+                    requested=work_profile,
+                )
+                if pending_profile:
+                    gate["work_profile"] = pending_profile
+                    selected_profile = pending_profile
+            if isinstance(selected_profile, dict) and selected_profile.get("required"):
+                if not normalize_text(work_profile):
+                    minimum = selected_profile.get("minimum") or selected_profile.get("profile")
+                    raise ValueError(
+                        "批准写任务时必须用 --work-profile 显式选择工作档，"
+                        f"且不能低于 {minimum}"
+                    )
+                _apply_work_profile_selection(gate, work_profile, reason)
             if task_pending:
                 gate["status"] = "approved"
                 gate["requires_confirmation"] = True
                 gate["approved_at"] = iso_now()
+                gate["approval_policy"] = approval_snapshot
             if contract_pending:
                 approve_change_contract(state)
             for key in pending_keys:
@@ -2549,6 +2782,13 @@ def resolve_pending_intent(session_id, decision, source_sha256, reason):
             "scope": resolved_scope,
             "resolved_at": iso_now(),
         }
+        selected = gate.get("work_profile")
+        if decision == "approve" and isinstance(selected, dict) and selected.get("required"):
+            resolution["work_profile"] = {
+                "profile": selected.get("profile"),
+                "minimum": selected.get("minimum"),
+                "selection_source": selected.get("selection_source"),
+            }
         state["last_intent_resolution"] = resolution
         state.pop("semantic_approval_candidate", None)
         write_state(state, session_id=session_id)
@@ -2655,11 +2895,27 @@ def update_task_gate_for_prompt(state, prompt):
     ).hexdigest() if prompt else None
     gate["requested_at"] = iso_now() if classification["requires_confirmation"] else None
     gate["approved_at"] = None
+    gate["work_profile"] = classification.get("work_profile")
 
     if not classification["requires_confirmation"]:
         gate["status"] = "clear"
         gate["notified_sha256"] = None
         gate["card_shown_sha256"] = None
+        work_profile = gate.get("work_profile")
+        if isinstance(work_profile, dict) and work_profile.get("required"):
+            minimum = work_profile.get("minimum") or work_profile.get("profile") or "light"
+            tracker_path = shlex.quote(str(Path(__file__).resolve()))
+            python_path = shlex.quote(sys.executable)
+            session_value = shlex.quote(str(state.get("session_id") or ""))
+            return (
+                "[AgentRelay 工作档]\n"
+                f"本次是实际写任务，最低工作档为 {minimum}，不会显示用户确认卡。"
+                "你必须先显式选择工作档，才能进行首次写入；可选择 light、standard、"
+                "strict、user_required，但不能低于最低档。\n"
+                f"运行：{python_path} {tracker_path} select-work-profile "
+                f"--session {session_value} --profile {shlex.quote(minimum)} "
+                "--reason '主 Agent 已按任务复杂度选择工作档'"
+            )
         return ""
 
     gate["status"] = "awaiting_confirmation"
@@ -2690,15 +2946,98 @@ def evaluate_pre_tool_gate(tool_name, tool_input, session_id):
 
         solution_key = build_solution_key(tool_name, tool_input)
         danger_reason = dangerous_command_reason(tool_name, tool_input)
+        try:
+            mode = _shared_script_module("approval_policy").load_policy(CODEX_DIR)["mode"]
+        except (ImportError, OSError, ValueError, TypeError):
+            mode = "standard"
+        command = ""
+        command_cwd = (
+            Path(str(tool_input.get("cwd") or os.getcwd()))
+            if isinstance(tool_input, dict)
+            else Path.cwd()
+        )
+        if tool_is_shell(tool_name):
+            command = shell_command_text(tool_name, tool_input)
+            try:
+                if "deletion_policy.py" in command and _shared_script_module("deletion_policy").is_safe_delete_command(command, home=CODEX_DIR, mode=mode):
+                    return True, None
+            except (ImportError, OSError, ValueError, TypeError):
+                pass
+            if mode != "relaxed" and danger_reason == "删除文件或目录":
+                if len(_shell_command_segments(command)) > 1:
+                    return False, (
+                        "[AgentRelay 安全门禁]\n危险命令与其他命令串联时，不允许整链一次批准。"
+                        "请拆成独立步骤，先确认删除目标并移入回收站，再单独执行下载或验证。"
+                    )
+                replacement = None
+                if mode == "standard":
+                    try:
+                        replacement = _shared_script_module("deletion_policy").safe_delete_command(
+                            command, home=CODEX_DIR,
+                            cwd=command_cwd,
+                            mode=mode,
+                        )
+                    except ImportError:
+                        pass
+                if replacement:
+                    return False, (
+                        "[AgentRelay 回收站]\n该临时验证产物无需永久删除，也未显示额外审批卡。"
+                        f"请只执行以下受控命令，将目标移入回收站并保留恢复清单：\n{replacement}"
+                    )
+        gate = state.get("task_gate")
+        if not isinstance(gate, dict):
+            gate = {}
+        if mode == "relaxed" and danger_reason == "删除文件或目录" and tool_is_shell(tool_name):
+            command = shell_command_text(tool_name, tool_input)
+            try:
+                if _shared_script_module("deletion_policy").parse_simple_delete(command) is not None:
+                    return True, None
+            except (ImportError, OSError, ValueError, TypeError):
+                pass
         if danger_reason and solution_key:
             approved = [
                 item for item in approvals.get("approved_keys", [])
                 if isinstance(item, str) and item
             ]
             if solution_key in approved:
+                approval_snapshot = approvals.get("approval_policy")
+                if approval_snapshot and not _shared_script_module("approval_policy").resume_allowed(
+                    CODEX_DIR, approval_snapshot,
+                ):
+                    approvals["approved_keys"] = []
+                    approvals["pending_keys"] = _append_unique(
+                        approvals.get("pending_keys", []), solution_key, 16,
+                    )
+                    write_state(state, session_id=session_id)
+                    return False, (
+                        "[AgentRelay 权限版本已变化]\n"
+                        "当前权限模式比批准时更严格，旧批准不能恢复。"
+                        "请重新确认当前任务和危险命令范围。"
+                    )
                 approved.remove(solution_key)
                 approvals["approved_keys"] = approved
                 write_state(state, session_id=session_id)
+                if mode == "strict" and danger_reason == "删除文件或目录" and tool_is_shell(tool_name):
+                    try:
+                        replacement = _shared_script_module("deletion_policy").safe_delete_command(
+                            command, home=CODEX_DIR,
+                            cwd=command_cwd,
+                            mode=mode,
+                        )
+                    except ImportError:
+                        replacement = None
+                    if replacement:
+                        return False, (
+                            "[AgentRelay 回收站]\n"
+                            "strict 模式不执行原始永久删除，本次批准已用于该命令。"
+                            "请只执行以下受控命令，将目标移入回收站并保留恢复清单：\n"
+                            f"{replacement}"
+                        )
+                    return False, (
+                        "[AgentRelay 安全门禁]\n"
+                        "本次批准已用于该命令，但 strict 模式不允许执行原始永久删除，"
+                        "且无法为当前目标生成受控回收命令。请改用明确的本地文件路径后重新确认。"
+                    )
                 return True, None
 
             approvals["pending_keys"] = _append_unique(
@@ -2746,6 +3085,41 @@ def evaluate_pre_tool_gate(tool_name, tool_input, session_id):
                 "[AgentRelay 任务门禁]\n" + scope_hint +
                 "\n确认卡已显示时请勿重复展示；等待用户明确批准，只读检查可以继续。"
             )
+        if tool_writes_files(tool_name, tool_input):
+            work_profile = gate.get("work_profile")
+            if not isinstance(work_profile, dict) or not work_profile.get("required"):
+                work_profile = {
+                    "required": True,
+                    "profile": None,
+                    "minimum": "light",
+                    "card_required": False,
+                    "reasons": ["实际写入前必须由主 Agent 显式选择工作档"],
+                }
+                gate["work_profile"] = work_profile
+                state["task_gate"] = gate
+            if (
+                isinstance(work_profile, dict)
+                and work_profile.get("required")
+                and work_profile.get("selection_source") != "agent"
+            ):
+                minimum = (
+                    work_profile.get("minimum")
+                    or work_profile.get("profile")
+                    or "light"
+                )
+                session_value = shlex.quote(str(session_id))
+                tracker_path = shlex.quote(str(Path(__file__).resolve()))
+                python_path = shlex.quote(sys.executable)
+                write_state(state, session_id=session_id)
+                return False, (
+                    "[AgentRelay 工作档]\n"
+                    f"尚未显式选择工作档，首次写入已阻断。任务最低档为 {minimum}，"
+                    "不能降档；请先运行：\n"
+                    f"{python_path} {tracker_path} select-work-profile "
+                    f"--session {session_value} --profile {shlex.quote(str(minimum))} "
+                    "--reason '主 Agent 已按任务复杂度选择工作档'\n"
+                    "纯问答、只读搜索和只读检查不需要选档。"
+                )
     finally:
         release_lock(lock)
 
@@ -5712,6 +6086,41 @@ def cli():
         # status
         # ----------------------------------------------------
 
+        if command == "finish-check":
+            message = ""
+            remaining = list(args)
+            if "--message" in remaining:
+                index = remaining.index("--message")
+                if index + 1 >= len(remaining):
+                    print("Error: --message requires TEXT", file=sys.stderr)
+                    return 1
+                message = remaining[index + 1]
+                remaining = remaining[:index] + remaining[index + 2:]
+            if remaining:
+                print(
+                    "Error: unexpected arguments: " + " ".join(remaining),
+                    file=sys.stderr,
+                )
+                return 1
+            if not session_id:
+                try:
+                    session_id = _page_verification_module().resolve_current_session(
+                        CODEX_DIR,
+                        cwd=os.getcwd(),
+                        environ=dict(os.environ),
+                    )
+                except (AttributeError, ImportError, OSError, ValueError, TypeError):
+                    session_id = ""
+            if not session_id:
+                print(
+                    "Error: cannot resolve a unique current session; pass --session",
+                    file=sys.stderr,
+                )
+                return 1
+            result = completion_preflight(session_id, message)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result.get("ok") else 1
+
         if command == "status":
             session_id = (
                 session_id
@@ -5744,6 +6153,7 @@ def cli():
                 ("--decision", "decision"),
                 ("--source-sha256", "source_sha256"),
                 ("--reason", "reason"),
+                ("--work-profile", "work_profile"),
             ):
                 if option not in remaining:
                     continue
@@ -5778,6 +6188,7 @@ def cli():
                     values["decision"],
                     values["source_sha256"],
                     values.get("reason") or "",
+                    values.get("work_profile"),
                 )
             except ValueError as exc:
                 print(f"Error: {exc}", file=sys.stderr)
@@ -5788,6 +6199,49 @@ def cli():
                     ensure_ascii=False,
                 )
             )
+            return 0
+
+        if command == "select-work-profile":
+            values = {}
+            remaining = list(args)
+            for option, key in (
+                ("--profile", "profile"),
+                ("--reason", "reason"),
+            ):
+                if option not in remaining:
+                    continue
+                index = remaining.index(option)
+                if index + 1 >= len(remaining):
+                    print(
+                        f"Error: {option} requires a value",
+                        file=sys.stderr,
+                    )
+                    return 1
+                values[key] = remaining[index + 1]
+                remaining = remaining[:index] + remaining[index + 2:]
+            if remaining:
+                print(
+                    "Error: unexpected arguments: " + " ".join(remaining),
+                    file=sys.stderr,
+                )
+                return 1
+            if not values.get("profile"):
+                print("Error: --profile is required", file=sys.stderr)
+                return 1
+            resolved_session = (
+                session_id
+                or normalize_session_id(os.environ.get("CODEX_SESSION_ID"))
+            )
+            try:
+                result = select_task_work_profile(
+                    resolved_session,
+                    values["profile"],
+                    values.get("reason") or "",
+                )
+            except ValueError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 2
+            print(json.dumps({"ok": True, **result}, ensure_ascii=False))
             return 0
 
         # ----------------------------------------------------
@@ -6178,8 +6632,16 @@ def ensure_change_contract(state, prompt, data):
     if isinstance(data.get("change_contract"), dict) or isinstance(state.get("change_contract"), dict):
         return
     text = normalize_text(prompt)
-    ui_terms = r"UI|界面|页面|样式|骨架|按钮|滚动条|输入框|布局|颜色|组件|骨架屏|导航|卡片|弹窗|字体|图标|文字|间距|圆角|阴影|对齐|宽度|高度"
-    ui_action = r"修改|改成|改为|调整|变更|替换|设置|增加|添加|删除|缩小|放大|移动|优化|修复|复刻|change|update|adjust|resize|move"
+    ui_terms = (
+        r"UI|界面|页面|样式|骨架|按钮|滚动条|输入框|布局|颜色|组件|骨架屏|"
+        r"导航|卡片|弹窗|字体|图标|文字|间距|圆角|阴影|对齐|宽度|高度|"
+        r"点击态|点击事件|遮罩层|遮罩|轮廓|选中态|悬停态|聚焦态"
+    )
+    ui_action = (
+        r"修改|改成|改为|调整|变更|替换|设置|增加|添加|删除|缩小|放大|"
+        r"移动|优化|修复|复刻|注意|保持|保留|一致|相同|一样|"
+        r"change|update|adjust|resize|move"
+    )
     if not re.search(ui_terms, text, re.I) or not re.search(ui_action, text, re.I):
         return
     if not matches_any_pattern(text, TASK_WRITE_ACTION_PATTERNS) and not re.search(ui_action, text, re.I):
@@ -6188,7 +6650,11 @@ def ensure_change_contract(state, prompt, data):
     files = _request_files(text)
     try:
         module = _shared_script_module("change_contract")
-        scope_match = re.search(r"(.+?)(?:的)?(?:按钮|滚动条|输入框|骨架屏|骨架|组件|颜色|布局|样式)", text)
+        scope_match = re.search(
+            r"(.+?)(?:的)?(?:按钮|滚动条|输入框|骨架屏|骨架|组件|颜色|布局|样式|"
+            r"点击态|点击事件|遮罩层|遮罩|轮廓)",
+            text,
+        )
         scope = scope_match.group(0)[:160] if scope_match else ""
         contract = module.contract_for_prompt(text, workspace, files,
                                                references=["用户当前请求（具体参考待确认）"])
@@ -6324,10 +6790,16 @@ def _delivery_audit_can_activate(tracker_state, task_id, current):
     )
 
 
-def delivery_audit_begin(session_id, data, tool_name, tool_input):
-    """Track writes only when the active permission tier calls for an audit."""
+LOGIC_CHANGE_SUFFIXES = {
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".go", ".rs",
+    ".java", ".kt", ".c", ".cpp", ".h", ".sql", ".sh",
+}
+
+
+def delivery_audit_before_write(session_id, data, tool_name, tool_input):
+    """Freeze the real pre-write baseline after every gate has allowed a call."""
     if not tool_writes_files(tool_name, tool_input):
-        return
+        return None
     module = _shared_script_module("delivery_audit")
     tracker_state = read_state(session_id=session_id)
     request = str(tracker_state.get("initial_prompt") or tracker_state.get("last_prompt") or "")
@@ -6337,12 +6809,20 @@ def delivery_audit_begin(session_id, data, tool_name, tool_input):
     mode = _shared_script_module("approval_policy").load_policy(CODEX_DIR)["mode"]
     workspace = Path(str(data.get("cwd") or os.getcwd())).expanduser().resolve()
     current = module.read_state(CODEX_DIR, session_id)
-    targets = _tool_targets(tool_name, tool_input)
+    targets = [] if tool_is_shell(tool_name) else _tool_targets(tool_name, tool_input)
+    target_paths = set()
+    for value in targets:
+        path = Path(value).expanduser()
+        target_paths.add(path.resolve() if path.is_absolute() else (workspace / path).resolve())
     files = []
-    for value in list(current.get("files") or []) + targets:
+    for value in list(current.get("files") or []) + [str(path) for path in target_paths]:
         path = Path(value).expanduser()
         absolute = path.resolve() if path.is_absolute() else (workspace / path).resolve()
-        if absolute.is_file():
+        try:
+            absolute.relative_to(workspace)
+        except ValueError:
+            continue
+        if absolute.is_file() or absolute in target_paths:
             files.append(str(absolute))
     style_change = bool(re.search(
         r"颜色|圆角|按钮.*(?:方|圆)|配色|字号|字体|间距|边框|阴影|background|border-radius|font-size|padding|margin",
@@ -6355,18 +6835,45 @@ def delivery_audit_begin(session_id, data, tool_name, tool_input):
         "style_change": style_change,
     }
     if mode == "relaxed" and not style_change and not module._complex(candidate):
-        return
+        return None
+
+    gate = tracker_state.get("task_gate")
+    work_profile = gate.get("work_profile") if isinstance(gate, dict) else None
+    selected_profile = (
+        str(work_profile.get("profile") or "")
+        if isinstance(work_profile, dict)
+        else ""
+    )
+    logic_change = bool(
+        not style_change
+        and any(Path(value).suffix.lower() in LOGIC_CHANGE_SUFFIXES for value in files)
+    )
     if style_change and mode != "strict" and not module._complex(candidate):
-        module.begin(CODEX_DIR, session_id, str(workspace), request,
-                     mode=mode, files=files, task_id=task_id, style_change=True,
-                     activate=_delivery_audit_can_activate(tracker_state, task_id, current))
-        return
-    module.begin(CODEX_DIR, session_id, str(workspace), request,
-                 mode=mode, files=files, task_id=task_id,
-                 activate=_delivery_audit_can_activate(tracker_state, task_id, current))
+        return module.begin(
+            CODEX_DIR, session_id, str(workspace), request,
+            mode=mode, files=files, task_id=task_id, style_change=True,
+            work_profile=selected_profile or None, logic_change=False,
+            activate=_delivery_audit_can_activate(
+                tracker_state, task_id, current,
+            ),
+        )
+    return module.begin(
+        CODEX_DIR, session_id, str(workspace), request,
+        mode=mode, files=files, task_id=task_id,
+        work_profile=selected_profile or None, logic_change=logic_change,
+        activate=_delivery_audit_can_activate(tracker_state, task_id, current),
+    )
 
 
-def delivery_audit_completion_block(session_id, message):
+def delivery_audit_after_write(session_id):
+    """Advance only the candidate fingerprint after a successful write."""
+    module = _shared_script_module("delivery_audit")
+    if not module.read_state(CODEX_DIR, session_id):
+        return None
+    return module.refresh_candidate(CODEX_DIR, session_id)
+
+
+def delivery_audit_completion_block(session_id, message, *, mutate=True):
     try:
         tracker_state = read_state(session_id=session_id)
         if tracker_state.get("problem_status") in {"resolved", "completed", "closed"}:
@@ -6402,7 +6909,7 @@ def delivery_audit_completion_block(session_id, message):
         mode = _shared_script_module("approval_policy").load_policy(CODEX_DIR)["mode"]
         page = _page_verification_module()
         page_state = page.read_state(CODEX_DIR, session_id)
-        if page_state.get("files") and not (audit_state.get("checks") or {}).get("visual"):
+        if mutate and page_state.get("files") and not (audit_state.get("checks") or {}).get("visual"):
             visual = page_state.get("visual_review") or {}
             if visual.get("status") in {"passed", "user_review_required"}:
                 module.record_check(
@@ -6412,7 +6919,13 @@ def delivery_audit_completion_block(session_id, message):
                      "page_gate_passed": visual["status"] == "passed" and page.verify_evidence(CODEX_DIR, session_id) is None,
                      "user_review_required": visual["status"] != "passed"},
                 )
-        reason = module.completion_block(CODEX_DIR, session_id, mode, message)
+        reason = module.completion_block(
+            CODEX_DIR,
+            session_id,
+            mode,
+            message,
+            mutate=mutate,
+        )
         if reason and module.status(CODEX_DIR, session_id).get("status") != "passed":
             reason += "\n输入 /agent-audit 查看当前待办。"
         return reason
@@ -6515,6 +7028,123 @@ def pending_page_verification_reason(session_id):
         return None
 
 
+def _preflight_item(stage, code, reason, next_command=""):
+    return {
+        "stage": stage,
+        "code": code,
+        "reason": str(reason),
+        "next_command": str(next_command or ""),
+    }
+
+
+def _shared_script_path(name: str) -> str:
+    for base in (CODEX_DIR / "skills" / "agent-relay", Path(__file__).resolve().parent.parent):
+        path = base / "scripts" / f"{name}.py"
+        if path.is_file():
+            return str(path)
+    return f"scripts/{name}.py"
+
+
+def completion_preflight(session_id, message=""):
+    """Read-only finish check that returns one exact next stage, never finalizes state."""
+    gate_message = str(message or "").strip() or "验收预检：已修复、已检查并验证通过。"
+    contract_reason = change_contract_completion_block(session_id, gate_message)
+    if contract_reason:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "items": [_preflight_item(
+                "contract",
+                "change_contract_pending",
+                contract_reason,
+                "按确认卡补齐目标、边界和实际 diff 后重新验收",
+            )],
+        }
+
+    page_reason = page_completion_block_reason(session_id, gate_message)
+    if page_reason:
+        try:
+            detail = _page_verification_module().verification_preflight(
+                CODEX_DIR,
+                session_id,
+                gate_message,
+            )
+        except (AttributeError, ImportError, OSError, ValueError, TypeError):
+            detail = {}
+        if detail and not detail.get("ok"):
+            item = _preflight_item(
+                str(detail.get("phase") or "page"),
+                str(detail.get("code") or "page_verification_missing"),
+                detail.get("reason") or page_reason,
+                str(detail.get("next_command") or ""),
+            )
+        else:
+            code = (
+                "invariant_regression"
+                if "目标外" in page_reason
+                else "target_review_missing"
+            )
+            item = _preflight_item(
+                "target" if code == "target_review_missing" else "invariants",
+                code,
+                page_reason,
+                (
+                    "python3 scripts/verify_page.py --target-selector <目标选择器> --after"
+                    if code == "target_review_missing"
+                    else "python3 scripts/verify_page.py --after"
+                ),
+            )
+        return {"ok": False, "session_id": session_id, "items": [item]}
+
+    visual_reason = visual_review_block_reason(session_id, gate_message)
+    if visual_reason:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "items": [_preflight_item(
+                "visual",
+                "visual_review_missing",
+                visual_reason,
+                " ".join([
+                    "python3",
+                    shlex.quote(_shared_script_path("visual_review")),
+                    "record",
+                    "--session",
+                    shlex.quote(str(session_id)),
+                    "--home",
+                    shlex.quote(str(CODEX_DIR)),
+                ]),
+            )],
+        }
+
+    audit_reason = delivery_audit_completion_block(
+        session_id,
+        gate_message,
+        mutate=False,
+    )
+    if audit_reason:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "items": [_preflight_item(
+                "delivery_audit",
+                "delivery_audit_pending",
+                audit_reason,
+                " ".join([
+                    "python3",
+                    shlex.quote(_shared_script_path("delivery_audit")),
+                    "status",
+                    "--session",
+                    shlex.quote(str(session_id)),
+                    "--home",
+                    shlex.quote(str(CODEX_DIR)),
+                ]),
+            )],
+        }
+
+    return {"ok": True, "session_id": session_id, "items": []}
+
+
 def handle_hook_event(
     event_name,
     data,
@@ -6563,6 +7193,23 @@ def handle_hook_event(
         )
         write_tracker_log(message)
         return None
+
+    try:
+        bind_session = getattr(
+            _page_verification_module(),
+            "bind_workspace_session",
+            None,
+        )
+        if callable(bind_session):
+            bind_session(
+                CODEX_DIR,
+                session_id,
+                str(data.get("cwd") or os.getcwd()),
+                host=str(os.environ.get("AGENTRELAY_TARGET") or ""),
+                environ=dict(os.environ),
+            )
+    except (ImportError, OSError, ValueError, TypeError) as exc:
+        log_event("session_binding_error", {"error": str(exc)})
 
     if event_name == "SessionStart":
         return handle_session_start(
@@ -6655,9 +7302,12 @@ def handle_hook_event(
             session_id,
         )
         if not allowed:
+            quiet_gate = deny_reason.startswith(
+                ("[AgentRelay 回收站]", "[AgentRelay 工作档]")
+            )
             emit_pre_tool_deny(
                 deny_reason,
-                system_message=render_tool_gate_card(
+                system_message=None if quiet_gate else render_tool_gate_card(
                     tool_name,
                     tool_input,
                     deny_reason,
@@ -6666,6 +7316,17 @@ def handle_hook_event(
             return read_state(session_id=session_id)
 
         record_page_verification_edit(session_id, data, tool_name, tool_input, None, before=True)
+        try:
+            delivery_audit_before_write(session_id, data, tool_name, tool_input)
+        except (ImportError, OSError, ValueError, TypeError) as exc:
+            log_event("delivery_audit_error", {"error": str(exc)})
+            emit_pre_tool_deny(
+                "[AgentRelay 交付审计]\n"
+                "无法在首次写入前建立可靠审计基线，本次写入已阻断。"
+                "请修复损坏的审计状态或重新开始当前写任务；"
+                "在基线恢复前不能修改工作区。"
+            )
+            return read_state(session_id=session_id)
         return handle_pre_tool_use(
             tool_name=tool_name,
             tool_input=tool_input,
@@ -6683,10 +7344,11 @@ def handle_hook_event(
         tool_output = extract_tool_output(data)
         if event_name == "PostToolUse":
             record_page_verification_edit(session_id, data, tool_name, tool_input, tool_output)
-            try:
-                delivery_audit_begin(session_id, data, tool_name, tool_input)
-            except (ImportError, OSError, ValueError, TypeError) as exc:
-                log_event("delivery_audit_error", {"error": str(exc)})
+            if tool_writes_files(tool_name, tool_input):
+                try:
+                    delivery_audit_after_write(session_id)
+                except (ImportError, OSError, ValueError, TypeError) as exc:
+                    log_event("delivery_audit_error", {"error": str(exc)})
             contract_reason = change_contract_post_tool_block(session_id, tool_name, tool_input)
             if contract_reason:
                 emit_hook_context("PostToolUse", contract_reason)

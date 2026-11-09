@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -204,6 +205,120 @@ class PageEvidenceTests(unittest.TestCase):
         page_verification.write_state(self.home, self.session, state)
         self.assertIn("cleanup", page_verification.verify_evidence(self.home, self.session))
 
+    def test_current_session_resolution_is_conservative(self):
+        self.assertEqual(
+            page_verification.resolve_current_session(
+                self.home,
+                cwd=str(self.workspace),
+                environ={"CODEX_THREAD_ID": "environment-session"},
+            ),
+            "environment-session",
+        )
+        self.assertEqual(
+            page_verification.resolve_current_session(
+                self.home,
+                cwd=str(self.workspace),
+                environ={
+                    "CODEX_THREAD_ID": "codex-session",
+                    "CLAUDE_SESSION_ID": "claude-session",
+                },
+            ),
+            "",
+        )
+
+    def test_workspace_binding_resolves_one_session_and_rejects_ambiguity(self):
+        page_verification.bind_workspace_session(
+            self.home,
+            "workspace-session-one",
+            str(self.workspace),
+            environ={},
+        )
+        self.assertEqual(
+            page_verification.resolve_current_session(
+                self.home,
+                cwd=str(self.workspace),
+                environ={},
+            ),
+            "workspace-session-one",
+        )
+
+        page_verification.bind_workspace_session(
+            self.home,
+            "workspace-session-two",
+            str(self.workspace),
+            environ={},
+        )
+        self.assertEqual(
+            page_verification.resolve_current_session(
+                self.home,
+                cwd=str(self.workspace),
+                environ={},
+            ),
+            "",
+        )
+
+    def test_browser_pass_points_to_visual_review_without_rerunning_chromium(self):
+        self.edit()
+        screenshot = (
+            self.home / "agent_relay_tracker/page-verification"
+            / self.session / "evidence/desktop.png"
+        )
+        screenshot.parent.mkdir(parents=True, exist_ok=True)
+        screenshot.write_bytes(b"placeholder evidence")
+        state = page_verification.read_state(self.home, self.session)
+        state["verification"] = {
+            "status": "passed",
+            "browser": "chromium",
+            "screenshots": [str(screenshot)],
+            "files": state["files"],
+            "url": self.page.as_uri(),
+        }
+        page_verification.write_state(self.home, self.session, state)
+
+        detail = page_verification.verification_preflight(
+            self.home, self.session, "页面已完成，验证通过。",
+        )
+        self.assertFalse(detail["ok"])
+        self.assertEqual(detail["code"], "visual_review_missing")
+        self.assertEqual(detail["phase"], "visual")
+        self.assertIn("visual_review.py record", detail["next_command"])
+        self.assertNotIn("verify_page.py", detail["next_command"])
+
+        state = page_verification.read_state(self.home, self.session)
+        state["visual_review"] = {"status": "passed"}
+        page_verification.write_state(self.home, self.session, state)
+        detail = page_verification.verification_preflight(
+            self.home, self.session, "页面已完成，验证通过。",
+        )
+        self.assertFalse(detail["ok"])
+        self.assertEqual(detail["code"], "screenshot_cleanup_missing")
+        self.assertEqual(detail["phase"], "cleanup")
+        self.assertIn("visual_review.py cleanup", detail["next_command"])
+
+    def test_verify_page_auto_resolves_current_host_session(self):
+        self.page.write_text("<button>查询</button><input value=''>", encoding="utf-8")
+        env = {**os.environ, "CODEX_HOME": str(self.home)}
+        for key in page_verification.SESSION_ENV_KEYS:
+            env.pop(key, None)
+        env["CODEX_THREAD_ID"] = "auto-session"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(PROJECT_ROOT / "scripts" / "verify_page.py"),
+                "--url", self.page.as_uri(),
+                "--no-screenshots",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["session_id"], "auto-session")
+        state = page_verification.read_state(self.home, "auto-session")
+        self.assertEqual(state["verification"]["status"], "passed")
+
     def test_non_page_and_honest_unverified_messages_do_not_claim_completion(self):
         self.assertFalse(page_verification.completion_claim("后端已完成，测试通过"))
         self.assertFalse(page_verification.completion_claim("页面已修改；未验证"))
@@ -285,6 +400,32 @@ class PageEvidenceTests(unittest.TestCase):
         interaction = next(item for item in result["nonvisual_checks"] if item["check"] == "interaction")
         self.assertTrue(interaction["passed"])
         self.assertIn("只读或不可填写控件", interaction["actual"])
+
+    def test_visual_settle_waits_for_finite_animations_before_screenshot(self):
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                page = browser.new_page()
+                page.set_content(
+                    """
+                    <style>
+                      @keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
+                      #target { opacity: 0; animation: fade-in 180ms linear both }
+                    </style>
+                    <div id="target">ready</div>
+                    """
+                )
+                page_verification.wait_for_visual_settle(page)
+                self.assertEqual(
+                    page.locator("#target").evaluate(
+                        "element => getComputedStyle(element).opacity"
+                    ),
+                    "1",
+                )
+            finally:
+                browser.close()
 
     def test_bash_page_change_uses_worktree_delta(self):
         subprocess.run(["git", "init", "-q"], cwd=self.workspace, check=True)
@@ -504,10 +645,32 @@ class HookPageGateTests(unittest.TestCase):
         denied = self.run_hook("Stop", last_assistant_message="页面已完成，验证通过。")
         self.assertEqual(denied["decision"], "block")
         self.assertIn("页面验证门禁", denied["reason"])
+        self.assertIn(
+            "下一步：python3 scripts/verify_page.py --session hook-page",
+            denied["reason"],
+        )
+        self.assertNotIn("控制台、主要导航、主题和桌面/移动截图", denied["reason"])
         PageEvidenceTests.pass_evidence(self)
         allowed = self.run_hook("Stop", last_assistant_message="页面已完成，验证通过。")
         self.assertNotEqual(allowed.get("reason", ""), denied["reason"])
         self.assertNotIn("页面验证门禁", allowed.get("reason", ""))
+
+    def test_hook_event_persists_workspace_session_binding(self):
+        self.run_hook("SessionStart")
+        bindings = json.loads(
+            page_verification.session_bindings_path(self.home).read_text(
+                encoding="utf-8",
+            )
+        )["bindings"]
+        self.assertTrue(any(
+            item["session_id"] == self.session
+            and item["workspace"] == str(self.workspace.resolve())
+            for item in bindings
+        ))
+
+    def test_stop_normal_allow_is_silent(self):
+        result = self.run_hook("Stop", last_assistant_message="本轮没有新的写任务。")
+        self.assertEqual(result, {})
 
     def test_hook_blocks_original_one_quadrant_claim_from_becoming_full_visual_pass(self):
         self.run_hook("PostToolUse", tool_name="Edit", tool_use_id="edit-quadrants",

@@ -198,8 +198,8 @@ class PrepareImageTests(unittest.TestCase):
         Image.new("RGB", (3000, 2000), (200, 30, 30)).save(path)
         send_path, compressed = agent_image.prepare_image(path)
         self.assertTrue(compressed)
-        self.assertLessEqual(max(Image.open(send_path).size),
-                             agent_image.MAX_IMAGE_DIMENSION)
+        with Image.open(send_path) as image:
+            self.assertLessEqual(max(image.size), agent_image.MAX_IMAGE_DIMENSION)
 
 
 class GptImageDefaultTests(unittest.TestCase):

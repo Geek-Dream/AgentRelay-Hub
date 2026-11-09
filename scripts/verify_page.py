@@ -103,6 +103,7 @@ def _check_page(page, output: Path, target_selector: str = "", expected: dict[st
             page.wait_for_function("document.documentElement.dataset.theme === 'light'")
             page.wait_for_timeout(500)
             light = output / "config-light.png"
+            page_verification.wait_for_visual_settle(page)
             page.screenshot(path=str(light), full_page=True)
             screenshots.append(str(light))
             page.locator('[data-tab="web"]').click()
@@ -114,11 +115,13 @@ def _check_page(page, output: Path, target_selector: str = "", expected: dict[st
             page.wait_for_function("document.documentElement.dataset.theme === 'dark'")
             page.wait_for_timeout(700)
             form = output / "config-web-form.png"
+            page_verification.wait_for_visual_settle(page)
             page.screenshot(path=str(form), full_page=True)
             screenshots.append(str(form))
             page.locator('[data-tab="overview"]').click()
         if screenshots_enabled:
             target = output / f"config-{name}.png"
+            page_verification.wait_for_visual_settle(page)
             page.screenshot(path=str(target), full_page=True)
             if not target.is_file() or target.stat().st_size < 1000:
                 errors.append(f"{name}: screenshot missing or empty")
@@ -232,7 +235,7 @@ def _config_page() -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--session", help="bind evidence to this Hook session")
+    parser.add_argument("--session", help="bind evidence to this Hook session (auto-detected when omitted)")
     parser.add_argument("--url", help="existing local page; default renders current config_web.py")
     parser.add_argument("--output", type=Path, help="evidence directory (session mode has a safe default)")
     parser.add_argument("--target-selector", default="", help="CSS selector of the element being changed")
@@ -241,13 +244,26 @@ def main() -> int:
     parser.add_argument("--invariant", action="append", default=[], help="CSS selector of an outside element that must not change")
     parser.add_argument("--no-screenshots", action="store_true", help="nonvisual mode: real Chromium checks without images")
     args = parser.parse_args()
+    codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser().resolve()
+    if not args.session and not args.output:
+        args.session = page_verification.resolve_current_session(
+            codex_home,
+            cwd=os.getcwd(),
+            environ=os.environ,
+        )
     if args.session:
-        codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser().resolve()
+        args.session = page_verification._valid_session_id(args.session)
+        if not args.session:
+            parser.error("--session must contain only letters, numbers, '-' or '_'")
+    if args.session:
         output = args.output or codex_home / "agent_relay_tracker" / "page-verification" / args.session / "evidence"
     elif args.output:
         output = args.output
     else:
-        parser.error("standalone checks require --output")
+        parser.error(
+            "cannot resolve a unique current Hook session; pass --session SESSION_ID "
+            "or use standalone mode with --output"
+        )
     output.mkdir(parents=True, exist_ok=True)
     errors: list[str] = []
     screenshots: list[str] = []
@@ -308,6 +324,7 @@ def main() -> int:
     except Exception as exc:  # The JSON failure is the deliverable; never claim a skipped check passed.
         errors.append(f"{type(exc).__name__}: {exc}")
     result = {"status": "failed" if errors else "passed", "browser": browser_name,
+              "session_id": args.session or "",
               "screenshots": screenshots, "errors": errors, "checked_at": time.time(),
               "url": args.url or "", "visual_review_required": True}
     if args.session:

@@ -1,3 +1,92 @@
+# PLAN — 工作档、五栏确认与证据闭环升级（2026-11-09）
+
+## 用户已明确批准
+吸收 flow 的接地气确认、五栏需求卡和 RED→GREEN，吸收 gstack 的严格证据闭环与
+scope drift 审查；保留 AgentRelay 的 Fusion 协同和审查官模式。不复制 gstack 的 Bun、
+Hook 全家桶、遥测、自动更新或 100+ Skill 重流程，也不改外部参考项目目录。
+
+## 设计与范围
+- 新增 `light`、`standard`、`strict`、`user_required` 四种工作档；所有实际写任务必须显式
+  选档。纯问答、搜索和只读检查不建档、不弹卡；用户要求“必须检查/完整审查/必须测试”时
+  强制 `user_required`，Agent 不能降档。
+- `light` 不显示确认卡，但保留最小真实证据；复杂、共享、高风险或严格档使用五栏卡：
+  `现象`、`期望`、`定位`、`边界`、`疑点`。疑点必须带推荐方案。
+- 逻辑修改必须记录修改前指纹上的真实 RED（非零退出）和当前 candidate 指纹上的真实
+  GREEN（零退出，包含测试数量）；缺少或指纹不匹配时阻断完成声明。
+- 评审证据冻结 candidate 指纹；评审后继续修改则标记 `stale`。canonical scope drift 状态
+  统一为 `DONE`、`PARTIAL`、`NOT_DONE`、`CHANGED`、`UNVERIFIABLE`，并要求完整覆盖。
+- 审计在首次真实写入前建立基线；Hook 继续负责门禁，不在 `PostToolUse` 事后补造修改前状态。
+- Skill 采用一个 router 加少量按需 references，避免复制 gstack 的高认知成本流程。
+
+## 实施与验证
+- 先写失败测试，再实现工作档、五栏 schema、RED→GREEN、评审指纹、scope drift 和前移基线。
+- 同步 `delivery_audit.py`、`approval_policy.py`、`change_contract.py`、Hook、Skill
+  references 与 `install.py` 安装清单。
+- 运行专项测试、完整 unittest、`py_compile`、`git diff --check` 和 Skill 校验；真实 Fusion
+  成功结果才能登记独立复核，失败时继续本地验收并如实记录。
+- 检查桌面既有卡片说明 HTML，保留用户文件；需要补充时生成新文件而不覆盖未知内容。
+- 不提交、不推送；保留工作区已有未提交改动。
+
+## 状态
+- [x] 工作档与五栏确认卡 schema；真实写入必须显式选档，旧任务批准会派生并落盘最低档。
+- [x] RED→GREEN、candidate 指纹与 stale 评审。
+- [x] canonical scope drift 与完整覆盖。
+- [x] 首次写入前审计基线、Skill references 和安装清单。
+- [x] 专项与完整回归通过：488 项通过、1 项跳过；`py_compile` 与 `git diff --check` 通过。
+- [x] 桌面卡片说明 HTML 已核验：桌面 1440×1000、移动 390×844 均完整渲染；
+  页面无横向溢出、锚点缺失、空白段或正文裁切，移动端宽表使用局部横向滚动。
+- [x] Codex、Claude、Hermes 安装同步与宿主验证通过；活动 Tracker 和
+  `approval_policy.py`/shim 已核对到新实现。
+- [x] README 已改为白话新手教程；删除过期模拟报告和演示脚本，保留正式 `tests/`，
+  并统一 CI/开发文档到 pytest 完整测试入口。
+- [x] 页面截图前增加有限动画稳定等待，修复主题切换期间截图发暗的问题。
+- Fusion 独立复核未形成结论：首次 `FUSION_STEP_LIMIT`，缩窄范围后
+  `FUSION_PROVIDER_CALL_FAILED`（读取超时）；没有把它登记为已复核。
+- 本轮提交和推送状态以最终 Git 记录为准；未验证 Claude/Hermes 真机交互与 Windows 真机。
+
+---
+
+# PLAN — 统一审批配置下的回收站删除策略（2026-11-06）
+
+## 用户已明确批准
+复用 `/agent-approval` 三档，不新增配置；默认/strict 回收站，relaxed 简单删除可直删，临时证据不显示多余卡片。
+
+## 范围与验证
+- 仅明确命名的临时证据在 standard 下静默回收；普通项目/长期/用户文件仍审批，strict 也仅回收。
+- 回收站保留 manifest 和恢复路径；不处理符号链接/通配符/危险链，不将 /tmp 一律视为可删。
+- relaxed 仅简单 rm/rmdir/unlink 直删，Git/部署等危险行为仍门禁。
+- 已验证真实 Hook→受控回收命令→文件回收，完整回归 463 项通过、1 跳过。
+- 已修复删除模块缺失导致无关 Git 危险卡静默失效；保留现有卡片布局与未提交改动。
+
+## 状态
+- [x] 实现删除策略、安装清单、隔离测试与文档。
+- [x] 同步安装副本并核对真实权限未改变；未提交、未推送。
+- [x] 最终完整回归 463 项通过、1 跳过；实际 Claude shim 静默回收、manifest 生成、真实 standard 未改变。
+- 未验证：系统原生回收站（当前使用 AgentRelay 可恢复回收目录）、Windows 真机。
+
+---
+
+# PLAN — 少打扰、幂等委派与授权版本绑定（2026-11-06）
+
+## 用户已明确批准
+按参考项目建议实现，不引入外部框架；保留当前卡片布局及未提交修改，不提交、不推送。
+
+## 范围与验证
+- 同一任务同一失败只提醒一次，显示可读的待验收/可重试/Provider 暂不可用状态。
+- Fusion 以稳定 request ID 记录委派、投递和结果；重复触发复用结果，异常中断不自动重试，仅显式 retry。
+- 批准保存权限模式与范围；恢复时策略收紧或范围变化必须重新确认，既有危险命令和 diff 门禁不变。
+- 先补失败测试，再实现；运行专项与完整 unittest、py_compile、diff check，并同步安装副本。
+
+## 状态
+- [x] 实现并验证幂等委派、提醒去重与授权版本绑定。
+- [x] 完整 unittest 452 项通过、1 跳过；py_compile、diff check 通过。
+- [x] 真实 Fusion 同一请求两次调用返回同一 request ID，第二次 deduplicated=true，未再次请求 Provider。
+- [x] 真实 boos-api 返回唯一投递标记 AR-PROVIDER-1793948397；三次调用实际 Provider 请求 2 次，同请求去重且不同 request ID 独立投递成功。
+- [x] 已备份同步各宿主安装副本；未提交、未推送。
+- 未验证：真实 Provider 故障恢复、Windows/Hermes 真机；不伪造自动恢复或独立审查通过。
+
+---
+
 # PLAN — 清理、完整回归与 GitHub 发布（2026-11-05）
 
 ## 用户已明确批准

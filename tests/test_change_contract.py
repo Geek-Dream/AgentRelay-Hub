@@ -144,6 +144,41 @@ class ContractTests(unittest.TestCase):
         self.assertIn("导出按钮位置", fields["禁止副作用"])
         self.assertIn("B/C 模块", fields["不变验收"])
 
+    def test_five_column_card_requires_complete_fields_and_recommendations(self):
+        card = {
+            "phenomenon": "导出按钮点击后没有显示遮罩。",
+            "expected": "点击后显示与参考图一致的遮罩，其他区域不变。",
+            "location": "订单页导出按钮及遮罩组件，只读定位后再写入。",
+            "boundary": "仅允许修改 page.css；公共组件和兄弟元素保持冻结。",
+            "doubts": [{
+                "question": "遮罩是否复用现有公共组件？",
+                "recommendation": "先检索现有遮罩实现并复用；没有可复用实现时重新确认。",
+            }],
+        }
+        cc.validate_confirmation_card(card)
+        fields = dict(cc.confirmation_card_fields(card))
+        self.assertEqual(list(fields), ["现象", "期望", "定位", "边界", "疑点"])
+        self.assertIn("推荐方案", fields["疑点"])
+
+        missing = dict(card)
+        missing["expected"] = ""
+        with self.assertRaisesRegex(ValueError, "期望"):
+            cc.validate_confirmation_card(missing)
+        unsupported = dict(card, doubts=[{"question": "是否复用？", "recommendation": ""}])
+        with self.assertRaisesRegex(ValueError, "推荐方案"):
+            cc.validate_confirmation_card(unsupported)
+
+    def test_confirmation_card_draft_never_invents_precise_code_location(self):
+        card = cc.draft_confirmation_card(
+            "修改导出按钮颜色", allowed_files=["page.css"],
+            modules=["导出按钮"], profile="strict",
+        )
+        cc.validate_confirmation_card(card)
+        fields = dict(cc.confirmation_card_fields(card))
+        self.assertIn("导出按钮", fields["现象"])
+        self.assertIn("只读定位", fields["定位"])
+        self.assertIn("推荐方案", fields["疑点"])
+
     def test_strict_is_default_and_card_contains_all_boundaries(self):
         contract = self.contract()
         self.assertEqual(contract["mode"], "strict")
@@ -370,6 +405,7 @@ class HookContractTests(unittest.TestCase):
                 "--session", self.session,
                 "--decision", "approve",
                 "--source-sha256", match.group(1),
+                "--work-profile", "light",
                 "--reason", "主 Agent 结合确认卡和完整上下文判断用户已批准",
             ],
             text=True,

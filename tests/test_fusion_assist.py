@@ -34,10 +34,10 @@ class FusionAssistTests(unittest.TestCase):
 
     def test_failure_notice_is_bounded_and_main_agent_continues(self):
         for index in range(4):
-            state = assist.record_result(self.home, self.session, {"status": "failed", "error": "API_EXPIRED"})
+            state = assist.record_result(self.home, self.session, {"status": "failed", "error": f"API_EXPIRED_{index}"})
             self.assertEqual(state["failure_notices"], min(index + 1, 3))
             self.assertEqual(state["should_notify"], index < 3)
-        self.assertEqual(assist.read_state(self.home, self.session)["notice"], "")
+        self.assertEqual(assist.read_state(self.home, self.session)["should_notify"], False)
 
     def test_unconfigured_provider_is_silent_and_does_not_count_failure(self):
         state = assist.record_result(self.home, self.session, {
@@ -49,6 +49,43 @@ class FusionAssistTests(unittest.TestCase):
         state = assist.record_result(self.home, self.session, {"status": "success", "answer": "independent review"})
         self.assertEqual(state["result"]["answer"], "independent review")
         self.assertIn("独立验收", state["notice"])
+
+    def test_same_failure_is_only_notified_once_and_has_actionable_state(self):
+        result = {"status": "failed", "error": "PROVIDER_TIMEOUT", "message": "read timeout"}
+        first = assist.record_result(self.home, self.session, result)
+        second = assist.record_result(self.home, self.session, result)
+        self.assertTrue(first["should_notify"])
+        self.assertFalse(second["should_notify"])
+        self.assertEqual(second["display_state"], "retryable")
+        self.assertIn("可重试", second["notice"])
+        self.assertEqual(second["failure_notices"], 1)
+
+    def test_delegate_reuses_success_for_same_request_without_second_provider_call(self):
+        result = {"status": "success", "answer": "review", "session_id": "fusion-real"}
+        with mock.patch.object(assist, "_invoke", return_value=result) as invoke:
+            first = assist.delegate(self.home, self.session, "复核测试", workspace=str(self.home))
+            second = assist.delegate(self.home, self.session, "复核测试", workspace=str(self.home))
+        self.assertEqual(first["request_id"], second["request_id"])
+        self.assertTrue(second["deduplicated"])
+        invoke.assert_called_once()
+        self.assertEqual(assist.read_state(self.home, self.session)["delivery_state"], "completed")
+
+    def test_interrupted_request_does_not_automatically_call_provider_again(self):
+        state = assist.begin_request(self.home, self.session, "复核测试", workspace=str(self.home))
+        with mock.patch.object(assist, "_invoke") as invoke:
+            recovered = assist.delegate(self.home, self.session, "复核测试", workspace=str(self.home))
+        self.assertEqual(recovered["error"], "FUSION_RETRY_REQUIRED")
+        self.assertEqual(recovered["request_id"], state["request_id"])
+        invoke.assert_not_called()
+        self.assertEqual(assist.read_state(self.home, self.session)["delivery_state"], "interrupted")
+
+    def test_explicit_retry_uses_same_request_and_replaces_failure(self):
+        interrupted = assist.begin_request(self.home, self.session, "复核测试", workspace=str(self.home))
+        with mock.patch.object(assist, "_invoke", return_value={"status": "success", "answer": "done"}) as invoke:
+            result = assist.delegate(self.home, self.session, "复核测试", workspace=str(self.home), retry=True)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["request_id"], interrupted["request_id"])
+        invoke.assert_called_once()
 
     def test_actual_delegate_uses_existing_cli_and_records_result(self):
         script = self.home / "skills" / "agent-fusion" / "scripts" / "agent_fusion.py"

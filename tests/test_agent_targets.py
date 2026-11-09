@@ -189,6 +189,27 @@ class ClaudeRegistrationTests(unittest.TestCase):
             self.assertIsNotNone(targets.find_agent_relay_hook(config["hooks"][event]))
         self.assertIn("PreToolUse", config["hooks"])
 
+    def test_registered_in_config_requires_explicit_claude_target(self):
+        venv = Path("/venv/bin/python")
+        shim = self.tmp / "agentrelay_hook_shim.py"
+        meta = {"config_path": self.settings, "level": "full"}
+
+        targets.register_claude(
+            self.settings, "python /old/hooks/agent_relay_hook.py"
+        )
+        ok, detail = targets.registered_in_config(
+            "claude", meta, venv, shim
+        )
+        self.assertFalse(ok)
+        self.assertIn("--target claude", detail)
+
+        command = targets.shim_command(venv, shim, "claude")
+        self.assertTrue(targets.register_claude(self.settings, command))
+        ok, detail = targets.registered_in_config(
+            "claude", meta, venv, shim
+        )
+        self.assertTrue(ok, detail)
+
 
 @unittest.skipUnless(HAS_YAML, "PyYAML 未安装")
 class HermesRegistrationTests(unittest.TestCase):
@@ -288,6 +309,22 @@ class ShimProtocolTests(unittest.TestCase):
             {"context": "候选提醒"},
         )
 
+    def test_translate_hermes_preserves_visible_system_message(self):
+        stdout = json.dumps({
+            "systemMessage": "「AgentRelay · 需求确认卡」",
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": "等待用户明确批准",
+            },
+        })
+        self.assertEqual(
+            json.loads(shim.translate_output(stdout, "hermes")),
+            {
+                "context": "等待用户明确批准",
+                "systemMessage": "「AgentRelay · 需求确认卡」",
+            },
+        )
+
     def test_translate_hermes_passthrough_stop_block(self):
         stdout = json.dumps({"decision": "block", "reason": "继续处理"})
         self.assertEqual(
@@ -349,6 +386,19 @@ class PiExtensionTests(unittest.TestCase):
         self.assertFalse(targets.write_pi_extension(
             extension, Path("/venv/bin/python"), Path("/skill/scripts/agentrelay_hook_shim.py"),
         ))
+
+    def test_registration_requires_explicit_pi_target(self):
+        tmp = Path(tempfile.mkdtemp(prefix="agentrelay-pi-registration-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        extension = tmp / "extensions" / "agent-relay.ts"
+        targets.write_pi_extension(
+            extension,
+            Path("/venv/bin/python"),
+            Path("/skill/scripts/agentrelay_hook_shim.py"),
+        )
+        meta = {"config_path": extension, "level": "full"}
+        ok, detail = targets.registered_in_config("pi", meta, None, None)
+        self.assertTrue(ok, detail)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js 未安装")
     def test_generated_extension_registers_and_executes_fusion_tool(self):
@@ -573,6 +623,17 @@ class RelayPythonTests(unittest.TestCase):
 
 
 class CodexVerifyTests(unittest.TestCase):
+    def test_visible_card_protocol_rejects_plain_agentrelay_reminders(self):
+        reminder = json.dumps({
+            "systemMessage": "AgentRelay archive reminder",
+        })
+        card = json.dumps({
+            "systemMessage": "「需求卡」\n- 任务：修改配置\n1. 确认审批",
+        })
+
+        self.assertFalse(targets.visible_card_in_stdout(reminder))
+        self.assertTrue(targets.visible_card_in_stdout(card))
+
     def test_verify_codex_target_in_temp_home(self):
         tmp = Path(tempfile.mkdtemp(prefix="agentrelay-verify-test-"))
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -613,9 +674,140 @@ class CodexVerifyTests(unittest.TestCase):
                 tmp,
             )
         results = {check["name"]: check for check in checks}
-        for name in ("Skill 文件", "Fusion Skill", "Hook 配置", "Hook 干跑", "Tracker 状态"):
+        for name in (
+            "Skill 文件", "Fusion Skill", "Hook 配置", "Hook 干跑",
+            "可见卡协议", "Tracker 状态",
+        ):
             self.assertIn(name, results)
             self.assertTrue(results[name]["ok"], f"{name}: {results[name]['detail']}")
+
+    def test_verify_claude_requires_a_visible_card_protocol(self):
+        tmp = Path(tempfile.mkdtemp(prefix="agentrelay-claude-verify-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        skill_dir = tmp / "skills" / "agent-relay"
+        (skill_dir / "scripts").mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# AgentRelay", encoding="utf-8")
+        (skill_dir / "scripts" / "agent_relay.py").write_text("", encoding="utf-8")
+        fusion_dir = tmp / "skills" / "agent-fusion"
+        (fusion_dir / "scripts").mkdir(parents=True)
+        (fusion_dir / "SKILL.md").write_text("# AgentFusion", encoding="utf-8")
+        (fusion_dir / "scripts" / "agent_fusion.py").write_text("", encoding="utf-8")
+        (fusion_dir / "scripts" / "fusion_mode.py").write_text("", encoding="utf-8")
+        (fusion_dir / "scripts" / "fusion_runner.py").write_text("", encoding="utf-8")
+        settings = tmp / "settings.json"
+        shim = PROJECT_ROOT / "scripts" / "agentrelay_hook_shim.py"
+        command = targets.shim_command(Path(sys.executable), shim, "claude")
+        targets.register_claude(settings, command)
+        meta = {
+            "id": "claude", "label": "Claude Code", "level": "full",
+            "skill_dir": skill_dir, "hook_dir": tmp / "hooks",
+            "config_path": settings,
+        }
+
+        checks = targets.verify_target(
+            "claude", meta, Path(sys.executable),
+            PROJECT_ROOT / "hooks" / "agent_relay_hook.py",
+            shim,
+            PROJECT_ROOT / "hooks" / "agent_relay_tracker.py",
+            PROJECT_ROOT,
+        )
+        results = {check["name"]: check for check in checks}
+        self.assertTrue(results["Hook 配置"]["ok"], results["Hook 配置"]["detail"])
+        self.assertTrue(results["可见卡协议"]["ok"], results["可见卡协议"]["detail"])
+
+    def test_verify_pi_requires_a_visible_card_protocol(self):
+        tmp = Path(tempfile.mkdtemp(prefix="agentrelay-pi-verify-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        skill_dir = tmp / "skills" / "agent-relay"
+        (skill_dir / "scripts").mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# AgentRelay", encoding="utf-8")
+        (skill_dir / "scripts" / "agent_relay.py").write_text("", encoding="utf-8")
+        fusion_dir = tmp / "skills" / "agent-fusion"
+        (fusion_dir / "scripts").mkdir(parents=True)
+        (fusion_dir / "SKILL.md").write_text("# AgentFusion", encoding="utf-8")
+        (fusion_dir / "scripts" / "agent_fusion.py").write_text("", encoding="utf-8")
+        (fusion_dir / "scripts" / "fusion_mode.py").write_text("", encoding="utf-8")
+        (fusion_dir / "scripts" / "fusion_runner.py").write_text("", encoding="utf-8")
+        extension = tmp / "extensions" / "agent-relay.ts"
+        shim = PROJECT_ROOT / "scripts" / "agentrelay_hook_shim.py"
+        targets.write_pi_extension(extension, Path(sys.executable), shim)
+        meta = {
+            "id": "pi", "label": "Pi", "level": "full",
+            "skill_dir": skill_dir, "hook_dir": tmp / "hooks",
+            "config_path": extension,
+        }
+
+        checks = targets.verify_target(
+            "pi", meta, Path(sys.executable),
+            PROJECT_ROOT / "hooks" / "agent_relay_hook.py",
+            shim,
+            PROJECT_ROOT / "hooks" / "agent_relay_tracker.py",
+            PROJECT_ROOT,
+        )
+        results = {check["name"]: check for check in checks}
+        self.assertTrue(results["Hook 配置"]["ok"], results["Hook 配置"]["detail"])
+        self.assertTrue(results["可见卡协议"]["ok"], results["可见卡协议"]["detail"])
+
+    def test_verify_hermes_preserves_visible_card_protocol(self):
+        tmp = Path(tempfile.mkdtemp(prefix="agentrelay-hermes-verify-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        skill_dir = tmp / "skills" / "agent-relay"
+        (skill_dir / "scripts").mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("# AgentRelay", encoding="utf-8")
+        (skill_dir / "scripts" / "agent_relay.py").write_text("", encoding="utf-8")
+        fusion_dir = tmp / "skills" / "agent-fusion"
+        (fusion_dir / "scripts").mkdir(parents=True)
+        (fusion_dir / "SKILL.md").write_text("# AgentFusion", encoding="utf-8")
+        (fusion_dir / "scripts" / "agent_fusion.py").write_text("", encoding="utf-8")
+        (fusion_dir / "scripts" / "fusion_mode.py").write_text("", encoding="utf-8")
+        (fusion_dir / "scripts" / "fusion_runner.py").write_text("", encoding="utf-8")
+        config = tmp / "config.yaml"
+        config.write_text(
+            "hooks:\n" + "\n".join(
+                f"  {event}:\n    - command: \"{targets.shim_command(Path(sys.executable), PROJECT_ROOT / 'scripts/agentrelay_hook_shim.py', 'hermes', canonical)}\""
+                for event, canonical in targets.HERMES_EVENTS.items()
+            ) + "\n",
+            encoding="utf-8",
+        )
+        meta = {
+            "id": "hermes", "label": "Hermes", "level": "full",
+            "skill_dir": skill_dir, "hook_dir": tmp / "hooks", "config_path": config,
+        }
+        checks = targets.verify_target(
+            "hermes", meta, Path(sys.executable),
+            PROJECT_ROOT / "hooks" / "agent_relay_hook.py",
+            PROJECT_ROOT / "scripts" / "agentrelay_hook_shim.py",
+            PROJECT_ROOT / "hooks" / "agent_relay_tracker.py",
+            PROJECT_ROOT,
+        )
+        results = {check["name"]: check for check in checks}
+        self.assertTrue(results["可见卡协议"]["ok"], results["可见卡协议"]["detail"])
+
+    def test_verify_pi_rejects_missing_prompt_notification(self):
+        tmp = Path(tempfile.mkdtemp(prefix="agentrelay-pi-negative-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        extension = tmp / "extensions" / "agent-relay.ts"
+        targets.write_pi_extension(extension, Path(sys.executable), PROJECT_ROOT / "scripts/agentrelay_hook_shim.py")
+        original = subprocess.run
+
+        def missing_prompt_card(command, *args, **kwargs):
+            result = original(command, *args, **kwargs)
+            if command[0].endswith("node"):
+                result.stdout = json.dumps({
+                    "promptCard": False, "toolCard": True, "blocked": True,
+                    "notifications": ["危险操作确认卡"],
+                })
+            return result
+
+        with patch.object(targets.subprocess, "run", side_effect=missing_prompt_card):
+            ok, detail = targets.verify_pi_visible_cards(
+                extension, main_hook=PROJECT_ROOT / "hooks/agent_relay_hook.py",
+                shim_path=PROJECT_ROOT / "scripts" / "agentrelay_hook_shim.py",
+                workspace=PROJECT_ROOT, isolated_home=tmp,
+                venv_python=Path(sys.executable), session_id="negative-pi",
+            )
+        self.assertFalse(ok)
+        self.assertIn("需求卡", detail)
 
     def test_verify_reports_missing_registration(self):
         tmp = Path(tempfile.mkdtemp(prefix="agentrelay-verify-missing-"))

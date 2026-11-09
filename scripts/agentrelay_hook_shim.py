@@ -9,7 +9,8 @@
 1. 读取 stdin 的 Hook payload，注入缺失的 hook_event_name（Hermes 的 payload
    不带事件名，事件来自注册时的 --event 参数）。
 2. 调用主 Hook（$CODEX_HOME/hooks/agent_relay_hook.py）透传 payload。
-3. 按目标协议翻译 stdout：Hermes 需要 {"context": ...}，其余原样透传。
+3. 按目标协议翻译 stdout：Hermes 使用 {"context": ...}，并可保留顶层
+   systemMessage 供宿主展示确认卡；其余原样透传。
 """
 
 from __future__ import annotations
@@ -92,9 +93,10 @@ def translate_output(stdout_text: str, target: str) -> str:
         return stdout_text
     output = payload.get("hookSpecificOutput")
     if isinstance(output, dict) and isinstance(output.get("additionalContext"), str):
-        return json.dumps(
-            {"context": output["additionalContext"]}, ensure_ascii=False
-        )
+        translated = {"context": output["additionalContext"]}
+        if isinstance(payload.get("systemMessage"), str) and payload["systemMessage"].strip():
+            translated["systemMessage"] = payload["systemMessage"]
+        return json.dumps(translated, ensure_ascii=False)
     # Stop 的 {"decision": "block", "reason": ...} 与 Hermes 兼容，原样透传。
     return stdout_text
 

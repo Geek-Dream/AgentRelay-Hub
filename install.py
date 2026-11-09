@@ -82,6 +82,7 @@ SCRIPT_FILES = (
     "config_manager.py",
     "config_web.py",
     "approval_policy.py",
+    "deletion_policy.py",
     "delivery_audit.py",
     "change_contract.py",
     "page_verification.py",
@@ -97,7 +98,13 @@ SCRIPT_FILES = (
     "fusion_assist.py",
 )
 CONFIG_FILES = ("model_registry.json",)
-REFERENCE_FILES = ("orchestrator-v1.md", "delivery-audit-gstack.md")
+REFERENCE_FILES = (
+    "orchestrator-v1.md",
+    "delivery-audit-gstack.md",
+    "work-profiles.md",
+    "confirmation-card.md",
+    "red-green-review.md",
+)
 TRACKED_EVENTS = (
     "SessionStart",
     "UserPromptSubmit",
@@ -471,11 +478,7 @@ def apply_agent_targets(target_ids: list[str]) -> tuple[dict, dict]:
             if target_id == "codex":
                 merge_hooks_json()
             elif target_id == "claude":
-                command = build_hook_command(
-                    VENV_PYTHON,
-                    TARGET_HOOKS / "agent_relay_hook.py",
-                    os.name,
-                )
+                command = at.shim_command(VENV_PYTHON, shim_path, "claude")
                 changed = at.register_claude(Path(meta["config_path"]), command)
                 print(f"[{'安装' if changed else '保留'}] {meta['config_path']}")
             elif target_id == "hermes":
@@ -503,6 +506,13 @@ def apply_agent_targets(target_ids: list[str]) -> tuple[dict, dict]:
                 TARGET_HOOKS / "agent_relay_tracker.py",
                 PROJECT_ROOT,
             )
+            failed_checks = [
+                f"{check['name']}：{check['detail']}"
+                for check in results[target_id]
+                if not check["ok"]
+            ]
+            if failed_checks:
+                errors[target_id] = "；".join(failed_checks)
         except (at.TargetError, OSError) as exc:
             errors[target_id] = str(exc)
     return results, errors

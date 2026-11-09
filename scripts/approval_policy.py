@@ -6,6 +6,7 @@ approved change contract always retain their own hard gates.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -15,6 +16,8 @@ from typing import Any
 
 MODES = {"strict", "standard", "relaxed"}
 MENU_MODES = {"1": "strict", "2": "standard", "3": "relaxed"}
+WORK_PROFILES = ("light", "standard", "strict", "user_required")
+WORK_PROFILE_STRENGTH = {name: index for index, name in enumerate(WORK_PROFILES)}
 DESCRIPTIONS = {
     "strict": "所有写操作先确认；完整交付审计：逐项需求、真实 diff、测试/行为、页面视觉、主审和独立审查。",
     "standard": "默认轻量检查；单点颜色/圆角/按钮方圆等样式只验目标与边界，复杂/共享/高风险自动升级。",
@@ -31,6 +34,26 @@ WRITE = re.compile(r"修改|新增|删除|重构|迁移|升级|替换|改造|修
 MULTI = re.compile(r"并且|同时|另外|然后|接着|还要|还需要|以及|最后|(?:^|\n)\s*(?:\d+[.)、]|[-*])\s+", re.I)
 SHARED = re.compile(r"公共组件|共享组件|全局样式|整个项目全部|所有模块|修改全部|全站", re.I)
 AMBIGUOUS = re.compile(r"自由发挥|看着办|随便改|更好看一些|风格参考|参考当前风格", re.I)
+UI_REFERENCE_TERMS = re.compile(
+    r"截图|参考图|设计图|设计稿|原图|点击态|点击事件|遮罩层|遮罩|轮廓|"
+    r"选中态|悬停态|聚焦态|弹窗|抽屉|导航栏|按钮",
+    re.I,
+)
+UI_REFERENCE_CONSTRAINTS = re.compile(
+    r"一样|一致|相同|保持|保留|注意|不能|不要|"
+    r"得(?:注意|和|跟|与|保持|保留)|"
+    r"(?:需要|必须|应该)(?:和|跟|与|保持|保留|注意)|"
+    r"复刻|参照|按照|对照|修改完成",
+    re.I,
+)
+USER_REQUIRED_WORK = re.compile(
+    r"必须(?:完整|严格|深度|逐项)?(?:审查|检查|验证|测试|核对)|"
+    r"(?:完整|严格|深度|逐项)(?:审查|检查|验证)|"
+    r"(?:运行|执行)?(?:全量|全部|完整)(?:测试|回归|验证)|"
+    r"不能只看\s*diff|不能只跑(?:一个|单个)|"
+    r"must\s+(?:fully\s+)?(?:review|verify|test)|full\s+(?:review|test)",
+    re.I,
+)
 
 
 def policy_path(codex_home: Path) -> Path:
@@ -59,6 +82,29 @@ def save_policy(codex_home: Path, mode: str) -> dict[str, str]:
     return {"version": "1", "mode": mode}
 
 
+def snapshot(codex_home: Path) -> dict[str, str]:
+    """Record the exact mode an approval relied on, without storing secrets."""
+    mode = load_policy(codex_home)["mode"]
+    return {"mode": mode, "policy_version": hashlib.sha256(mode.encode("ascii")).hexdigest()}
+
+
+def resume_allowed(codex_home: Path, approved: dict[str, Any]) -> bool:
+    """A later stricter mode cannot inherit an earlier, weaker approval."""
+    if not isinstance(approved, dict) or approved.get("mode") not in MODES:
+        return False
+    current = load_policy(codex_home)["mode"]
+    strength = {"relaxed": 0, "standard": 1, "strict": 2}
+    if strength[approved["mode"]] < strength[current]:
+        return False
+    return approved.get("policy_version") == snapshot(codex_home)["policy_version"]
+
+
+def reference_ui_requirement(prompt: str) -> bool:
+    """Detect UI work derived from a screenshot or reference state."""
+    text = str(prompt or "")
+    return bool(UI_REFERENCE_TERMS.search(text) and UI_REFERENCE_CONSTRAINTS.search(text))
+
+
 def should_confirm(prompt: str, mode: str = DEFAULT_MODE, file_count: int = 0,
                    domain_count: int = 0, contract: dict[str, Any] | None = None) -> tuple[bool, list[str]]:
     """Evaluate only the task gate, never the dangerous/shared hard gates."""
@@ -67,13 +113,16 @@ def should_confirm(prompt: str, mode: str = DEFAULT_MODE, file_count: int = 0,
         return False, []
     if contract and not contract.get("approved"):
         return True, ["已提出严格变更约束，需要确认目标与边界"]
-    write = bool(WRITE.search(text))
+    reference_ui = reference_ui_requirement(text)
+    write = bool(WRITE.search(text)) or reference_ui
     if not write:
         return False, []
     if LARGE.search(text):
         return True, ["大工程、跨模块或高风险修改"]
     if SHARED.search(text):
         return True, ["涉及公共组件、共享实现或全局影响"]
+    if reference_ui:
+        return True, ["参考图或截图推导的 UI 修改范围需要先确认"]
     if mode == "strict":
         return True, ["严格模式：新增、修改、删除都需要确认"]
     if mode == "relaxed":
@@ -87,6 +136,73 @@ def should_confirm(prompt: str, mode: str = DEFAULT_MODE, file_count: int = 0,
     if AMBIGUOUS.search(text):
         return True, ["目标或参考不清楚，需要先确认"]
     return False, []
+
+
+def select_work_profile(prompt: str, mode: str = DEFAULT_MODE, *,
+                        requested: str | None = None, file_count: int = 0,
+                        domain_count: int = 0) -> dict[str, Any]:
+    """Select the required process depth independently from approval tolerance.
+
+    Read-only work has no profile. Every write starts at ``light`` and can only
+    move upward automatically; an explicit user review request cannot be
+    downgraded by either the requester or the host mode.
+    """
+    if mode not in MODES:
+        raise ValueError(f"权限模式必须是 {', '.join(sorted(MODES))}")
+    if requested is not None and requested not in WORK_PROFILES:
+        raise ValueError(f"工作档必须是 {', '.join(WORK_PROFILES)}")
+
+    text = str(prompt or "").strip()
+    reference_ui = reference_ui_requirement(text)
+    if not text or not (WRITE.search(text) or reference_ui):
+        return {
+            "required": False,
+            "profile": None,
+            "minimum": None,
+            "card_required": False,
+            "reasons": [],
+        }
+
+    reasons: list[str] = []
+    user_required = bool(USER_REQUIRED_WORK.search(text))
+    complex_scope = bool(
+        LARGE.search(text)
+        or SHARED.search(text)
+        or MULTI.search(text)
+        or reference_ui
+        or file_count >= 2
+        or domain_count >= 2
+    )
+
+    if user_required:
+        minimum = "user_required"
+        reasons.append("用户明确要求完整检查或全量验证")
+    elif complex_scope or mode == "strict":
+        minimum = "strict"
+        if complex_scope:
+            reasons.append("复杂、共享、参考约束或跨文件范围")
+        if mode == "strict":
+            reasons.append("严格权限模式要求完整执行档")
+    else:
+        minimum = "light"
+
+    candidate = requested or minimum
+    if WORK_PROFILE_STRENGTH[candidate] < WORK_PROFILE_STRENGTH[minimum]:
+        raise ValueError(
+            f"工作档不能降档：任务最低要求 {minimum}，当前选择 {candidate}"
+        )
+
+    profile = max((candidate, minimum), key=WORK_PROFILE_STRENGTH.__getitem__)
+    card_required = profile != "light"
+    if card_required:
+        reasons.append("非轻量任务需要现象、期望、定位、边界、疑点五栏确认卡")
+    return {
+        "required": True,
+        "profile": profile,
+        "minimum": minimum,
+        "card_required": card_required,
+        "reasons": reasons,
+    }
 
 
 def apply_selection(codex_home: Path, selection: str) -> dict[str, str]:

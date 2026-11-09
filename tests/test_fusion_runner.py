@@ -233,6 +233,105 @@ class FusionRunnerTests(unittest.TestCase):
         session = json.loads(session_file.read_text(encoding="utf-8"))
         self.assertEqual(session["state"], "idle")
 
+    def test_history_trim_never_leaves_orphan_tool_results(self):
+        messages = [{"role": "system", "content": "system"}]
+        for index in range(12):
+            call_id = f"call-{index}"
+            messages.extend([
+                {"role": "user", "content": f"task {index}"},
+                {
+                    "role": "assistant", "content": "",
+                    "tool_calls": [tool_call("read_file", {"path": "README.md"}, call_id)],
+                },
+                {"role": "tool", "tool_call_id": call_id, "content": "file contents"},
+                {"role": "assistant", "content": f"answer {index}"},
+            ])
+        for limit in range(48, 53):
+            with self.subTest(limit=limit), mock.patch.object(
+                fusion_runner, "SESSION_MESSAGE_LIMIT", limit,
+            ):
+                trimmed = fusion_runner._trim_messages(messages)
+                non_system = [item for item in trimmed if item.get("role") != "system"]
+                self.assertLessEqual(len(non_system), limit)
+                self.assertNotEqual(non_system[0].get("role"), "tool")
+                pending = set()
+                for message in non_system:
+                    if message.get("role") == "assistant" and message.get("tool_calls"):
+                        pending = {
+                            call["id"] for call in message["tool_calls"]
+                        }
+                    elif message.get("role") == "tool":
+                        self.assertIn(message["tool_call_id"], pending)
+                        pending.remove(message["tool_call_id"])
+                self.assertEqual(pending, set())
+
+    def test_load_session_drops_legacy_orphan_tool_results(self):
+        path = fusion_runner.session_path(
+            self.workspace, session_id="session-a", home=self.home,
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "version": 1,
+            "workspace": str(self.workspace),
+            "provider_ref": "local:test",
+            "tool_mode": "readonly",
+            "tool_capable": True,
+            "messages": [
+                {"role": "system", "content": "system"},
+                {"role": "tool", "tool_call_id": "orphan", "content": "old output"},
+                {"role": "user", "content": "new task"},
+            ],
+        }), encoding="utf-8")
+
+        session, _ = fusion_runner.load_session(
+            self.workspace,
+            session_id="session-a",
+            provider_ref="local:test",
+            tool_mode="readonly",
+            tool_capable=True,
+            home=self.home,
+        )
+
+        self.assertEqual(
+            [message["role"] for message in session["messages"]],
+            ["system", "user"],
+        )
+
+    def test_load_session_drops_assistant_call_without_tool_result(self):
+        path = fusion_runner.session_path(
+            self.workspace, session_id="session-a", home=self.home,
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "version": 1,
+            "workspace": str(self.workspace),
+            "provider_ref": "local:test",
+            "tool_mode": "readonly",
+            "tool_capable": True,
+            "messages": [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "previous task"},
+                {
+                    "role": "assistant", "content": "",
+                    "tool_calls": [tool_call("read_file", {"path": "README.md"})],
+                },
+            ],
+        }), encoding="utf-8")
+
+        session, _ = fusion_runner.load_session(
+            self.workspace,
+            session_id="session-a",
+            provider_ref="local:test",
+            tool_mode="readonly",
+            tool_capable=True,
+            home=self.home,
+        )
+
+        self.assertEqual(
+            [message["role"] for message in session["messages"]],
+            ["system", "user"],
+        )
+
     def test_persistent_session_reuses_context_and_reset_clears_it(self):
         seen = []
 

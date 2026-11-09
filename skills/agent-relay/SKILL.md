@@ -7,6 +7,21 @@ description: "AgentRelay 外援协作、工作流与本地归档。当 Agent 长
 
 AgentRelay 是 AI Agent 与外部专家模型之间的中继层，调用当前已配置的在线模型 Provider。
 
+## 按需读取的流程 reference
+
+- 选择工作档：`references/work-profiles.md`
+- 生成或判断五栏确认卡：`references/confirmation-card.md`
+- 逻辑改动 RED→GREEN、评审冻结和 canonical scope drift：
+  `references/red-green-review.md`
+
+主文件保留路由和安全边界；只有当前任务需要该流程时才读取对应 reference，避免把完整
+gstack 式重流程复制到每个普通任务。
+
+所有实际写任务都必须在首次写入前显式选档，`light` 也不例外。简单小改不显示用户卡，
+但主 Agent 要先用 `select-work-profile` 写回 `light`；需要用户批准的任务则在
+`resolve-intent --decision approve` 中带 `--work-profile`。工作档不得低于 Hook 给出的
+最低值。纯问答、搜索和只读检查不选档。
+
 ## 分档交付审计（按修改范围触发）
 
 参考 gstack 的 review/QA 闭环，但不依赖安装 gstack。参考来源和 MIT 许可见
@@ -32,23 +47,28 @@ AgentRelay 是 AI Agent 与外部专家模型之间的中继层，调用当前�
 
 1. Hook 只在本档位需要的修改任务中建立审计待办；relaxed 小任务不建立正式审计。
 2. 完成实现后输入 `/agent-audit`，阅读当前真实待办。该命令只显示状态，**不等于审计通过**。
-3. 主 Agent 必须读取用户需求和真实 diff，逐项对照 DONE/CHANGED/UNVERIFIABLE；漏做或越界先处理。
+3. 主 Agent 必须读取用户需求和真实 diff，按冻结的 canonical 需求逐项对照
+   `DONE/CHANGED/PARTIAL/NOT_DONE/UNVERIFIABLE`；漏做或越界先处理。通过时每项必须
+   使用对应 `requirement_id`，完整覆盖清单且只能为 `DONE/CHANGED`。
 4. 真实运行与改动匹配的项目测试或行为探针，不能只复制一个“测试通过”结论：
 
 ```bash
 python3 "${CODEX_HOME:-$HOME/.codex}/skills/agent-relay/scripts/delivery_audit.py" \
   run-behavior --home "${CODEX_HOME:-$HOME/.codex}" --session "<当前真实 session_id>" \
-  --cmd "<项目已有测试或本地行为检查命令>" --kind test
+  --phase green --cmd "<项目已有测试或本地行为检查命令>" --kind test
 ```
 
 `--kind test` 要真实执行测试且数量大于 0；CLI/API/任务探针用 `--kind probe`，不强制截图。
 失败、超时、未运行和覆盖缺口必须保留，不得只保存成功结论。
+逻辑改动的 `standard` 及以上工作档必须先在修改前基线运行 `--phase red` 并得到非零退出，
+写入后在当前候选运行 `--phase green`。纯样式/文案可按 `references/red-green-review.md`
+豁免 RED，但视觉或目标边界证据不能省。
 5. 逐项登记真实证据（`requirements`、`diff`、`self_review`、`visual`、`independent_review`）：
 
 ```bash
 AUDIT="${CODEX_HOME:-$HOME/.codex}/skills/agent-relay/scripts/delivery_audit.py"
 python3 "$AUDIT" record --home "${CODEX_HOME:-$HOME/.codex}" --session "<当前真实 session_id>" \
-  --check requirements --passed --evidence '[{"item":"原始需求","status":"done","evidence":"文件:行/真实行为"}]'
+  --check requirements --passed --evidence '[{"requirement_id":"R1","item":"原始需求","status":"DONE","evidence":"文件:行/真实行为"}]'
 python3 "$AUDIT" record --home "${CODEX_HOME:-$HOME/.codex}" --session "<当前真实 session_id>" \
   --check diff --passed --evidence '已读取完整 diff；修改仅限允许文件，未发现未声明行为'
 python3 "$AUDIT" record --home "${CODEX_HOME:-$HOME/.codex}" --session "<当前真实 session_id>" \
@@ -65,6 +85,10 @@ python3 "$AUDIT" record --home "${CODEX_HOME:-$HOME/.codex}" --session "<当前�
    `provider=fusion` 成功。
 8. 后续任何文件修改都使审计过期，必须重新检查受影响证据。通过前只能报告进度和未验证项，
    不能写“全部完成/已验证/审计通过”。最终回复列出完成内容、验证结果、未验证项。
+
+多需求任务应在首次写入前建立 canonical 清单。可以先运行 `delivery_audit.py begin`
+并重复传 `--requirement "<原始需求>"`；若 Hook 已建立同一任务，重复 `begin` 不会重置证据。
+首次写入后禁止缩小或重定义清单，只能如实记录缺口。
 
 当用户只是问“`/agent-audit` 是干嘛的”“这是干嘛的”“为什么要审计”等功能或机制问题时，
 只解释用途和触发条件；不得运行 `delivery_audit.py`、读取审计状态卡、创建审计待办或把
@@ -92,6 +116,8 @@ Hook 可以保守预筛选直接行动句式（如“现在调用 DeepSeek”“
   `verify_page.py --session <当前真实 session_id> --url <本地页面> --target-selector <选择器> --expected <属性JSON> --invariant <目标外选择器>`
   采集目标 computed style、位置尺寸和局部截图；修改后用 `--after`（相同目标参数）逐项比较，
   生成 `target_verified`。目标未达预期不能交付；目标达成但目标外有副作用同样不能交付。
+  `--session` 省略时会保守读取宿主环境或当前工作区的唯一 Hook 会话绑定，但 Agent 已知真实
+  session 时必须显式传入；存在多个会话或绑定歧义时必须询问式报错，不能猜测“最新会话”。
 - **页面验收不是“截图存在”**：有视觉时必须实际读取整页/容器截图，检查目标与
   `unchanged_checks`，然后运行 `visual_review.py record --passed`，每张截图重复传
   `--screenshot <路径>`，并逐项传 `--observation 'target=实际观察'` 和
@@ -123,8 +149,16 @@ Hook 可以保守预筛选直接行动句式（如“现在调用 DeepSeek”“
   用 `test ! -e <绝对路径>` 回查。仅允许系统临时目录或 AgentRelay 验收证据目录内、明确
   逐个列出的截图；禁止目录、项目文件、用户输入图片、符号链接、`-r/-R`、通配符或与其他
   路径混合删除。
+- **完成文案前必须预检**：在写“已完成”“刷新即可”“验证通过”或其他完成结论前，先运行
+  `python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" finish-check --session <当前 session_id>`。
+  只有返回 `ok: true` 才能写完成文案；`ok: false` 时只执行 `items[0]` 给出的当前阶段和
+  `next_command`，完成后再次预检。不要因为它返回 `visual` 或 `cleanup` 阶段就重跑已经通过的
+  Chromium 检查，也不要一次打印整套待办。该命令只读，不会替 Agent 关闭审计或伪造通过。
 - 多目标/复杂修改由 Hook 出确认卡，不能由 Agent 自行省略；目标外边界是执行与验收底线，
   不是确认卡装饰。发现父布局、公共组件或其他模块受影响必须先重新确认。
+- 参考图或截图推导出的 UI 修改必须先展示需求卡，写清参考、目标状态和允许文件；用户后续
+  补充点击态、遮罩、轮廓等范围时更新需求卡并重新确认，不能只在回复里说“已理解”后直接修改。
+  单纯启动前端或询问截图内容不建立 UI 修改卡。
 
 ## 语义审批桥
 
@@ -460,6 +494,11 @@ retry=0、用户未要求 → 不触发在线模型。首次外援审核的条�
 浏览器不可用、检查失败或文件在检查后再次修改时，必须列为未验证项，不得声称页面完成。
 即使会话状态里没有页面文件记录，只要最终回复声称“亲自查看截图、逐项检查、视觉验收通过”，
 Hook 也会阻断；必须先形成当前会话可核对的浏览器证据和视觉认证证书。
+
+所有代码、页面、视觉和交付审计检查结束后，再运行
+`agent_relay_tracker.py finish-check --session <当前 session_id>`。只有 `ok: true` 才能写出
+最终完成文案；阻断时按 `items[0].next_command` 只补当前缺失阶段。Stop Hook 正常放行保持
+静默，不会显示已通过步骤；阻断时只显示一个原因和下一步，不重复整套检查说明。
 
 ## 连续外援协作（同一问题内）
 

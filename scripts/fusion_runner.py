@@ -248,6 +248,8 @@ def load_session(
         )
     value["session_id"] = key
     value["reset_reason"] = reset_reason
+    if isinstance(value.get("messages"), list):
+        value["messages"] = _trim_messages(value["messages"])
     return value, path
 
 
@@ -267,6 +269,38 @@ def reset_session(
         raise
 
 
+def _complete_tool_groups(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep only assistant tool calls that have all of their tool results.
+
+    Persisted histories can end between a tool call and its result after an
+    interruption. Older trimming could also remove the call but retain results.
+    Neither incomplete form is a valid next request to a chat provider.
+    """
+    complete: list[dict[str, Any]] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if message.get("role") != "assistant" or not message.get("tool_calls"):
+            if message.get("role") != "tool":
+                complete.append(message)
+            index += 1
+            continue
+        expected = {
+            str(call.get("id") or "")
+            for call in message["tool_calls"]
+            if isinstance(call, dict)
+        }
+        end = index + 1
+        received = set()
+        while end < len(messages) and messages[end].get("role") == "tool":
+            received.add(str(messages[end].get("tool_call_id") or ""))
+            end += 1
+        if expected and received == expected:
+            complete.extend(messages[index:end])
+        index = end
+    return complete
+
+
 def _trim_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not messages:
         return []
@@ -279,8 +313,22 @@ def _trim_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if item.get("kind") in {"commander_result", "commander_handoff"}
     ][-12:]
     system.extend(retained_notices)
-    rest = [item for item in messages if item.get("role") != "system"]
-    rest = rest[-SESSION_MESSAGE_LIMIT:]
+    rest = _complete_tool_groups([
+        item for item in messages if item.get("role") != "system"
+    ])
+    # A budget boundary must never split an assistant call from its results.
+    groups: list[list[dict[str, Any]]] = []
+    index = 0
+    while index < len(rest):
+        end = index + 1
+        if rest[index].get("role") == "assistant" and rest[index].get("tool_calls"):
+            while end < len(rest) and rest[end].get("role") == "tool":
+                end += 1
+        groups.append(rest[index:end])
+        index = end
+    while groups and sum(len(group) for group in groups) > SESSION_MESSAGE_LIMIT:
+        groups.pop(0)
+    rest = [message for group in groups for message in group]
     trimmed: list[dict[str, Any]] = []
     for message in rest:
         copied = dict(message)

@@ -77,13 +77,32 @@ class HookGateTests(unittest.TestCase):
         self.assertIsNotNone(match, context)
         return match.group(1)
 
-    def resolve_intent(self, session_id, source_hash, decision="approve"):
-        return self.run_tracker(
+    def resolve_intent(self, session_id, source_hash, decision="approve",
+                       work_profile=None):
+        if decision == "approve" and work_profile is None:
+            work_profile = self.minimum_work_profile(session_id)
+        args = [
             "resolve-intent",
             "--session", session_id,
             "--decision", decision,
             "--source-sha256", source_hash,
             "--reason", "测试主 Agent 已结合上下文判断用户意图",
+        ]
+        if decision == "approve" and work_profile:
+            args.extend(["--work-profile", work_profile])
+        return self.run_tracker(*args)
+
+    def minimum_work_profile(self, session_id):
+        state = json.loads(
+            (
+                self.codex_home / "agent_relay_tracker" / "sessions"
+                / f"{session_id}.json"
+            ).read_text(encoding="utf-8")
+        )
+        return (
+            ((state.get("task_gate") or {}).get("work_profile") or {})
+            .get("minimum")
+            or "light"
         )
 
     def test_large_task_injects_confirmation_context(self):
@@ -100,16 +119,16 @@ class HookGateTests(unittest.TestCase):
         self.assertIn("需求卡/确认卡", context["additionalContext"])
         self.assertIn("不得写入", context["additionalContext"])
         system_message = output["systemMessage"]
-        self.assertIn("AgentRelay · 需求确认卡", system_message)
+        self.assertIn("「需求卡」", system_message)
         self.assertIn("任务", system_message)
         self.assertIn("影响范围", system_message)
         self.assertIn("当前状态", system_message)
         self.assertIn("waiting_for_approval", system_message)
         self.assertIn("主要风险", system_message)
         self.assertIn("将修改工作区文件", system_message)
-        self.assertIn("✅ [1] 批准执行", system_message)
-        self.assertIn("🛠️ [2] 调整方案", system_message)
-        self.assertIn("⛔ [3] 取消任务", system_message)
+        self.assertNotIn("1. 确认审批", system_message)
+        self.assertNotIn("2. 修改需求", system_message)
+        self.assertNotIn("3. 拒绝审批", system_message)
         self.assertNotIn("\x1b[", system_message)
         self.assertNotIn("```", system_message)
         self.assertNotIn("<div", system_message)
@@ -120,6 +139,267 @@ class HookGateTests(unittest.TestCase):
             )
         )
         self.assertNotIn("semantic_approval_candidate", state)
+
+    def test_all_hook_card_fields_share_the_widest_label_column(self):
+        from hooks import agent_relay_tracker as tracker
+
+        card = tracker.render_task_gate_card("完整实现前后端和数据库功能", {})
+        lines = [line for line in card.splitlines() if line.startswith("- ")]
+        expected_width = max(tracker._card_label_width(line[2:].split("：", 1)[0]) for line in lines)
+        for line in lines:
+            label, value = line[2:].split("：", 1)
+            self.assertEqual(
+                len(value) - len(value.lstrip()),
+                expected_width - tracker._card_label_width(label) + 1,
+                line,
+            )
+        self.assertIn("- 主要风险：   ", card)
+        self.assertIn("- 验证：       ", card)
+        self.assertIn("- 回滚：       ", card)
+
+    def test_complex_write_card_exposes_work_profile_and_five_columns(self):
+        result = self.run_hook(self.payload(
+            "complex-five-column",
+            "UserPromptSubmit",
+            prompt="同时修改前端和后端，并更新数据库迁移",
+        ))
+
+        self.assert_hook_ok(result)
+        output = json.loads(result.stdout)
+        system_message = output["systemMessage"]
+        self.assertIn("- 工作档：", system_message)
+        self.assertIn("strict", system_message)
+        for label in ("现象", "期望", "定位", "边界", "疑点"):
+            self.assertIn(f"- {label}：", system_message)
+        self.assertIn("推荐方案", system_message)
+        state = json.loads(
+            (self.codex_home / "agent_relay_tracker/sessions/complex-five-column.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(state["task_gate"]["work_profile"]["profile"], "strict")
+
+    def test_task_approval_requires_an_explicit_non_downgraded_work_profile(self):
+        session = "explicit-work-profile"
+        request = "同时修改前端和后端，并更新数据库迁移"
+        initial = self.run_hook(self.payload(
+            session, "UserPromptSubmit", prompt=request,
+        ))
+        self.assert_hook_ok(initial)
+        candidate = self.run_hook(self.payload(
+            session, "UserPromptSubmit", prompt="批准执行",
+        ))
+        source_hash = self.semantic_source_hash(candidate)
+
+        missing = self.run_tracker(
+            "resolve-intent",
+            "--session", session,
+            "--decision", "approve",
+            "--source-sha256", source_hash,
+            "--reason", "用户明确批准当前范围",
+        )
+        self.assertEqual(missing.returncode, 2)
+        self.assertIn("工作档", missing.stderr)
+
+        downgraded = self.resolve_intent(
+            session, source_hash, work_profile="light",
+        )
+        self.assertEqual(downgraded.returncode, 2)
+        self.assertIn("不能降档", downgraded.stderr)
+
+        approved = self.resolve_intent(
+            session, source_hash, work_profile="user_required",
+        )
+        self.assert_hook_ok(approved)
+        state = json.loads(
+            (
+                self.codex_home / "agent_relay_tracker" / "sessions"
+                / f"{session}.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            state["task_gate"]["work_profile"]["profile"],
+            "user_required",
+        )
+        self.assertEqual(
+            state["task_gate"]["work_profile"]["selection_source"],
+            "agent",
+        )
+
+    def test_classification_fallback_cannot_downgrade_explicit_full_review(self):
+        from hooks import agent_relay_tracker as tracker
+
+        with mock.patch.object(
+            tracker,
+            "_shared_script_module",
+            side_effect=ValueError("policy unavailable"),
+        ):
+            classification = tracker.classify_task_request(
+                "修复 app.py 的 bug，必须完整审查并运行全量测试，不能只看 diff"
+            )
+
+        work_profile = classification["work_profile"]
+        self.assertTrue(classification["requires_confirmation"])
+        self.assertTrue(work_profile["required"])
+        self.assertEqual(work_profile["minimum"], "user_required")
+        self.assertEqual(work_profile["profile"], "user_required")
+        self.assertTrue(work_profile["card_required"])
+
+    def test_simple_write_selects_light_without_visible_card(self):
+        result = self.run_hook(self.payload(
+            "simple-light",
+            "UserPromptSubmit",
+            prompt="修改按钮颜色",
+        ))
+
+        self.assert_hook_ok(result)
+        output = json.loads(result.stdout)
+        self.assertNotIn("systemMessage", output)
+        self.assertIn("[AgentRelay 工作档]", output["hookSpecificOutput"]["additionalContext"])
+        state = json.loads(
+            (self.codex_home / "agent_relay_tracker/sessions/simple-light.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(state["task_gate"]["work_profile"]["profile"], "light")
+        self.assertFalse(state["task_gate"]["work_profile"]["card_required"])
+        self.assertNotEqual(
+            state["task_gate"]["work_profile"].get("selection_source"),
+            "agent",
+        )
+
+        blocked = self.run_hook(self.payload(
+            "simple-light",
+            "PreToolUse",
+            tool_name="apply_patch",
+            tool_input={"input": "*** Begin Patch"},
+            tool_use_id="simple-light-before-selection",
+        ))
+        self.assert_hook_ok(blocked)
+        denied = json.loads(blocked.stdout)
+        self.assertEqual(
+            denied["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+        self.assertIn("工作档", denied["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertNotIn("systemMessage", denied)
+
+        selected = self.run_tracker(
+            "select-work-profile",
+            "--session", "simple-light",
+            "--profile", "light",
+            "--reason", "单点样式小改",
+        )
+        self.assert_hook_ok(selected)
+        selection = json.loads(selected.stdout)
+        self.assertEqual(selection["profile"], "light")
+        self.assertEqual(selection["selection_source"], "agent")
+
+        allowed = self.run_hook(self.payload(
+            "simple-light",
+            "PreToolUse",
+            tool_name="apply_patch",
+            tool_input={"input": "*** Begin Patch"},
+            tool_use_id="simple-light-after-selection",
+        ))
+        self.assert_hook_ok(allowed)
+        self.assertEqual(allowed.stdout, "")
+
+    def test_actual_write_requires_profile_even_when_prompt_verb_is_not_detected(self):
+        session = "write-profile-runtime-fallback"
+        initial = self.run_hook(self.payload(
+            session,
+            "UserPromptSubmit",
+            prompt="把按钮弄成蓝色",
+        ))
+        self.assert_hook_ok(initial)
+        self.assertEqual(initial.stdout, "")
+
+        blocked = self.run_hook(self.payload(
+            session,
+            "PreToolUse",
+            tool_name="apply_patch",
+            tool_input={"input": "*** Begin Patch"},
+            tool_use_id="runtime-profile-before-selection",
+        ))
+        self.assert_hook_ok(blocked)
+        denied = json.loads(blocked.stdout)
+        self.assertEqual(
+            denied["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+        self.assertIn("工作档", denied["hookSpecificOutput"]["permissionDecisionReason"])
+
+        selected = self.run_tracker(
+            "select-work-profile",
+            "--session", session,
+            "--profile", "light",
+            "--reason", "单点样式小改",
+        )
+        self.assert_hook_ok(selected)
+        selection = json.loads(selected.stdout)
+        self.assertEqual(selection["profile"], "light")
+        self.assertFalse(selection["card_required"])
+
+        allowed = self.run_hook(self.payload(
+            session,
+            "PreToolUse",
+            tool_name="apply_patch",
+            tool_input={"input": "*** Begin Patch"},
+            tool_use_id="runtime-profile-after-selection",
+        ))
+        self.assert_hook_ok(allowed)
+        self.assertEqual(allowed.stdout, "")
+
+    def test_agent_upgrade_from_light_to_standard_requires_a_five_column_card(self):
+        session = "light-to-standard"
+        initial = self.run_hook(self.payload(
+            session,
+            "UserPromptSubmit",
+            prompt="修改按钮颜色",
+        ))
+        self.assert_hook_ok(initial)
+
+        selected = self.run_tracker(
+            "select-work-profile",
+            "--session", session,
+            "--profile", "standard",
+            "--reason", "主 Agent 判断需要标准证据链",
+        )
+        self.assert_hook_ok(selected)
+        selection = json.loads(selected.stdout)
+        self.assertEqual(selection["profile"], "standard")
+        self.assertTrue(selection["card_required"])
+        self.assertEqual(selection["status"], "awaiting_confirmation")
+        for label in ("现象", "期望", "定位", "边界", "疑点"):
+            self.assertIn(f"- {label}：", selection["card"])
+
+        state = json.loads(
+            (
+                self.codex_home / "agent_relay_tracker" / "sessions"
+                / f"{session}.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            state["task_gate"]["status"],
+            "awaiting_confirmation",
+        )
+        self.assertEqual(
+            state["task_gate"]["work_profile"]["profile"],
+            "standard",
+        )
+
+        blocked = self.run_hook(self.payload(
+            session,
+            "PreToolUse",
+            tool_name="apply_patch",
+            tool_input={"input": "*** Begin Patch"},
+            tool_use_id="light-to-standard-write",
+        ))
+        self.assert_hook_ok(blocked)
+        decision = json.loads(blocked.stdout)["hookSpecificOutput"]
+        self.assertEqual(decision["permissionDecision"], "deny")
+        self.assertIn("尚未获得用户批准", decision["permissionDecisionReason"])
 
     def test_natural_short_replies_require_agent_semantic_resolution(self):
         for index, reply in enumerate(("好的", "ok", "没问题", "执行吧", "行吧", "1", "[1]")):
@@ -250,9 +530,12 @@ class HookGateTests(unittest.TestCase):
 
         dangerous = self.run_hook(self.payload(
             "mode-relaxed", "PreToolUse", tool_name="exec_command",
-            tool_input={"cmd": "rm -rf build"}, tool_use_id="danger-mode",
+            tool_input={"cmd": "git reset --hard"}, tool_use_id="danger-mode",
         ))
-        self.assertEqual(json.loads(dangerous.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(
+            json.loads(dangerous.stdout)["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
         subprocess.run([sys.executable, str(script), "set", "standard",
                         "--codex-home", str(self.codex_home)], check=True, capture_output=True)
 
@@ -309,6 +592,28 @@ class HookGateTests(unittest.TestCase):
                         "--codex-home", str(self.codex_home)], check=True, capture_output=True)
         self.run_hook(self.payload("relaxed-style", "UserPromptSubmit", cwd=str(workspace),
                                   prompt="把圆形按钮改成方块，只改 border-radius"))
+        blocked = self.run_hook(self.payload(
+            "relaxed-style", "PreToolUse", cwd=str(workspace),
+            tool_name="Edit", tool_input={"file_path": str(source)},
+            tool_use_id="relaxed-style-before-profile",
+        ))
+        self.assert_hook_ok(blocked)
+        self.assertIn("工作档", json.loads(blocked.stdout)["hookSpecificOutput"]["permissionDecisionReason"])
+        selected = self.run_tracker(
+            "select-work-profile",
+            "--session", "relaxed-style",
+            "--profile", "light",
+            "--reason", "单点 border-radius 样式修改",
+        )
+        self.assert_hook_ok(selected)
+        allowed = self.run_hook(self.payload(
+            "relaxed-style", "PreToolUse", cwd=str(workspace),
+            tool_name="Edit", tool_input={"file_path": str(source)},
+            tool_use_id="relaxed-style-edit",
+        ))
+        self.assert_hook_ok(allowed)
+        self.assertEqual(allowed.stdout, "")
+        source.write_text(".button { border-radius: 0; }\n", encoding="utf-8")
         self.run_hook(self.payload("relaxed-style", "PostToolUse", cwd=str(workspace), tool_name="Edit",
                                   tool_input={"file_path": str(source)}, tool_response={"success": True}))
         result = self.run_hook(self.payload("relaxed-style", "Stop", cwd=str(workspace),
@@ -332,6 +637,52 @@ class HookGateTests(unittest.TestCase):
         audit_path = self.codex_home / "agent_relay_tracker" / "delivery-audit" / "relaxed-code.json"
         self.assertFalse(audit_path.exists())
 
+    def test_delivery_audit_freezes_baseline_before_write_and_advances_candidate_after(self):
+        workspace = self.codex_home / "workspace"
+        workspace.mkdir()
+        source = workspace / "app.py"
+        source.write_text("VALUE = 1\n", encoding="utf-8")
+        session = "audit-baseline-before-write"
+
+        self.run_hook(self.payload(
+            session, "UserPromptSubmit", cwd=str(workspace),
+            prompt="修复 app.py 的常量错误",
+        ))
+        selected = self.run_tracker(
+            "select-work-profile",
+            "--session", session,
+            "--profile", "light",
+            "--reason", "局部常量修复",
+        )
+        self.assert_hook_ok(selected)
+        before = self.run_hook(self.payload(
+            session, "PreToolUse", cwd=str(workspace), tool_name="Edit",
+            tool_input={"file_path": str(source)}, tool_use_id="baseline-edit",
+        ))
+        self.assert_hook_ok(before)
+        audit_path = (
+            self.codex_home / "agent_relay_tracker" / "delivery-audit"
+            / f"{session}.json"
+        )
+        initial = json.loads(audit_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            initial["baseline_fingerprint"],
+            initial["candidate_fingerprint"],
+        )
+        self.assertTrue(initial["logic_change"])
+        self.assertEqual(initial["work_profile"], "light")
+
+        source.write_text("VALUE = 2  # fixed\n", encoding="utf-8")
+        after = self.run_hook(self.payload(
+            session, "PostToolUse", cwd=str(workspace), tool_name="Edit",
+            tool_input={"file_path": str(source)}, tool_response={"success": True},
+        ))
+        self.assert_hook_ok(after)
+        current = json.loads(audit_path.read_text(encoding="utf-8"))
+        self.assertEqual(current["baseline_fingerprint"], initial["baseline_fingerprint"])
+        self.assertNotEqual(current["candidate_fingerprint"], current["baseline_fingerprint"])
+        self.assertEqual(current["fingerprint"], current["candidate_fingerprint"])
+
     def test_strict_delivery_requires_audit_before_completion(self):
         workspace = self.codex_home / "workspace"
         workspace.mkdir()
@@ -352,6 +703,12 @@ class HookGateTests(unittest.TestCase):
         source_hash = self.semantic_source_hash(candidate)
         resolved = self.resolve_intent(session, source_hash)
         self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        allowed = self.run_hook(self.payload(
+            session, "PreToolUse", cwd=str(workspace), tool_name="Edit",
+            tool_input={"file_path": str(source)}, tool_use_id="audit-gate-edit",
+        ))
+        self.assert_hook_ok(allowed)
+        source.write_text("VALUE = 2  # fixed\n", encoding="utf-8")
         self.run_hook(self.payload(
             session, "PostToolUse", cwd=str(workspace), tool_name="Edit",
             tool_input={"file_path": str(source)}, tool_response={"success": True},
@@ -404,6 +761,9 @@ class HookGateTests(unittest.TestCase):
         source.write_text("VALUE = 1\n", encoding="utf-8")
         self.run_hook(self.payload("question-lifecycle", "UserPromptSubmit", cwd=str(workspace),
                                   prompt="修复 app.py 的空输入错误"))
+        self.run_hook(self.payload("question-lifecycle", "PreToolUse", cwd=str(workspace), tool_name="Edit",
+                                  tool_input={"file_path": str(source)}, tool_use_id="question-edit"))
+        source.write_text("VALUE = 2  # fixed\n", encoding="utf-8")
         self.run_hook(self.payload("question-lifecycle", "PostToolUse", cwd=str(workspace), tool_name="Edit",
                                   tool_input={"file_path": str(source)}, tool_response={"success": True}))
         question = self.run_hook(self.payload("question-lifecycle", "UserPromptSubmit", cwd=str(workspace),
@@ -434,6 +794,11 @@ class HookGateTests(unittest.TestCase):
         self.run_hook(self.payload(session, "UserPromptSubmit",
                                   cwd=str(workspace), prompt="修复 app.py 的空输入错误"))
         self.run_hook(self.payload(
+            session, "PreToolUse", cwd=str(workspace), tool_name="Edit",
+            tool_input={"file_path": str(source)}, tool_use_id="requirement-edit",
+        ))
+        source.write_text("VALUE = 2  # fixed\n", encoding="utf-8")
+        self.run_hook(self.payload(
             session, "PostToolUse", cwd=str(workspace), tool_name="Edit",
             tool_input={"file_path": str(source)}, tool_response={"success": True},
         ))
@@ -460,6 +825,11 @@ class HookGateTests(unittest.TestCase):
             session, "UserPromptSubmit", cwd=str(workspace),
             prompt="修复 app.py 的空输入错误",
         ))
+        self.run_hook(self.payload(
+            session, "PreToolUse", cwd=str(workspace), tool_name="Edit",
+            tool_input={"file_path": str(source)}, tool_use_id="old-audit-edit",
+        ))
+        source.write_text("VALUE = 2  # fixed\n", encoding="utf-8")
         self.run_hook(self.payload(
             session, "PostToolUse", cwd=str(workspace), tool_name="Edit",
             tool_input={"file_path": str(source)}, tool_response={"success": True},
@@ -516,6 +886,37 @@ class HookGateTests(unittest.TestCase):
                 session, "已修复并通过测试。"
             )
         self.assertIn("不能声称完成", reason)
+
+    def test_pre_write_audit_baseline_error_blocks_required_write(self):
+        workspace = self.codex_home / "workspace"
+        workspace.mkdir()
+        source = workspace / "app.py"
+        source.write_text("VALUE = 1\n", encoding="utf-8")
+        session = "pre-write-audit-error"
+        initial = self.run_hook(self.payload(
+            session, "UserPromptSubmit", cwd=str(workspace),
+            prompt="修复 app.py 的常量错误",
+        ))
+        self.assert_hook_ok(initial)
+        selected = self.run_tracker(
+            "select-work-profile",
+            "--session", session,
+            "--profile", "light",
+            "--reason", "局部常量修复",
+        )
+        self.assert_hook_ok(selected)
+        audit_dir = self.codex_home / "agent_relay_tracker" / "delivery-audit"
+        audit_dir.mkdir(parents=True)
+        (audit_dir / f"{session}.json").write_text("{not-json", encoding="utf-8")
+
+        blocked = self.run_hook(self.payload(
+            session, "PreToolUse", cwd=str(workspace), tool_name="Edit",
+            tool_input={"file_path": str(source)}, tool_use_id="audit-error-edit",
+        ))
+        self.assert_hook_ok(blocked)
+        decision = json.loads(blocked.stdout)["hookSpecificOutput"]
+        self.assertEqual(decision["permissionDecision"], "deny")
+        self.assertIn("审计基线", decision["permissionDecisionReason"])
 
     def test_corrupt_delivery_audit_json_fails_closed(self):
         from hooks import agent_relay_tracker as tracker
@@ -645,7 +1046,45 @@ class HookGateTests(unittest.TestCase):
         ))
 
         self.assert_hook_ok(result)
-        self.assertEqual(result.stdout, "")
+        output = json.loads(result.stdout)
+        self.assertNotIn("systemMessage", output)
+        self.assertIn(
+            "[AgentRelay 工作档]",
+            output["hookSpecificOutput"]["additionalContext"],
+        )
+
+    def test_finish_check_is_read_only_for_delivery_audit(self):
+        from scripts import delivery_audit
+
+        session = "finish-check-readonly"
+        workspace = self.codex_home / "finish-check-workspace"
+        workspace.mkdir()
+        source = workspace / "app.py"
+        source.write_text("VALUE = 1\n", encoding="utf-8")
+        delivery_audit.begin(
+            self.codex_home,
+            session,
+            workspace,
+            "修改一个局部常量",
+            mode="relaxed",
+            files=[str(source)],
+            activate=True,
+        )
+        before = delivery_audit.read_state(self.codex_home, session)
+        self.assertTrue(before["active_edit"])
+
+        completed = self.run_tracker(
+            "finish-check",
+            "--session", session,
+            "--message", "修改已完成，验证通过。",
+        )
+        self.assert_hook_ok(completed)
+        output = json.loads(completed.stdout)
+        self.assertTrue(output["ok"])
+        self.assertEqual(output["items"], [])
+        after = delivery_audit.read_state(self.codex_home, session)
+        self.assertTrue(after["active_edit"])
+        self.assertEqual(after["status"], before["status"])
 
     def test_claude_target_keeps_context_and_supports_visible_card(self):
         self.env["AGENTRELAY_TARGET"] = "claude"
@@ -673,6 +1112,41 @@ class HookGateTests(unittest.TestCase):
         self.assertIn("additionalContext", output["hookSpecificOutput"])
         self.assertNotIn("systemMessage", output)
 
+    def test_codex_without_target_environment_still_emits_visible_card(self):
+        env = dict(self.env)
+        for key in ("AGENTRELAY_TARGET", "CODEX_HOME", "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
+            env.pop(key, None)
+        env["HOME"] = str(self.codex_home)
+        subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "scripts/approval_policy.py"), "set", "strict",
+             "--codex-home", str(self.codex_home / ".codex")],
+            check=True, capture_output=True,
+        )
+        completed = subprocess.run(
+            [sys.executable, str(HOOK)],
+            input=json.dumps(self.payload(
+                "codex-without-target-env", "UserPromptSubmit",
+                prompt="请完整实现前后端和数据库功能，并补充测试和部署文档",
+            )),
+            text=True, capture_output=True, check=False, env=env, timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        output = json.loads(completed.stdout)
+        self.assertIn("「需求卡」", output["systemMessage"])
+
+    def test_pi_target_keeps_context_and_supports_visible_card(self):
+        self.env["AGENTRELAY_TARGET"] = "pi"
+        result = self.run_hook(self.payload(
+            "pi-large-task",
+            "UserPromptSubmit",
+            prompt="请重构整个项目的前端、后端和数据库，并补充测试和部署文档",
+        ))
+
+        self.assert_hook_ok(result)
+        output = json.loads(result.stdout)
+        self.assertIn("additionalContext", output["hookSpecificOutput"])
+        self.assertIn("systemMessage", output)
+
     def test_large_task_blocks_write_until_explicit_approval(self):
         session_id = "approve-write"
         prompt = self.run_hook(self.payload(
@@ -697,10 +1171,10 @@ class HookGateTests(unittest.TestCase):
         self.assertEqual(denied_output["permissionDecision"], "deny")
         self.assertIn("尚未获得用户批准", denied_output["permissionDecisionReason"])
         system_message = denied_payload["systemMessage"]
-        self.assertIn("AgentRelay · 写入确认卡", system_message)
+        self.assertIn("「确认卡」", system_message)
         self.assertIn("工具", system_message)
         self.assertIn("批准边界", system_message)
-        self.assertIn("✅ [1] 批准执行", system_message)
+        self.assertNotIn("1. 确认审批", system_message)
         self.assertNotIn("\x1b[", system_message)
 
         candidate = self.run_hook(self.payload(
@@ -744,6 +1218,74 @@ class HookGateTests(unittest.TestCase):
         ))
         self.assert_hook_ok(allowed)
         self.assertEqual(allowed.stdout, "")
+
+    def test_reference_ui_follow_up_shows_requirement_card(self):
+        session_id = "reference-ui-follow-up"
+        initial = self.run_hook(self.payload(
+            session_id,
+            "UserPromptSubmit",
+            prompt="你现在启动这个前端，并且使用5181端口",
+        ))
+        self.assert_hook_ok(initial)
+        initial_state = json.loads(
+            (self.codex_home / "agent_relay_tracker/sessions" / f"{session_id}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(initial_state["task_gate"]["status"], "clear")
+        self.assertNotIn("systemMessage", initial.stdout and json.loads(initial.stdout))
+
+        follow_up = self.run_hook(self.payload(
+            session_id,
+            "UserPromptSubmit",
+            prompt=(
+                "没错，但是你应该仔细看，他有一个点击事件，点击之后，他有一个遮罩层，"
+                "这个得注意，得和修改完成的一样"
+            ),
+        ))
+        self.assert_hook_ok(follow_up)
+        output = json.loads(follow_up.stdout)
+        self.assertIn("任务门禁", output["hookSpecificOutput"]["additionalContext"])
+        self.assertIn("参考图或截图推导的 UI 修改范围", output["systemMessage"])
+        self.assertIn("「需求卡」", output["systemMessage"])
+        state = json.loads(
+            (self.codex_home / "agent_relay_tracker/sessions" / f"{session_id}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(state["task_gate"]["status"], "awaiting_confirmation")
+        self.assertIsNotNone(state["task_gate"]["card_shown_sha256"])
+        self.assertEqual(state["change_contract"]["draft"], True)
+
+        blocked = self.run_hook(self.payload(
+            session_id,
+            "PreToolUse",
+            tool_name="apply_patch",
+            tool_input={"file_path": "src/views/reference-ui.vue"},
+            tool_use_id="reference-ui-patch",
+        ))
+        self.assertEqual(
+            json.loads(blocked.stdout)["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+
+    def test_screenshot_ui_question_does_not_open_requirement_card(self):
+        result = self.run_hook(self.payload(
+            "reference-ui-question",
+            "UserPromptSubmit",
+            prompt="截图里这个遮罩是什么作用？",
+        ))
+        self.assert_hook_ok(result)
+        if result.stdout:
+            output = json.loads(result.stdout)
+            self.assertNotIn("systemMessage", output)
+        state = json.loads(
+            (self.codex_home / "agent_relay_tracker/sessions/reference-ui-question.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(state["task_gate"]["status"], "clear")
+        self.assertNotIn("change_contract", state)
 
     def test_approved_task_reopens_gate_for_a_new_large_scope(self):
         session_id = "new-scope"
@@ -791,7 +1333,7 @@ class HookGateTests(unittest.TestCase):
             session_id,
             "PreToolUse",
             tool_name="exec_command",
-            tool_input={"cmd": "rm -rf build"},
+            tool_input={"cmd": "git reset --hard"},
             tool_use_id="rm-1",
         )
 
@@ -800,14 +1342,14 @@ class HookGateTests(unittest.TestCase):
         denied_payload = json.loads(denied.stdout)
         denied_output = denied_payload["hookSpecificOutput"]
         self.assertEqual(denied_output["permissionDecision"], "deny")
-        self.assertIn("删除文件或目录", denied_output["permissionDecisionReason"])
+        self.assertIn("Git 破坏性操作", denied_output["permissionDecisionReason"])
         system_message = denied_payload["systemMessage"]
-        self.assertIn("AgentRelay · 危险操作确认卡", system_message)
+        self.assertIn("危险操作确认卡", system_message)
         self.assertIn("主要风险", system_message)
         self.assertIn("[AgentRelay 安全门禁]", system_message)
-        self.assertIn("检测到高风险操作：删除文件或目录", system_message)
-        self.assertIn("🛠️ [2] 调整方案", system_message)
-        self.assertIn("⛔ [3] 取消任务", system_message)
+        self.assertIn("检测到高风险操作：Git 破坏性操作", system_message)
+        self.assertNotIn("2. 修改需求", system_message)
+        self.assertNotIn("3. 拒绝审批", system_message)
         self.assertNotIn("\x1b[", system_message)
 
         candidate = self.run_hook(self.payload(
@@ -832,7 +1374,7 @@ class HookGateTests(unittest.TestCase):
 
         changed = self.run_hook({
             **command,
-            "tool_input": {"cmd": "rm -rf dist"},
+            "tool_input": {"cmd": "git reset --hard HEAD~1"},
             "tool_use_id": "rm-3",
         })
         self.assert_hook_ok(changed)
@@ -908,8 +1450,6 @@ class HookGateTests(unittest.TestCase):
             f"rm {' '.join(map(str, screenshots))}",
             f"rm -f {' '.join(map(str, screenshots))}",
             f"unlink {screenshots[0]}",
-            f"unlink {screenshots[1]} && unlink {screenshots[2]} && "
-            f"test ! -e {screenshots[1]} && test ! -e {screenshots[2]}",
         )):
             result = self.run_hook(self.payload(
                 f"safe-screenshot-cleanup-{index}",
@@ -918,8 +1458,16 @@ class HookGateTests(unittest.TestCase):
                 tool_input={"cmd": command},
                 tool_use_id=f"safe-screenshot-cleanup-{index}",
             ))
-            self.assert_hook_ok(result)
-            self.assertEqual(result.stdout, "", command)
+            output = json.loads(result.stdout)
+            self.assertNotIn("systemMessage", output)
+            self.assertIn("deletion_policy.py", output["hookSpecificOutput"]["permissionDecisionReason"])
+
+        chain = self.run_hook(self.payload(
+            "safe-screenshot-chain", "PreToolUse", tool_name="exec_command",
+            tool_input={"cmd": f"unlink {screenshots[1]} && unlink {screenshots[2]}"},
+            tool_use_id="safe-screenshot-chain",
+        ))
+        self.assertIn("不允许整链一次批准", chain.stdout)
 
     def test_explicit_dcm_verification_directory_screenshots_can_be_cleaned(self):
         temp = Path(tempfile.mkdtemp(prefix="agentrelay-review-"))
@@ -933,15 +1481,16 @@ class HookGateTests(unittest.TestCase):
         for screenshot in screenshots:
             screenshot.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-        result = self.run_hook(self.payload(
-            "safe-dcm-screenshot-cleanup",
-            "PreToolUse",
-            tool_name="exec_command",
-            tool_input={"cmd": f"unlink {screenshots[0]} && unlink {screenshots[1]}"},
-            tool_use_id="safe-dcm-screenshot-cleanup",
-        ))
-        self.assert_hook_ok(result)
-        self.assertEqual(result.stdout, "")
+        for index, screenshot in enumerate(screenshots):
+            result = self.run_hook(self.payload(
+                f"safe-dcm-screenshot-cleanup-{index}",
+                "PreToolUse", tool_name="exec_command",
+                tool_input={"cmd": f"unlink {screenshot}"},
+                tool_use_id=f"safe-dcm-screenshot-cleanup-{index}",
+            ))
+            output = json.loads(result.stdout)
+            self.assertNotIn("systemMessage", output)
+            self.assertIn("deletion_policy.py", output["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_screenshot_cleanup_exemption_remains_narrow(self):
         evidence = Path(tempfile.mkdtemp(prefix="agentrelay-review-"))
@@ -955,7 +1504,6 @@ class HookGateTests(unittest.TestCase):
         outside_image.write_bytes(b"\x89PNG\r\n\x1a\n")
 
         cases = (
-            f"rm -rf {screenshot}",
             f"rm {screenshot} {ordinary_image}",
             f"rm {evidence / 'review-*.png'}",
             f"rm {outside_image}",
@@ -972,6 +1520,169 @@ class HookGateTests(unittest.TestCase):
             output = json.loads(result.stdout)["hookSpecificOutput"]
             self.assertEqual(output["permissionDecision"], "deny", command)
             self.assertIn("删除文件或目录", output["permissionDecisionReason"])
+
+    def test_policy_tightening_invalidates_pending_danger_approval(self):
+        subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "scripts/approval_policy.py"), "set", "relaxed",
+             "--codex-home", str(self.codex_home)],
+            check=True, capture_output=True,
+        )
+        session = "policy-tightening"
+        command = self.payload(
+            session, "PreToolUse", tool_name="exec_command",
+            tool_input={"cmd": "git reset --hard"}, tool_use_id="policy-danger",
+        )
+        denied = self.run_hook(command)
+        self.assertEqual(json.loads(denied.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+        candidate = self.run_hook(self.payload(session, "UserPromptSubmit", prompt="批准"))
+        resolved = self.resolve_intent(session, self.semantic_source_hash(candidate))
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        # Do not consume the one-shot approval before tightening the policy.
+
+        subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "scripts/approval_policy.py"), "set", "standard",
+             "--codex-home", str(self.codex_home)],
+            check=True, capture_output=True,
+        )
+        blocked = self.run_hook(command)
+        self.assertEqual(json.loads(blocked.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("权限模式比批准时更严格", blocked.stdout)
+
+    def test_default_temporary_evidence_is_recycled_without_direct_delete(self):
+        evidence = Path(tempfile.mkdtemp(prefix="agentrelay-review-")) / "agentrelay-review-before.png"
+        evidence.write_bytes(b"image")
+        payload = self.payload(
+            "recycle-default", "PreToolUse", tool_name="exec_command",
+            tool_input={"cmd": f"rm {evidence}"}, tool_use_id="recycle-default",
+        )
+        result = self.run_hook(payload)
+        output = json.loads(result.stdout)
+        self.assertNotIn("systemMessage", output)
+        replacement = output["hookSpecificOutput"]["permissionDecisionReason"].splitlines()[-1]
+        self.assertIn("deletion_policy.py", replacement)
+        self.assertEqual(self.run_hook({**payload, "tool_input": {"cmd": replacement}}).stdout, "")
+        completed = subprocess.run(replacement, shell=True, cwd=PROJECT_ROOT, text=True, capture_output=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertFalse(evidence.exists())
+        manifest = self.codex_home / "agent_relay_tracker" / "trash" / "manifests"
+        self.assertTrue(list(manifest.glob("*.json")))
+
+    def test_default_persistent_delete_still_requires_approval(self):
+        target = self.codex_home / "important-user-document.txt"
+        target.write_text("keep")
+        result = self.run_hook(self.payload(
+            "persistent-default", "PreToolUse", tool_name="exec_command",
+            tool_input={"cmd": f"rm {target}"}, tool_use_id="persistent-default",
+        ))
+        output = json.loads(result.stdout)
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("危险操作确认卡", output["systemMessage"])
+        self.assertIn("尚未获得用户批准", output["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertTrue(target.exists())
+
+    def test_strict_delete_confirms_then_requires_managed_recycle(self):
+        subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "scripts/approval_policy.py"), "set", "strict",
+             "--codex-home", str(self.codex_home)],
+            check=True, capture_output=True,
+        )
+        session_id = "strict-recycle"
+        target = self.codex_home / "old-output.txt"
+        target.write_text("generated")
+        payload = self.payload(
+            session_id,
+            "PreToolUse",
+            tool_name="exec_command",
+            tool_input={"cmd": f"rm {target}"},
+            tool_use_id="strict-rm",
+        )
+
+        denied = self.run_hook(payload)
+        self.assert_hook_ok(denied)
+        denied_output = json.loads(denied.stdout)
+        self.assertEqual(
+            denied_output["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+        self.assertIn("危险操作确认卡", denied_output["systemMessage"])
+        self.assertIn("尚未获得用户批准", denied_output["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertNotIn("未显示额外审批卡", denied.stdout)
+        self.assertTrue(target.exists())
+
+        candidate = self.run_hook(self.payload(
+            session_id,
+            "UserPromptSubmit",
+            prompt="批准",
+        ))
+        resolved = self.resolve_intent(session_id, self.semantic_source_hash(candidate))
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+
+        recycled = self.run_hook(payload)
+        self.assert_hook_ok(recycled)
+        recycled_output = json.loads(recycled.stdout)
+        self.assertEqual(
+            recycled_output["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+        self.assertNotIn("systemMessage", recycled_output)
+        reason = recycled_output["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("strict 模式不执行原始永久删除", reason)
+        replacement = reason.splitlines()[-1]
+        self.assertIn("deletion_policy.py", replacement)
+        self.assertTrue(target.exists())
+
+        managed = self.run_hook({
+            **payload,
+            "tool_input": {"cmd": replacement},
+            "tool_use_id": "strict-managed-rm",
+        })
+        self.assert_hook_ok(managed)
+        self.assertEqual(managed.stdout, "")
+        completed = subprocess.run(
+            replacement,
+            shell=True,
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertFalse(target.exists())
+        manifests = self.codex_home / "agent_relay_tracker" / "trash" / "manifests"
+        manifest = max(manifests.glob("*.json"), key=lambda path: path.stat().st_mtime_ns)
+        receipt = json.loads(manifest.read_text(encoding="utf-8"))
+        destination = Path(receipt["items"][0]["destination"])
+        self.assertTrue(destination.is_file())
+        self.assertEqual(destination.read_text(encoding="utf-8"), "generated")
+
+    def test_relaxed_delete_keeps_direct_behavior(self):
+        subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "scripts/approval_policy.py"), "set", "relaxed",
+             "--codex-home", str(self.codex_home)],
+            check=True, capture_output=True,
+        )
+        target = self.codex_home / "disposable.txt"
+        target.write_text("delete")
+        result = self.run_hook(self.payload(
+            "relaxed-delete", "PreToolUse", tool_name="exec_command",
+            tool_input={"cmd": f"rm {target}"}, tool_use_id="relaxed-delete",
+        ))
+        self.assert_hook_ok(result)
+        self.assertEqual(result.stdout, "")
+        self.assertTrue(target.exists())
+        completed = subprocess.run(["rm", str(target)], check=False, capture_output=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        self.assertFalse(target.exists())
+
+    def test_dangerous_chain_cannot_be_approved_as_one_action(self):
+        result = self.run_hook(self.payload(
+            "danger-chain", "PreToolUse", tool_name="exec_command",
+            tool_input={"cmd": "rm -rf /tmp/example && git clone https://example.invalid/repo /tmp/example"},
+            tool_use_id="danger-chain",
+        ))
+        output = json.loads(result.stdout)
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("不允许整链一次批准", output["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_wrapped_shell_write_is_blocked_by_task_gate(self):
         session_id = "wrapped-write"
@@ -1018,7 +1729,29 @@ class HookGateTests(unittest.TestCase):
             tool_use_id="b-patch",
         ))
         self.assert_hook_ok(safe_other_session)
-        self.assertEqual(safe_other_session.stdout, "")
+        other_output = json.loads(safe_other_session.stdout)["hookSpecificOutput"]
+        self.assertEqual(other_output["permissionDecision"], "deny")
+        self.assertIn("工作档", other_output["permissionDecisionReason"])
+        self.assertNotIn(
+            "当前任务尚未获得用户批准",
+            other_output["permissionDecisionReason"],
+        )
+        selected = self.run_tracker(
+            "select-work-profile",
+            "--session", "session-b",
+            "--profile", "light",
+            "--reason", "隔离测试中的单点写入",
+        )
+        self.assert_hook_ok(selected)
+        allowed = self.run_hook(self.payload(
+            "session-b",
+            "PreToolUse",
+            tool_name="apply_patch",
+            tool_input={"input": "*** Begin Patch"},
+            tool_use_id="b-patch-after-profile",
+        ))
+        self.assert_hook_ok(allowed)
+        self.assertEqual(allowed.stdout, "")
 
     def test_missing_session_id_is_ignored_without_shared_state(self):
         result = self.run_hook({
@@ -1047,7 +1780,7 @@ class HookGateTests(unittest.TestCase):
         self.assertEqual(output["hookEventName"], "UserPromptSubmit")
         self.assertIn("任务门禁", output["additionalContext"])
         self.assertIn(
-            "AgentRelay · 需求确认卡",
+            "「需求卡」",
             json.loads(result.stdout)["systemMessage"],
         )
 

@@ -552,46 +552,51 @@ class AgentRelayConsoleCardTests(unittest.TestCase):
         self.assertEqual(
             render_requirement_card(self.requirement, style="default"),
             "\n".join([
+                "「需求卡」",
                 CODEX_DIVIDER,
-                "「AgentRelay · 需求卡」",
+                "- 任务：     重构 Fusion Provider 的选择与锁机制",
+                "- 任务ID：   task-20261102-a1b2",
+                "- 需求评估： 跨模块或高风险任务",
+                "- 大白话：   分析并修改相关代码，然后执行验证。",
+                "- 影响模块： Fusion、任务调度",
+                "- 影响文件： scripts/fusion_mode.py、scripts/fusion_runner.py",
+                "- 当前功能： 现有实现待重构，等待确认",
+                "- 目标功能： 按目标架构完成重构并通过验证",
+                "- 风险：     范围扩大风险、兼容性风险",
+                "- 验证：     修改后通过验证、python -m pytest",
+                "- 回滚：     保存修改前内容、失败时逐文件恢复",
                 CODEX_DIVIDER,
-                "",
-                "任务:   task-20261102-a1b2",
-                "用户需求: 重构 Fusion Provider 的选择与锁机制",
-                "需求评估: 跨模块或高风险任务",
-                "大白话:  分析并修改相关代码，然后执行验证。",
-                "影响模块: Fusion、任务调度",
-                "影响文件: scripts/fusion_mode.py、scripts/fusion_runner.py",
-                "当前功能: 现有实现待重构，等待确认",
-                "目标功能: 按目标架构完成重构并通过验证",
-                "风险:   范围扩大风险、兼容性风险",
-                "验证:   修改后通过验证、python -m pytest",
-                "回滚:   保存修改前内容、失败时逐文件恢复",
+                "1. 确认审批",
+                "2. 修改需求",
+                "3. 拒绝审批",
                 CODEX_DIVIDER,
             ]),
         )
 
     def test_default_confirmation_card_matches_existing_plain_format(self):
         output = render_confirmation_card(self.confirmation, style="default")
-        self.assertTrue(output.startswith(CODEX_DIVIDER + "\n「AgentRelay · 执行确认卡」\n" + CODEX_DIVIDER + "\n"))
+        self.assertTrue(output.startswith("「确认卡」\n" + CODEX_DIVIDER + "\n- 任务："))
         self.assertTrue(output.endswith(CODEX_DIVIDER))
-        self.assertIn("状态:   pending", output)
-        self.assertIn("当前确认: 执行确认的修改", output)
-        self.assertIn("修改尝试: 0", output)
-        self.assertIn("最近错误: 无", output)
+        self.assertIn("- 任务：     重构 Fusion Provider 的选择与锁机制", output)
+        self.assertIn("- 任务ID：   task-20261102-a1b2", output)
+        self.assertIn("- 状态：     pending", output)
+        self.assertIn("- 当前确认： 执行确认的修改", output)
+        self.assertIn("- 修改尝试： 0", output)
+        self.assertIn("- 最近错误： 无", output)
+        self.assertIn("1. 确认审批\n2. 修改需求\n3. 拒绝审批", output)
         self.assertNotIn("\033[", output)
 
     def test_codex_requirement_card_is_colorful_and_keeps_all_fields(self):
         output = render_requirement_card(self.requirement, style="codex")
-        self.assertIn(f"{ANSI_RED_BOLD}「AgentRelay · 需求卡」{ANSI_RESET}", output)
-        self.assertIn(f"{ANSI_BLUE_BOLD}任务:  {ANSI_RESET}", output)
+        self.assertIn(f"{ANSI_RED_BOLD}「需求卡」{ANSI_RESET}", output)
+        self.assertIn(f"{ANSI_BLUE_BOLD}- 任务：     {ANSI_RESET}", output)
         self.assertIn(f"{ANSI_GREEN}task-20261102-a1b2{ANSI_RESET}", output)
         self.assertIn(
             f"{ANSI_RED_BOLD}范围扩大风险、兼容性风险{ANSI_RESET}",
             output,
         )
         for label in (
-            "用户需求",
+            "任务ID",
             "需求评估",
             "大白话",
             "影响模块",
@@ -606,14 +611,15 @@ class AgentRelayConsoleCardTests(unittest.TestCase):
 
     def test_codex_confirmation_card_keeps_details_and_uses_numbered_choices(self):
         output = render_confirmation_card(self.confirmation, style="codex")
-        self.assertIn(f"{ANSI_RED_BOLD}「AgentRelay · 执行确认卡」{ANSI_RESET}", output)
+        self.assertIn(f"{ANSI_RED_BOLD}「确认卡」{ANSI_RESET}", output)
         self.assertIn(f"{ANSI_GREEN}pending{ANSI_RESET}", output)
         self.assertIn(CODEX_DIVIDER, output)
-        self.assertIn(f"{ANSI_GREEN}[1] 批准执行{ANSI_RESET}", output)
-        self.assertIn(f"{ANSI_BLUE_BOLD}[2] 调整方案{ANSI_RESET}", output)
-        self.assertIn(f"{ANSI_RED_BOLD}[3] 取消任务{ANSI_RESET}", output)
+        self.assertIn(f"{ANSI_GREEN}1. 确认审批{ANSI_RESET}", output)
+        self.assertIn(f"{ANSI_BLUE_BOLD}2. 修改需求{ANSI_RESET}", output)
+        self.assertIn(f"{ANSI_RED_BOLD}3. 拒绝审批{ANSI_RESET}", output)
         for label in (
             "任务",
+            "任务ID",
             "状态",
             "当前确认",
             "授权文件",
@@ -1024,6 +1030,91 @@ class SkillInstallerSourceTests(unittest.TestCase):
             install_skill.call_args_list[2].kwargs["skill_name"],
             "agent-fusion",
         )
+
+    def test_failed_target_verification_is_an_install_error(self):
+        installer = load_module(
+            "agent_relay_installer_failed_verification",
+            PROJECT_ROOT / "install.py",
+        )
+        from scripts import agent_targets
+
+        meta = {
+            "label": "测试目标",
+            "skill_dir": str(Path(tempfile.gettempdir()) / "agent-relay"),
+            "detect": "",
+            "level": "full",
+        }
+        with mock.patch.object(
+            agent_targets, "agent_targets", return_value={"test": meta},
+        ), mock.patch.object(
+            agent_targets, "install_skill_to",
+        ), mock.patch.object(
+            agent_targets, "verify_target", return_value=[
+                {"name": "可见卡协议", "ok": False, "detail": "缺少 systemMessage"},
+                {"name": "Hook 干跑", "ok": True, "detail": "正常"},
+            ],
+        ):
+            results, errors = installer.apply_agent_targets(["test"])
+
+        self.assertEqual(len(results["test"]), 2)
+        self.assertIn("可见卡协议", errors["test"])
+        self.assertIn("缺少 systemMessage", errors["test"])
+
+    def test_main_returns_nonzero_for_failed_target_verification(self):
+        installer = load_module(
+            "agent_relay_installer_main_failed_verification",
+            PROJECT_ROOT / "install.py",
+        )
+        with mock.patch.object(installer, "validate_publish_tree"), \
+                mock.patch.object(installer, "check_base_environment"), \
+                mock.patch.object(installer, "ensure_virtualenv"), \
+                mock.patch.object(installer, "install_dependencies"), \
+                mock.patch.object(installer, "install_and_verify_chromium"), \
+                mock.patch.object(installer, "install_files"), \
+                mock.patch.object(installer, "merge_hooks_json"), \
+                mock.patch.object(installer, "_load_local_config", return_value=({}, mock.Mock())), \
+                mock.patch.object(installer, "write_daemon_service_config", return_value=None), \
+                mock.patch.object(installer, "print_next_steps"), \
+                mock.patch.object(installer, "print_verify_results"), \
+                mock.patch.object(installer, "apply_agent_targets", return_value=(
+                    {"claude": [{"name": "可见卡协议", "ok": False, "detail": "缺少 systemMessage"}]},
+                    {"claude": "可见卡协议：缺少 systemMessage"},
+                )):
+            self.assertEqual(installer.main(["--targets", "claude", "--no-menu"]), 1)
+
+    def test_claude_target_install_registers_explicit_shim_target(self):
+        installer = load_module(
+            "agent_relay_installer_claude_target",
+            PROJECT_ROOT / "install.py",
+        )
+        from scripts import agent_targets
+
+        with tempfile.TemporaryDirectory(
+            prefix="agentrelay-install-claude-"
+        ) as directory:
+            tmp = Path(directory)
+            skill_dir = tmp / "skills" / "agent-relay"
+            meta = {
+                "id": "claude", "label": "Claude Code", "level": "full",
+                "skill_dir": str(skill_dir), "detect": "claude",
+                "config_path": str(tmp / "settings.json"),
+            }
+            with mock.patch.object(
+                agent_targets, "agent_targets", return_value={"claude": meta},
+            ), mock.patch.object(
+                agent_targets, "install_skill_to",
+            ), mock.patch.object(
+                agent_targets, "verify_target", return_value=[],
+            ), mock.patch.object(
+                agent_targets, "register_claude", return_value=True,
+            ) as register:
+                results, errors = installer.apply_agent_targets(["claude"])
+
+        self.assertEqual(results, {"claude": []})
+        self.assertEqual(errors, {})
+        command = register.call_args.args[1]
+        self.assertIn("agentrelay_hook_shim.py", command)
+        self.assertIn("--target claude", command)
 
 
 if __name__ == "__main__":

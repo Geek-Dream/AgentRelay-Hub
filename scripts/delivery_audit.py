@@ -225,10 +225,43 @@ def _inside_workspace(workspace: Path, value: str) -> str | None:
     return str(absolute)
 
 
+def _canonical_requirements(requirements: Iterable[str | dict[str, Any]],
+                            request: str) -> list[dict[str, str]]:
+    """Normalize the original requirement list that completion must cover."""
+    values = list(requirements or [])
+    if not values:
+        values = [request.strip() or "当前任务的原始需求"]
+    normalized: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for index, value in enumerate(values, 1):
+        if isinstance(value, dict):
+            requirement_id = str(value.get("id") or f"R{index}").strip()
+            text = str(value.get("text") or "").strip()
+        else:
+            requirement_id = f"R{index}"
+            text = str(value or "").strip()
+        if not requirement_id:
+            raise ValueError("canonical 需求必须有 id")
+        if not text:
+            raise ValueError(f"canonical 需求 {requirement_id} 不能为空")
+        if requirement_id in seen:
+            raise ValueError(f"canonical 需求 id 重复：{requirement_id}")
+        seen.add(requirement_id)
+        normalized.append({"id": requirement_id, "text": text})
+    return normalized
+
+
+def _requirements_fingerprint(requirements: list[dict[str, str]]) -> str:
+    payload = json.dumps(requirements, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def begin(home: Path, session_id: str, workspace: str | Path, request: str, *,
           mode: str = "standard", files: Iterable[str] = (),
           task_id: str = "", style_change: bool = False,
-          activate: bool | None = None) -> dict[str, Any]:
+          activate: bool | None = None, work_profile: str | None = None,
+          logic_change: bool | None = None,
+          canonical_requirements: Iterable[str | dict[str, Any]] = ()) -> dict[str, Any]:
     root = Path(workspace).expanduser().resolve()
     tracked = [value for value in (_inside_workspace(root, str(item)) for item in files) if value]
     tracked = sorted(set(tracked))
@@ -246,17 +279,55 @@ def begin(home: Path, session_id: str, workspace: str | Path, request: str, *,
         tracked = sorted(set(tracked) | set(previous_files)) if same_task else tracked
         fingerprint = workspace_fingerprint(root, tracked)
         checks = (existing.get("checks") or {}) if same_task else {}
-        if same_task and existing.get("fingerprint") != fingerprint:
+        candidate_changed = same_task and existing.get("fingerprint") != fingerprint
+        if candidate_changed:
             checks = {}
+        baseline_fingerprint = (
+            str(existing.get("baseline_fingerprint") or existing.get("fingerprint") or fingerprint)
+            if same_task else fingerprint
+        )
+        red_behavior = existing.get("red_behavior") if same_task else None
+        if isinstance(red_behavior, dict) and red_behavior.get("fingerprint") != baseline_fingerprint:
+            red_behavior = None
+        review_fingerprint = existing.get("review_fingerprint") if same_task else None
+        if candidate_changed or review_fingerprint != fingerprint:
+            review_fingerprint = None
         request_text = str(request).strip() or str(existing.get("request") or "")
         if request_text.lstrip().startswith("<task-notification>"):
             request_text = str(existing.get("request") or "")
+        requirements_source = list(canonical_requirements or [])
+        existing_canonical = (
+            existing.get("canonical_requirements") if same_task else None
+        )
+        if same_task and existing_canonical and candidate_changed:
+            # Scope cannot be shrunk after work has started. A genuinely
+            # expanded task must receive a new task_id and a new confirmation.
+            canonical = _canonical_requirements(existing_canonical, request_text)
+        elif requirements_source:
+            canonical = _canonical_requirements(requirements_source, request_text)
+        elif existing_canonical:
+            canonical = _canonical_requirements(
+                existing_canonical or [], request_text,
+            )
+        else:
+            canonical = _canonical_requirements([], request_text)
+        inferred_logic = logic_change
+        if inferred_logic is None:
+            inferred_logic = bool(
+                same_task
+                and existing.get("logic_change")
+                and not style_change
+            )
         state = {
-            "version": 1, "status": "pending", "mode": mode,
+            "version": 2, "status": "pending", "mode": mode,
             "workspace": str(root),
             "request": request_text,
+            "canonical_requirements": canonical,
+            "canonical_requirements_sha256": _requirements_fingerprint(canonical),
             "task_id": current_task_id,
             "style_change": bool(style_change),
+            "work_profile": work_profile or existing.get("work_profile"),
+            "logic_change": bool(inferred_logic),
             "active_edit": (
                 bool(activate)
                 if activate is not None
@@ -264,8 +335,36 @@ def begin(home: Path, session_id: str, workspace: str | Path, request: str, *,
             ),
             "files": tracked, "started_at": time.time(),
             "fingerprint": fingerprint,
+            "baseline_fingerprint": baseline_fingerprint,
+            "candidate_fingerprint": fingerprint,
+            "review_fingerprint": review_fingerprint,
+            "red_behavior": red_behavior,
             "checks": checks, "attempts": int(existing.get("attempts") or 0) + 1,
         }
+        write_state_unlocked(path, state)
+        return _status_from_state(state)
+
+
+def set_requirements(home: Path, session_id: str,
+                     requirements: Iterable[str | dict[str, Any]]) -> dict[str, Any]:
+    """Freeze the canonical requirement list before the first real write."""
+    path = state_path(home, session_id)
+    with session_lock(home, session_id):
+        state = read_state_unlocked(path)
+        if not state:
+            raise ValueError("没有待审计任务")
+        current = workspace_fingerprint(
+            Path(state["workspace"]), state.get("files") or [],
+        )
+        baseline = str(state.get("baseline_fingerprint") or state.get("fingerprint") or "")
+        if current != baseline or current != str(state.get("fingerprint") or ""):
+            raise ValueError("首次写入后不能重定义 canonical 需求；请按原始任务记录缺口")
+        canonical = _canonical_requirements(requirements, str(state.get("request") or ""))
+        state["version"] = 2
+        state["canonical_requirements"] = canonical
+        state["canonical_requirements_sha256"] = _requirements_fingerprint(canonical)
+        if isinstance(state.get("checks"), dict):
+            state["checks"].pop("requirements", None)
         write_state_unlocked(path, state)
         return _status_from_state(state)
 
@@ -314,7 +413,36 @@ def required_checks(home: Path, session_id: str) -> set[str]:
 
 
 def _stale(state: dict[str, Any]) -> bool:
-    return state.get("fingerprint") != workspace_fingerprint(Path(state["workspace"]), state.get("files") or [])
+    if not state:
+        return False
+    current = workspace_fingerprint(Path(state["workspace"]), state.get("files") or [])
+    if state.get("fingerprint") != current:
+        return True
+    review = state.get("review_fingerprint")
+    return bool(review and review != current)
+
+
+def refresh_candidate(home: Path, session_id: str) -> dict[str, Any]:
+    """Accept a real post-write candidate while keeping the pre-change baseline."""
+    path = state_path(home, session_id)
+    with session_lock(home, session_id):
+        state = read_state_unlocked(path)
+        if not state:
+            raise ValueError("没有待审计任务")
+        current = workspace_fingerprint(
+            Path(state["workspace"]), state.get("files") or [],
+        )
+        if state.get("fingerprint") != current:
+            state["checks"] = {}
+            state["review_fingerprint"] = None
+            state["status"] = "pending"
+        state["version"] = 2
+        state["candidate_fingerprint"] = current
+        state["fingerprint"] = current
+        state.setdefault("baseline_fingerprint", current)
+        state.setdefault("red_behavior", None)
+        write_state_unlocked(path, state)
+        return _status_from_state(state)
 
 
 def _check_passed(state: dict[str, Any], name: str) -> bool:
@@ -350,13 +478,47 @@ def record_check(home: Path, session_id: str, name: str, passed: bool,
         if name == "requirements":
             if not isinstance(evidence, list) or not evidence:
                 raise ValueError("需求审计必须逐项列出需求、状态和证据")
+            canonical = _canonical_requirements(
+                state.get("canonical_requirements") or [],
+                str(state.get("request") or ""),
+            )
+            canonical_ids = {item["id"] for item in canonical}
+            normalized_evidence = []
+            evidence_ids: list[str] = []
             for item in evidence:
-                if not isinstance(item, dict) or not str(item.get("item") or "").strip() \
-                        or item.get("status") not in {"done", "changed", "partial", "not_done", "unverifiable"} \
+                status_value = str(item.get("status") or "").strip().upper() if isinstance(item, dict) else ""
+                requirement_id = (
+                    str(item.get("requirement_id") or "").strip()
+                    if isinstance(item, dict) else ""
+                )
+                if isinstance(item, dict) and status_value in {
+                    "DONE", "CHANGED", "PARTIAL", "NOT_DONE", "UNVERIFIABLE",
+                }:
+                    normalized_evidence.append(dict(
+                        item, status=status_value, requirement_id=requirement_id,
+                    ))
+                    evidence_ids.append(requirement_id)
+                if not isinstance(item, dict) or not requirement_id \
+                        or not str(item.get("item") or "").strip() \
+                        or status_value not in {"DONE", "CHANGED", "PARTIAL", "NOT_DONE", "UNVERIFIABLE"} \
                         or not str(item.get("evidence") or "").strip():
-                    raise ValueError("每项需求必须有状态和具体证据")
-                if passed and item.get("status") not in {"done", "changed"}:
+                    raise ValueError("每项需求必须有 requirement_id、状态和具体证据")
+                if requirement_id not in canonical_ids:
+                    raise ValueError(f"需求证据引用了不存在的 canonical id：{requirement_id}")
+                if passed and status_value not in {"DONE", "CHANGED"}:
                     raise ValueError("partial/not_done/unverifiable 需求不能标记通过，必须继续实现或明确未验证")
+            if len(evidence_ids) != len(set(evidence_ids)):
+                raise ValueError("同一 canonical 需求不能重复登记；请合并实际证据")
+            if passed and set(evidence_ids) != canonical_ids:
+                missing = sorted(canonical_ids - set(evidence_ids))
+                extra = sorted(set(evidence_ids) - canonical_ids)
+                detail = []
+                if missing:
+                    detail.append("缺少 " + "、".join(missing))
+                if extra:
+                    detail.append("多余 " + "、".join(extra))
+                raise ValueError("需求证据必须完整覆盖 canonical 清单：" + "；".join(detail))
+            evidence = normalized_evidence
         elif name in {"diff", "self_review"}:
             if not isinstance(evidence, str) or len(evidence.strip()) < 8:
                 raise ValueError("diff/主审必须记录实际读取和检查结论，不能只写通过")
@@ -399,8 +561,14 @@ def record_check(home: Path, session_id: str, name: str, passed: bool,
             else:
                 raise ValueError("独立审计状态必须是 success 或 unavailable")
         checks = dict(state.get("checks") or {})
+        fingerprint = state["fingerprint"]
+        if name in {"self_review", "independent_review"}:
+            review = str(state.get("review_fingerprint") or "")
+            if review and review != fingerprint:
+                raise ValueError("评审后候选版本已变化，旧评审证据已过期；必须重新审查")
+            state["review_fingerprint"] = fingerprint
         checks[name] = {"passed": bool(passed), "evidence": evidence, "notes": notes.strip(),
-                        "checked_at": time.time(), "fingerprint": state["fingerprint"]}
+                        "checked_at": time.time(), "fingerprint": fingerprint}
         state["checks"] = checks
         state["status"] = "pending"
         write_state_unlocked(path, state)
@@ -479,9 +647,22 @@ def _status_from_state(state: dict[str, Any]) -> dict[str, Any]:
     required = _required_checks_from_state(state)
     pending = sorted(name for name in required if not _check_passed(state, name))
     failed = sorted(name for name, item in (state.get("checks") or {}).items() if item.get("passed") is False)
+    requirement_evidence = (
+        ((state.get("checks") or {}).get("requirements") or {}).get("evidence") or []
+    )
+    requirement_coverage = [
+        {
+            "id": item.get("requirement_id"),
+            "status": item.get("status"),
+            "item": item.get("item"),
+        }
+        for item in requirement_evidence if isinstance(item, dict)
+    ] if isinstance(requirement_evidence, list) else []
     result = dict(state)
-    result.update(status="stale" if _stale(state) else ("passed" if not pending and not failed else "pending"),
+    stale = _stale(state)
+    result.update(status="stale" if stale else ("passed" if not pending and not failed else "pending"),
                   pending_checks=pending, failed_checks=failed, required_checks=sorted(required))
+    result["requirement_coverage"] = requirement_coverage
     return result
 
 
@@ -515,21 +696,10 @@ def _command_allowed(command: str) -> bool:
         return module.dangerous_command_reason("Bash", {"command": command}) is None
 
 
-def run_behavior(home: Path, session_id: str, command: str, *,
-                 kind: str = "test", timeout: int = 120) -> dict[str, Any]:
-    """Run a real project check and store its outcome, including failures."""
-    if not command.strip():
-        raise ValueError("行为检查命令不能为空")
-    if not _command_allowed(command):
-        raise ValueError("审计行为检查不允许危险、部署或破坏性命令")
-    state = read_state(home, session_id)
-    if not state:
-        raise ValueError("没有待审计任务")
-    if _stale(state):
-        raise ValueError("工作区已变化，先重新读取 diff 并刷新审计，不能在过期版本上执行验收")
+def _execute_behavior(command: str, workspace: str, *, kind: str, timeout: int) -> dict[str, Any]:
     started = time.time()
     try:
-        completed = subprocess.run(command, cwd=state["workspace"], shell=True,
+        completed = subprocess.run(command, cwd=workspace, shell=True,
                                    capture_output=True, text=True, timeout=timeout, check=False)
         exit_code = completed.returncode
         stdout = completed.stdout[-4000:]
@@ -546,15 +716,93 @@ def run_behavior(home: Path, session_id: str, command: str, *,
     if kind == "test":
         patterns = [r"Ran\s+(\d+)\s+tests?", r"(\d+)\s+passed", r"(\d+)\s+tests?\s+passed",
                     r"(\d+)\s+tests?\s+completed", r"(\d+)\s+examples?"]
-        counts = [int(match.group(1)) for pattern in patterns if (match := re.search(pattern, stdout + "\n" + stderr, re.I))]
+        counts = [
+            int(match.group(1))
+            for pattern in patterns
+            if (match := re.search(pattern, stdout + "\n" + stderr, re.I))
+        ]
         tests_ran = max(counts, default=0)
-    evidence = {
+    return {
         "command": command, "kind": kind, "executed": True, "exit_code": exit_code,
         "tests_ran": tests_ran, "duration_seconds": round(time.time() - started, 3),
         "stdout_tail": stdout, "stderr_tail": stderr,
     }
-    return record_check(home, session_id, "behavior", exit_code == 0 and (kind != "test" or tests_ran > 0), evidence,
-                        recheck=True)
+
+
+def record_red_behavior(home: Path, session_id: str, evidence: dict[str, Any]) -> dict[str, Any]:
+    """Store a real failing probe against the immutable pre-change baseline."""
+    path = state_path(home, session_id)
+    with session_lock(home, session_id):
+        state = read_state_unlocked(path)
+        if not state:
+            raise ValueError("没有待审计任务")
+        baseline = str(state.get("baseline_fingerprint") or state.get("fingerprint") or "")
+        current = workspace_fingerprint(
+            Path(state["workspace"]), state.get("files") or [],
+        )
+        if not baseline or current != baseline:
+            raise ValueError("RED 必须记录在修改前基线上；当前候选已变化")
+        if evidence.get("fingerprint") != baseline:
+            raise ValueError("RED 证据指纹与修改前基线不一致")
+        state["version"] = 2
+        state["red_behavior"] = dict(
+            evidence,
+            recorded_at=time.time(),
+            passed=bool(evidence.get("exit_code") != 0 and (
+                evidence.get("kind") != "test" or int(evidence.get("tests_ran") or 0) > 0
+            )),
+        )
+        write_state_unlocked(path, state)
+        return _status_from_state(state)
+
+
+def run_behavior(home: Path, session_id: str, command: str, *,
+                 kind: str = "test", timeout: int = 120,
+                 phase: str = "green") -> dict[str, Any]:
+    """Run a real project check and bind it to RED baseline or GREEN candidate."""
+    if not command.strip():
+        raise ValueError("行为检查命令不能为空")
+    if not _command_allowed(command):
+        raise ValueError("审计行为检查不允许危险、部署或破坏性命令")
+    if phase not in {"red", "green"}:
+        raise ValueError("行为检查阶段必须是 red 或 green")
+    state = read_state(home, session_id)
+    if not state:
+        raise ValueError("没有待审计任务")
+    if phase == "red":
+        baseline = str(state.get("baseline_fingerprint") or state.get("fingerprint") or "")
+        current = workspace_fingerprint(Path(state["workspace"]), state.get("files") or [])
+        if current != baseline:
+            raise ValueError("RED 必须在修改前基线上执行；当前候选已经变化")
+        evidence = _execute_behavior(
+            command, state["workspace"], kind=kind, timeout=timeout,
+        )
+        after = workspace_fingerprint(Path(state["workspace"]), state.get("files") or [])
+        if after != baseline:
+            raise ValueError("RED 命令执行后工作区发生变化，不能作为稳定基线证据")
+        evidence["fingerprint"] = baseline
+        evidence["phase"] = "red"
+        return record_red_behavior(home, session_id, evidence)
+
+    refresh_candidate(home, session_id)
+    state = read_state(home, session_id)
+    candidate = str(state.get("candidate_fingerprint") or state.get("fingerprint") or "")
+    if not candidate:
+        raise ValueError("缺少候选指纹，不能登记 GREEN")
+    evidence = _execute_behavior(
+        command, state["workspace"], kind=kind, timeout=timeout,
+    )
+    after = workspace_fingerprint(Path(state["workspace"]), state.get("files") or [])
+    if after != candidate:
+        raise ValueError("GREEN 命令改变了工作区，当前候选不再稳定")
+    evidence["fingerprint"] = candidate
+    evidence["phase"] = "green"
+    passed = evidence["exit_code"] == 0 and (
+        kind != "test" or int(evidence.get("tests_ran") or 0) > 0
+    )
+    return record_check(
+        home, session_id, "behavior", passed, evidence, recheck=True,
+    )
 
 
 def completion_claim(message: str) -> bool:
@@ -575,10 +823,82 @@ def completion_claim(message: str) -> bool:
     return False
 
 
-def completion_block(home: Path, session_id: str, mode: str, message: str = "") -> str | None:
+def _red_green_problem(state: dict[str, Any]) -> str | None:
+    profile = str(state.get("work_profile") or "")
+    if profile not in {"standard", "strict", "user_required"} or not state.get("logic_change"):
+        return None
+    baseline = str(state.get("baseline_fingerprint") or "")
+    red = state.get("red_behavior")
+    if not isinstance(red, dict):
+        return "[AgentRelay 交付审计] 逻辑修改缺少 RED：必须先在修改前基线执行真实失败检查。"
+    if red.get("fingerprint") != baseline or red.get("passed") is not True:
+        return "[AgentRelay 交付审计] RED 证据无效：必须绑定修改前基线并真实非零退出。"
+    behavior = (state.get("checks") or {}).get("behavior")
+    if not isinstance(behavior, dict) or behavior.get("passed") is not True:
+        return "[AgentRelay 交付审计] 逻辑修改缺少 GREEN：必须在当前候选执行真实通过检查。"
+    evidence = behavior.get("evidence") or {}
+    candidate = str(state.get("candidate_fingerprint") or state.get("fingerprint") or "")
+    if behavior.get("fingerprint") != candidate:
+        return "[AgentRelay 交付审计] GREEN 证据没有绑定当前候选指纹。"
+    problem = _behavior_problem(evidence)
+    if problem:
+        return "[AgentRelay 交付审计] GREEN " + problem + "，不能汇报完成。"
+    return None
+
+
+def _requirements_problem(state: dict[str, Any]) -> str | None:
+    behavior = (state.get("checks") or {}).get("requirements")
+    if not isinstance(behavior, dict) or behavior.get("passed") is not True:
+        return None
+    canonical = _canonical_requirements(
+        state.get("canonical_requirements") or [],
+        str(state.get("request") or ""),
+    )
+    canonical_ids = {item["id"] for item in canonical}
+    evidence = behavior.get("evidence")
+    if not isinstance(evidence, list):
+        return "[AgentRelay 交付审计] 需求证据格式无效，缺少 canonical 覆盖清单。"
+    covered: dict[str, str] = {}
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        requirement_id = str(item.get("requirement_id") or "").strip()
+        status_value = str(item.get("status") or "").strip().upper()
+        if requirement_id:
+            covered[requirement_id] = status_value
+    missing = sorted(canonical_ids - set(covered))
+    unresolved = sorted(
+        requirement_id for requirement_id, status_value in covered.items()
+        if requirement_id in canonical_ids and status_value not in {"DONE", "CHANGED"}
+    )
+    unknown = sorted(set(covered) - canonical_ids)
+    if missing or unresolved or unknown:
+        details = []
+        if missing:
+            details.append("缺少 " + "、".join(missing))
+        if unresolved:
+            details.append("未完成 " + "、".join(unresolved))
+        if unknown:
+            details.append("范围外 " + "、".join(unknown))
+        return "[AgentRelay 交付审计] canonical 需求覆盖不完整：" + "；".join(details)
+    return None
+
+
+def completion_block(
+    home: Path,
+    session_id: str,
+    mode: str,
+    message: str = "",
+    *,
+    mutate: bool = True,
+) -> str | None:
+    """Return a completion blocker; mutate=False keeps final preflight read-only."""
     state = read_state(home, session_id)
     if not state or state.get("status") == "closed":
         return None
+    red_green_problem = _red_green_problem(state)
+    if red_green_problem:
+        return red_green_problem
     required = required_checks(home, session_id)
     checks = state.get("checks") or {}
     if not required:
@@ -589,8 +909,9 @@ def completion_block(home: Path, session_id: str, mode: str, message: str = "") 
         problem = _behavior_problem(behavior) if behavior else None
         if problem:
             return "[AgentRelay 交付审计] " + problem + "，不能汇报完成。"
-        state["active_edit"] = False
-        write_state(home, session_id, state)
+        if mutate:
+            state["active_edit"] = False
+            write_state(home, session_id, state)
         return None
     if _stale(state):
         return "[AgentRelay 交付审计] 审计证据已过期：文件在审计后又有修改，必须重新检查并运行 /agent-audit。"
@@ -606,6 +927,9 @@ def completion_block(home: Path, session_id: str, mode: str, message: str = "") 
     missing_pass = sorted(name for name in required if not _check_passed(state, name))
     if missing_pass:
         return "[AgentRelay 交付审计] 以下必要检查尚未通过：" + "、".join(missing_pass)
+    requirements_problem = _requirements_problem(state)
+    if requirements_problem:
+        return requirements_problem
     behavior = checks.get("behavior", {}).get("evidence") or {}
     problem = _behavior_problem(behavior)
     if problem:
@@ -613,8 +937,9 @@ def completion_block(home: Path, session_id: str, mode: str, message: str = "") 
     visual = (checks.get("visual") or {}).get("evidence") or {}
     if visual.get("status") == "user_review_required":
         return "[AgentRelay 交付审计] 无视觉或视觉 Provider 不可用；非视觉检查已完成，仍需用户复查，不能声称视觉通过。"
-    state["active_edit"] = False
-    write_state(home, session_id, state)
+    if mutate:
+        state["active_edit"] = False
+        write_state(home, session_id, state)
     return None
 
 
@@ -641,7 +966,8 @@ def _parse_evidence(value: str) -> Any:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("begin", "status", "record", "run-behavior", "independent-review"):
+    for name in ("begin", "set-requirements", "status", "record", "run-behavior",
+                 "independent-review"):
         item = sub.add_parser(name)
         item.add_argument("--home", type=Path, required=True)
         item.add_argument("--session", required=True)
@@ -656,10 +982,22 @@ def main(argv: list[str] | None = None) -> int:
         item.add_argument("--cmd", default="")
         item.add_argument("--kind", choices=["test", "probe"], default="test")
         item.add_argument("--timeout", type=int, default=120)
+        item.add_argument("--phase", choices=["red", "green"], default="green")
+        item.add_argument("--requirement", action="append", default=[])
+        item.add_argument("--work-profile",
+                          choices=["light", "standard", "strict", "user_required"])
+        item.add_argument("--logic-change", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "begin":
         result = begin(args.home, args.session, args.workspace, args.request,
-                       mode=args.mode, files=args.file)
+                       mode=args.mode, files=args.file,
+                       work_profile=args.work_profile,
+                       logic_change=args.logic_change or None,
+                       canonical_requirements=args.requirement)
+    elif args.command == "set-requirements":
+        if not args.requirement:
+            parser.error("set-requirements 需要至少一个 --requirement")
+        result = set_requirements(args.home, args.session, args.requirement)
     elif args.command == "record":
         if not args.check:
             parser.error("record 需要 --check")
@@ -668,7 +1006,10 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "run-behavior":
         if not args.cmd.strip():
             parser.error("run-behavior 需要 --cmd")
-        result = run_behavior(args.home, args.session, args.cmd, kind=args.kind, timeout=args.timeout)
+        result = run_behavior(
+            args.home, args.session, args.cmd, kind=args.kind,
+            timeout=args.timeout, phase=args.phase,
+        )
     elif args.command == "independent-review":
         result = independent_review(args.home, args.session)
     else:

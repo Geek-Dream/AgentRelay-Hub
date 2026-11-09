@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -20,6 +21,12 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
+
+try:
+    from . import approval_policy
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import approval_policy
 
 
 class TargetError(RuntimeError):
@@ -192,11 +199,26 @@ def shim_command(
     venv_python: Path,
     shim_path: Path,
     target: str,
-    event: str,
+    event: str = "",
 ) -> str:
-    return build_command(
-        [str(venv_python), str(shim_path), "--target", target, "--event", event]
-    )
+    parts = [str(venv_python), str(shim_path), "--target", target]
+    if event:
+        parts.extend(["--event", event])
+    return build_command(parts)
+
+
+def command_has_target(command: str, target: str) -> bool:
+    """Return whether a registered command explicitly selects the target host."""
+    text = str(command).replace('"', "").replace("'", "").replace(",", " ")
+    return bool(re.search(
+        rf"--target(?:=|\s+){re.escape(target)}(?=$|[\s,\]}}])",
+        text,
+    ))
+
+
+def command_uses_shim_target(command: str, target: str) -> bool:
+    text = str(command)
+    return "agentrelay_hook_shim" in text and command_has_target(text, target)
 
 
 def install_managed_file(source: Path, destination: Path) -> bool:
@@ -497,7 +519,7 @@ function relay(payload) {{
       timeout: 12000,
     }},
   );
-  if (!res || res.status !== 0 || !res.stdout) return "";
+  if (!res || res.status !== 0 || !res.stdout) return {{ context: "", card: "", denial: "" }};
   try {{
     const out = JSON.parse(String(res.stdout).trim());
     return {{
@@ -1269,11 +1291,37 @@ def registered_in_config(target_id: str, meta: dict, venv_python: Path, shim_pat
         ]
         if missing:
             return False, f"hooks 缺少事件：{', '.join(missing)}"
+        if target_id == "claude":
+            invalid = []
+            for event in events:
+                hook = find_agent_relay_hook(hooks[event])
+                if hook is None or not command_uses_shim_target(
+                    hook.get("command", ""), "claude"
+                ):
+                    invalid.append(event)
+            if invalid:
+                return (
+                    False,
+                    "Claude Hook 未显式使用 agentrelay_hook_shim.py --target claude；"
+                    f"缺少目标参数的事件：{', '.join(invalid)}",
+                )
+            if venv_python is not None and shim_path is not None:
+                expected = shim_command(venv_python, shim_path, "claude")
+                mismatched = [
+                    event for event in events
+                    if find_agent_relay_hook(hooks[event]).get("command") != expected
+                ]
+                if mismatched:
+                    return (
+                        False,
+                        "Claude Hook 命令与当前安装路径不一致："
+                        f"{', '.join(mismatched)}",
+                    )
         return True, f"已在 {path} 注册 {len(events)} 个事件"
     if target_id == "hermes":
         text = path.read_text(encoding="utf-8")
         missing = [event for event in HERMES_EVENTS if event not in text]
-        if "agentrelay_hook_shim" not in text or missing:
+        if not command_uses_shim_target(text, "hermes") or missing:
             detail = "未找到 AgentRelay shim 条目"
             if missing:
                 detail += f"；缺少事件：{', '.join(missing)}"
@@ -1285,14 +1333,21 @@ def registered_in_config(target_id: str, meta: dict, venv_python: Path, shim_pat
         covered = set()
         for block in blocks:
             values = _parse_simple_block(block)
-            if values and "agentrelay_hook_shim" in str(values.get("command", "")):
+            if values and command_uses_shim_target(
+                str(values.get("command", "")), "kimi"
+            ):
                 covered.add(values.get("event"))
         missing = [event for event in KIMI_EVENTS if event not in covered]
         if missing:
             return False, f"缺少事件：{', '.join(missing)}"
         return True, f"已在 {path} 注册 {len(KIMI_EVENTS)} 个事件"
     if target_id == "pi":
-        return (True, f"扩展文件已生成：{path}") if path.is_file() else (False, f"扩展文件不存在：{path}")
+        if not path.is_file():
+            return False, f"扩展文件不存在：{path}"
+        text = path.read_text(encoding="utf-8")
+        if "agentrelay_hook_shim.py" not in text or not command_has_target(text, "pi"):
+            return False, "Pi 扩展未显式调用 agentrelay_hook_shim.py --target pi"
+        return True, f"扩展文件已生成：{path}"
     return False, f"未知目标：{target_id}"
 
 
@@ -1314,8 +1369,13 @@ def relay_installed(target_id: str, meta: dict | None = None) -> bool:
     return skill_ok and fusion_ok and registered_ok
 
 
-def dry_run_hook(command: list[str], payload: dict, timeout: int = 15) -> tuple[bool, str]:
-    """向 Hook 命令喂一个合成事件，确认它能正常执行并退出。"""
+def dry_run_hook(
+    command: list[str],
+    payload: dict,
+    timeout: int = 15,
+    env: dict[str, str] | None = None,
+) -> tuple[bool, str, str]:
+    """向 Hook 命令喂一个合成事件，返回执行状态、说明和 stdout。"""
     try:
         result = subprocess.run(
             command,
@@ -1325,13 +1385,110 @@ def dry_run_hook(command: list[str], payload: dict, timeout: int = 15) -> tuple[
             stderr=subprocess.PIPE,
             timeout=timeout,
             check=False,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return False, f"Hook 干跑无法执行：{exc}"
+        return False, f"Hook 干跑无法执行：{exc}", ""
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip().splitlines()
-        return False, f"Hook 干跑退出码 {result.returncode}：{detail[-1] if detail else '无输出'}"
-    return True, "Hook 干跑通过（合成事件正常执行并退出）"
+        return (
+            False,
+            f"Hook 干跑退出码 {result.returncode}：{detail[-1] if detail else '无输出'}",
+            result.stdout,
+        )
+    return True, "Hook 干跑通过（合成事件正常执行并退出）", result.stdout
+
+
+def visible_card_in_stdout(stdout_text: str) -> bool:
+    try:
+        payload = json.loads(stdout_text)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    message = payload.get("systemMessage") if isinstance(payload, dict) else None
+    if not isinstance(message, str) or not message.strip():
+        return False
+    return any(
+        marker in message for marker in ("需求卡", "确认卡", "审批卡", "任务门禁")
+    )
+
+
+def verify_pi_visible_cards(
+    extension_path: Path,
+    *,
+    main_hook: Path,
+    shim_path: Path,
+    workspace: Path,
+    isolated_home: Path,
+    venv_python: Path,
+    session_id: str,
+) -> tuple[bool, str]:
+    """Execute the generated Pi extension against the real Hook and shim."""
+    node = shutil.which("node")
+    if not node:
+        return False, "未安装 Node.js，无法执行 Pi 扩展的真实通知协议验证"
+    bridge = extension_path.parent.parent / "node_modules" / "typebox" / "index.js"
+    bridge.parent.mkdir(parents=True, exist_ok=True)
+    (bridge.parent / "package.json").write_text(
+        json.dumps({"name": "typebox", "type": "module", "main": "index.js"}),
+        encoding="utf-8",
+    )
+    bridge.write_text(
+        'const schema = () => ({}); schema.Object = schema; schema.String = schema; '
+        'schema.Optional = schema; export const Type = schema;\n',
+        encoding="utf-8",
+    )
+    driver = isolated_home / "pi-visible-card-driver.mjs"
+    driver.write_text(
+        "import agentRelay from " + json.dumps(extension_path.as_uri()) + ";\n"
+        "const handlers = new Map();\n"
+        "const notifications = [];\n"
+        "const pi = {\n"
+        "  registerTool() {}, registerCommand() {},\n"
+        "  on(name, handler) { handlers.set(name, handler); },\n"
+        "  getActiveTools() { return []; }, setActiveTools() {},\n"
+        "};\n"
+        "const ctx = {\n"
+        "  cwd: " + json.dumps(str(workspace)) + ",\n"
+        "  sessionManager: { getSessionId() { return " + json.dumps(session_id) + "; } },\n"
+        "  hasUI: true,\n"
+        "  ui: { notify(message) { notifications.push(String(message)); } },\n"
+        "};\n"
+        "await agentRelay(pi);\n"
+        "await handlers.get('before_agent_start')({\n"
+        "  prompt: '请完整实现前后端和数据库功能，并补充测试和部署文档', systemPrompt: ''\n"
+        "}, ctx);\n"
+        "const toolGate = await handlers.get('tool_call')({\n"
+        "  toolName: 'exec_command', input: {cmd: 'git reset --hard'}, toolCallId: 'verify-danger'\n"
+        "}, ctx);\n"
+        "const promptCard = notifications.some((text) => text.includes('需求卡'));\n"
+        "const toolCard = notifications.some((text) => text.includes('危险操作确认卡'));\n"
+        "console.log(JSON.stringify({promptCard, toolCard, blocked: toolGate?.block === true, notifications}));\n",
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "CODEX_HOME": str(isolated_home),
+        "AGENTRELAY_MAIN_HOOK": str(main_hook),
+        "AGENTRELAY_SHIM": str(shim_path),
+        "AGENTRELAY_PYTHON": str(venv_python),
+    }
+    try:
+        result = subprocess.run(
+            [node, str(driver)], cwd=isolated_home, env=env,
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"Pi 扩展协议验证无法执行：{exc}"
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        return False, "Pi 扩展执行失败：" + (detail[-1][:500] if detail else "无输出")
+    try:
+        evidence = json.loads(result.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return False, "Pi 扩展未返回可核对的通知证据"
+    if not evidence.get("promptCard") or not evidence.get("toolCard") or not evidence.get("blocked"):
+        return False, "Pi 扩展的真实 Hook 链未同时产生需求卡、危险操作卡和工具阻断"
+    return True, "真实 Pi 扩展已串联真实 shim，需求卡、危险操作卡和工具阻断均已验证"
 
 
 def verify_target(
@@ -1389,30 +1546,108 @@ def verify_target(
         "reason": "缺少注册时重试计数、计时和候选提醒不会运行",
     })
 
-    session_id = f"agentrelay-verify-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    session_id = (
+        f"agentrelay-verify-{target_id}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+    )
     payload = {
         "hook_event_name": "UserPromptSubmit",
         "session_id": session_id,
         "cwd": str(workspace),
         "prompt": "AgentRelay 安装验证，无需处理",
     }
-    if target_id in {"hermes", "kimi"}:
+    if target_id in {"claude", "pi", "hermes", "kimi"}:
         command = [str(venv_python), str(shim_path), "--target", target_id,
                    "--event", "UserPromptSubmit"]
         probe_payload = dict(payload)
         if target_id == "hermes":
             # Hermes 真实 payload 不带事件名，验证 shim 的注入路径。
             probe_payload.pop("hook_event_name", None)
-        hook_ok, hook_detail = dry_run_hook(command, probe_payload)
+        hook_ok, hook_detail, _ = dry_run_hook(command, probe_payload)
     else:
         command = [str(venv_python), str(main_hook)]
-        hook_ok, hook_detail = dry_run_hook(command, payload)
+        hook_ok, hook_detail, _ = dry_run_hook(command, payload)
     checks.append({
         "name": "Hook 干跑",
         "ok": hook_ok,
         "detail": hook_detail,
         "reason": "干跑失败说明 Hook 命令无法被该 Agent 正常拉起",
     })
+
+    if target_id in {"codex", "claude", "pi", "hermes"}:
+        with tempfile.TemporaryDirectory(prefix="agentrelay-visible-card-") as isolated:
+            isolated_home = Path(isolated)
+            approval_policy.save_policy(isolated_home, "strict")
+            probe_env = {
+                **os.environ,
+                "CODEX_HOME": str(isolated_home),
+                "AGENTRELAY_MAIN_HOOK": str(main_hook),
+            }
+            if target_id == "pi":
+                card_ok, card_detail = verify_pi_visible_cards(
+                    Path(meta["config_path"]), main_hook=main_hook,
+                    shim_path=shim_path, workspace=workspace,
+                    isolated_home=isolated_home, venv_python=venv_python,
+                    session_id=f"{session_id}-visible-card",
+                )
+                cards = []
+            else:
+                if target_id == "codex":
+                    card_command = [str(venv_python), str(main_hook)]
+                    # Codex invokes the main Hook directly; isolate HOME while
+                    # leaving target-specific environment variables absent.
+                    probe_env["HOME"] = str(isolated_home)
+                    probe_env["AGENTRELAY_TARGET"] = "codex"
+                    approval_policy.save_policy(isolated_home / ".codex", "strict")
+                    probe_env.pop("CODEX_HOME", None)
+                else:
+                    card_command = [
+                        str(venv_python), str(shim_path), "--target", target_id,
+                    ]
+                cards = [
+                    {
+                        "hook_event_name": "UserPromptSubmit",
+                        "session_id": f"{session_id}-visible-card",
+                        "cwd": str(workspace),
+                        "prompt": "请完整实现前后端和数据库功能，并补充测试和部署文档",
+                    },
+                    {
+                        "hook_event_name": "PreToolUse",
+                        "session_id": f"{session_id}-visible-danger",
+                        "cwd": str(workspace),
+                        "tool_name": "exec_command",
+                        "tool_input": {"cmd": "git reset --hard"},
+                        "tool_use_id": f"{session_id}-danger-tool",
+                    },
+                ]
+                if target_id == "hermes":
+                    card_results = []
+                    for item in cards:
+                        event = item["hook_event_name"]
+                        item = {key: value for key, value in item.items() if key != "hook_event_name"}
+                        result = dry_run_hook(
+                            [*card_command, "--event", event], item, env=probe_env,
+                        )
+                        card_results.append(result)
+                else:
+                    card_results = [
+                        dry_run_hook(card_command, item, env=probe_env)
+                        for item in cards
+                    ]
+                card_ok = all(
+                    item[0] and visible_card_in_stdout(item[2])
+                    for item in card_results
+                )
+                card_detail = (
+                    "真实 shim 协议已返回需求卡与 PreToolUse 危险操作卡"
+                    if card_ok else "需求卡或 PreToolUse 危险操作卡缺少 systemMessage："
+                    + "；".join(item[1] for item in card_results)
+                )
+        checks.append({
+            "name": "可见卡协议",
+            "ok": card_ok,
+            "detail": card_detail,
+            "reason": "仅能退出不够；目标宿主还必须实际收到用户可见的审批卡",
+        })
 
     try:
         status = subprocess.run(

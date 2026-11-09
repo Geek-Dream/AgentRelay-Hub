@@ -24,19 +24,26 @@ class DeliveryAuditTests(unittest.TestCase):
         self.source.write_text("VALUE = 1\n", encoding="utf-8")
         self.session = "delivery-test"
 
-    def start(self, mode="strict", files=None):
+    def start(self, mode="strict", files=None, task_id=""):
         return audit.begin(self.home, self.session, self.workspace,
                            "修复输入为空时的错误", mode=mode,
-                           files=files or [str(self.source)])
+                           files=files or [str(self.source)], task_id=task_id)
 
-    def complete(self, independent=True, include_requirements=True):
+    def complete(self, independent=True, include_requirements=True,
+                 include_behavior=True):
         if include_requirements:
+            state = audit.read_state(self.home, self.session)
+            requirement_id = (state.get("canonical_requirements") or [{"id": "R1"}])[0]["id"]
             audit.record_check(self.home, self.session, "requirements", True,
-                               [{"item": "空输入返回明确错误", "status": "done", "evidence": "app.py:validate"}])
+                               [{"requirement_id": requirement_id,
+                                 "item": "空输入返回明确错误", "status": "done",
+                                 "evidence": "app.py:validate"}])
         audit.record_check(self.home, self.session, "diff", True, "读取完整 git diff；仅 app.py，无越界行为")
-        audit.record_check(self.home, self.session, "behavior", True,
-                           {"command": "python -m unittest tests.test_app", "exit_code": 0,
-                            "tests_ran": 3, "executed": True, "kind": "test"})
+        if include_behavior:
+            audit.record_check(self.home, self.session, "behavior", True,
+                               {"command": "python -m unittest tests.test_app",
+                                "exit_code": 0, "tests_ran": 3,
+                                "executed": True, "kind": "test"})
         audit.record_check(self.home, self.session, "self_review", True,
                            "检查异常路径、相邻调用与目标外影响；未发现问题")
         if independent:
@@ -52,7 +59,7 @@ class DeliveryAuditTests(unittest.TestCase):
         self.assertIn("需求", reason)
         self.complete()
         self.assertIsNone(audit.completion_block(self.home, self.session, "strict", "已修复"))
-        self.source.write_text("VALUE = 2\n", encoding="utf-8")
+        self.source.write_text("VALUE = 2  # fixed\n", encoding="utf-8")
         audit.begin(self.home, self.session, self.workspace, "修复输入为空时的错误",
                     mode="strict", files=[str(self.source)], task_id="delivery-test")
         self.assertIn("behavior", audit.required_checks(self.home, self.session))
@@ -189,6 +196,99 @@ class DeliveryAuditTests(unittest.TestCase):
                                    f'"{sys.executable}" -c "import app; print(app.VALUE)"', kind="probe")
         self.assertTrue(probe["checks"]["behavior"]["passed"])
 
+    def test_red_green_evidence_binds_baseline_and_candidate_fingerprints(self):
+        tests = self.workspace / "tests"
+        tests.mkdir()
+        (tests / "__init__.py").write_text("", encoding="utf-8")
+        (tests / "test_logic.py").write_text(
+            "import unittest\nimport app\n"
+            "class LogicTest(unittest.TestCase):\n"
+            "    def test_value(self):\n"
+            "        self.assertEqual(app.VALUE, 2)\n",
+            encoding="utf-8",
+        )
+        command = f'"{sys.executable}" -m unittest discover -s tests'
+        self.start("strict", files=[str(self.source)], task_id="delivery-test")
+        state = audit.read_state(self.home, self.session)
+        state.update(work_profile="strict", logic_change=True)
+        audit.write_state(self.home, self.session, state)
+        baseline = state["fingerprint"]
+
+        red = audit.run_behavior(self.home, self.session, command, phase="red")
+        self.assertEqual(red["red_behavior"]["exit_code"], 1)
+        self.assertEqual(red["red_behavior"]["fingerprint"], baseline)
+
+        self.source.write_text("VALUE = 2  # fixed\n", encoding="utf-8")
+        green = audit.run_behavior(self.home, self.session, command, phase="green")
+        behavior = green["checks"]["behavior"]
+        self.assertTrue(behavior["passed"])
+        self.assertEqual(behavior["evidence"]["exit_code"], 0)
+        self.assertGreater(behavior["evidence"]["tests_ran"], 0)
+
+        stored = audit.read_state(self.home, self.session)
+        self.assertEqual(stored["red_behavior"]["fingerprint"], baseline)
+        self.assertEqual(
+            stored["checks"]["behavior"]["fingerprint"],
+            stored["candidate_fingerprint"],
+        )
+        self.assertNotEqual(stored["candidate_fingerprint"], baseline)
+
+    def test_red_green_requires_real_failure_before_change_and_pass_after(self):
+        tests = self.workspace / "tests"
+        tests.mkdir()
+        (tests / "__init__.py").write_text("", encoding="utf-8")
+        (tests / "test_logic.py").write_text(
+            "import unittest\nimport app\n"
+            "class LogicTest(unittest.TestCase):\n"
+            "    def test_value(self):\n"
+            "        self.assertEqual(app.VALUE, 2)\n",
+            encoding="utf-8",
+        )
+        command = f'"{sys.executable}" -m unittest discover -s tests'
+        self.start("strict", files=[str(self.source)], task_id="delivery-test")
+        state = audit.read_state(self.home, self.session)
+        state.update(work_profile="strict", logic_change=True)
+        audit.write_state(self.home, self.session, state)
+        self.assertIn("RED", audit.completion_block(
+            self.home, self.session, "strict", "已修复",
+        ))
+
+        audit.run_behavior(self.home, self.session, command, phase="red")
+        self.source.write_text("VALUE = 2  # fixed\n", encoding="utf-8")
+        audit.begin(
+            self.home, self.session, self.workspace, "修复输入为空时的错误",
+            mode="strict", files=[str(self.source)], task_id="delivery-test",
+        )
+        audit.run_behavior(self.home, self.session, command, phase="green")
+        self.complete(independent=True, include_behavior=False)
+        self.assertIsNone(audit.completion_block(
+            self.home, self.session, "strict", "已修复",
+        ))
+
+    def test_review_freezes_candidate_and_later_edit_invalidates_it(self):
+        self.start("strict")
+        self.source.write_text("VALUE = 2\n", encoding="utf-8")
+        audit.begin(
+            self.home, self.session, self.workspace, "修复输入为空时的错误",
+            mode="strict", files=[str(self.source)], task_id="delivery-test",
+        )
+        audit.record_check(
+            self.home, self.session, "self_review", True,
+            "审查异常路径、相邻调用和目标外影响；未发现问题",
+        )
+        state = audit.read_state(self.home, self.session)
+        self.assertEqual(state["review_fingerprint"], state["candidate_fingerprint"])
+        self.assertEqual(
+            state["checks"]["self_review"]["fingerprint"],
+            state["review_fingerprint"],
+        )
+
+        self.source.write_text("VALUE = 3\n", encoding="utf-8")
+        self.assertEqual(audit.status(self.home, self.session)["status"], "stale")
+        self.assertIn("过期", audit.completion_block(
+            self.home, self.session, "strict", "已修复",
+        ))
+
     def test_independent_success_requires_actual_fusion_result(self):
         self.start("strict")
         with self.assertRaisesRegex(ValueError, "真实 Fusion"):
@@ -214,16 +314,24 @@ class DeliveryAuditTests(unittest.TestCase):
     def test_requirement_gaps_and_unverifiable_items_block_clean_completion(self):
         self.start("standard")
         for status in ("partial", "not_done", "unverifiable"):
+            state = audit.read_state(self.home, self.session)
+            requirement_id = state["canonical_requirements"][0]["id"]
             audit.record_check(self.home, self.session, "requirements", False,
-                               [{"item": "未覆盖需求", "status": status, "evidence": "缺少当前版本证据"}])
+                               [{"requirement_id": requirement_id,
+                                 "item": "未覆盖需求", "status": status,
+                                 "evidence": "缺少当前版本证据"}])
             self.complete(independent=False, include_requirements=False)
             with self.assertRaisesRegex(ValueError, "复检"):
                 audit.record_check(self.home, self.session, "requirements", True,
-                                   [{"item": "仍未覆盖", "status": "done", "evidence": "没有新证据"}])
+                                   [{"requirement_id": requirement_id,
+                                     "item": "仍未覆盖", "status": "done",
+                                     "evidence": "没有新证据"}])
             self.assertIn("requirements", audit.completion_block(self.home, self.session, "standard", "已修复"))
         with self.assertRaisesRegex(ValueError, "复检"):
             audit.record_check(self.home, self.session, "requirements", True,
-                               [{"item": "未验证项", "status": "unverifiable", "evidence": "外部状态未检查"}])
+                               [{"requirement_id": requirement_id,
+                                 "item": "未验证项", "status": "unverifiable",
+                                 "evidence": "外部状态未检查"}])
 
     def test_fusion_timeout_is_unavailable_not_a_false_success(self):
         self.start("strict")
@@ -309,6 +417,7 @@ class DeliveryAuditTests(unittest.TestCase):
 
         checks = [
             ("requirements", [{
+                "requirement_id": "R1",
                 "item": "空输入返回明确错误",
                 "status": "done",
                 "evidence": "app.py:validate",
@@ -331,6 +440,70 @@ class DeliveryAuditTests(unittest.TestCase):
         self.assertEqual(errors, [])
         stored = audit.read_state(self.home, self.session)
         self.assertEqual(set(stored["checks"]), {name for name, _ in checks})
+
+    def test_canonical_requirements_require_complete_coverage_and_valid_statuses(self):
+        self.start("standard")
+        audit.set_requirements(
+            self.home, self.session,
+            ["第一项必须完成", "第二项必须完成"],
+        )
+        with self.assertRaisesRegex(ValueError, "完整覆盖"):
+            audit.record_check(self.home, self.session, "requirements", True, [{
+                "requirement_id": "R1", "item": "第一项",
+                "status": "done", "evidence": "真实检查 R1",
+            }])
+        with self.assertRaisesRegex(ValueError, "不存在"):
+            audit.record_check(self.home, self.session, "requirements", False, [{
+                "requirement_id": "R9", "item": "范围外",
+                "status": "not_done", "evidence": "不存在",
+            }])
+        audit.record_check(self.home, self.session, "requirements", True, [
+            {"requirement_id": "R1", "item": "第一项",
+             "status": "done", "evidence": "真实检查 R1"},
+            {"requirement_id": "R2", "item": "第二项",
+             "status": "changed", "evidence": "用户同意改为真实检查 R2"},
+        ])
+        coverage = audit.status(self.home, self.session)["requirement_coverage"]
+        self.assertEqual(
+            [(item["id"], item["status"]) for item in coverage],
+            [("R1", "DONE"), ("R2", "CHANGED")],
+        )
+
+    def test_canonical_requirements_cannot_be_redefined_after_write(self):
+        self.start("standard", task_id="delivery-test")
+        self.source.write_text("VALUE = 2\n", encoding="utf-8")
+        audit.begin(
+            self.home, self.session, self.workspace, "修复输入为空时的错误",
+            mode="standard", files=[str(self.source)], task_id="delivery-test",
+        )
+        with self.assertRaisesRegex(ValueError, "首次写入后"):
+            audit.set_requirements(self.home, self.session, ["缩小后的范围"])
+
+    def test_run_behavior_cli_supports_explicit_red_phase(self):
+        tests = self.workspace / "tests"
+        tests.mkdir()
+        (tests / "__init__.py").write_text("", encoding="utf-8")
+        (tests / "test_logic.py").write_text(
+            "import unittest\nimport app\n"
+            "class LogicTest(unittest.TestCase):\n"
+            "    def test_value(self):\n"
+            "        self.assertEqual(app.VALUE, 2)\n",
+            encoding="utf-8",
+        )
+        self.start("strict", task_id="delivery-test")
+        state = audit.read_state(self.home, self.session)
+        state.update(work_profile="strict", logic_change=True)
+        audit.write_state(self.home, self.session, state)
+        result = subprocess.run([
+            sys.executable, str(PROJECT_ROOT / "scripts/delivery_audit.py"),
+            "run-behavior", "--home", str(self.home), "--session", self.session,
+            "--cmd", f'"{sys.executable}" -m unittest discover -s tests',
+            "--phase", "red",
+        ], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["red_behavior"]["phase"], "red")
+        self.assertEqual(data["red_behavior"]["exit_code"], 1)
 
     def test_task_notification_cannot_replace_original_request(self):
         audit.begin(self.home, self.session, self.workspace, "实现原始功能",

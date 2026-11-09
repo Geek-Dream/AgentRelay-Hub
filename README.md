@@ -1,741 +1,589 @@
-<div align="center">
+# AgentRelay
 
-# 🔀 AgentRelay
+AgentRelay 是一个运行在本机的 AI 编程 Agent 协作层。
 
-### 给你的 coding Agent 配一个会提醒、会找外援、还能分工协作的调度台
+它不替代 Codex、Claude Code、Kimi Code、Pi 或 Hermes，而是在这些 Agent 工作时补上四类能力：
 
-**Codex · Claude Code · Kimi Code · Pi · Hermes 完整支持**
+- 任务重复失败或耗时过长时，提醒主 Agent 考虑找外援。
+- 修改范围不清楚时，先生成有边界的确认卡，批准后才允许写文件。
+- 把大批量调查、日志分析或局部实现交给 AgentFusion。
+- 把跨模块任务拆给 Commander 的多个隔离子 Agent，再统一审查和合并。
 
-[🚀 快速开始](#-快速开始) · [✨ 能做什么](#-能做什么) · [🧭 怎么使用](#-怎么使用) · [🛠️ 实现原理](#️-它是怎么实现的)
-
-</div>
-
----
-
-## 🎯 这是什么东西？
-
-AgentRelay 是一个运行在本机的 **Agent 外援与协作系统**。
-
-它不替代你的主 Agent，而是在主 Agent 卡住、任务太耗时，或者你明确要求外援时，提供：
-
-- 🔔 重复失败和耗时过长提醒
-- 🌐 网页、API、本地模型三类外援
-- 🗂️ 本地经验归档
-- 🖼️ 图片识别中继
-- ⚡ 可并行工作的 AgentFusion
-- 👑 最多 1 到 5 个隔离子 Agent 的 Commander
-
-可以把它理解成：
+一句话理解：
 
 ```text
-主 Agent = 项目负责人
-Hook     = 本地预检员，发现大任务、危险命令和卡住迹象
-Skill    = 协作规则，决定是否需要确认或找外援
-Fusion   = 独立副手，适合调查、批量阅读和局部实现
-Commander = 临时项目组，按任务拆分多个隔离 Agent
+主 Agent = 项目负责人，负责理解需求、做决定和最终验收
+AgentRelay = 项目负责人的安全员、调度台和外部协作通道
 ```
 
-> 🧠 **一句话记住：**<br>
-> 主 Agent 负责判断和验收，AgentRelay 负责在合适的时候找到额外帮手。
+AgentRelay 的目标不是把每个小任务都做得很重。简单问答和只读检查不会建卡；清晰、局部、
+低风险的修改可以走轻量流程；只有复杂、跨文件、共享、高风险或用户明确要求完整审查的任务，
+才进入更严格的确认和审计链路。
 
----
+> 当前状态：macOS 主流程、单元测试和真实浏览器页面检查是主要验证路径。Windows、Hermes
+> 等宿主已经有代码路径和自动化测试，但仍需要在对应真实环境中补做端到端验收，不能仅凭
+> macOS 测试宣称全平台完成。
 
-## ✨ 能做什么？
+## 目录
 
-### 🎁 三个核心能力
+- [30 秒看懂](#30-秒看懂)
+- [新手安装](#新手安装)
+- [第一次使用](#第一次使用)
+- [什么时候会出现确认卡](#什么时候会出现确认卡)
+- [权限模式与工作档](#权限模式与工作档)
+- [AgentFusion 和 Commander](#agentfusion-和-commander)
+- [支持的 Agent](#支持的-agent)
+- [常见问题](#常见问题)
+- [安全边界](#安全边界)
+- [工作原理](#工作原理)
+- [开发与测试](#开发与测试)
 
-| 能力 | 一句话说明 | 你什么时候会用到 |
-|---|---|---|
-| 🔔 **AgentRelay** | 观察 Agent 会话，在失败、超时或你明确要求时给出外援提醒 | 同一个问题反复失败、改了半小时还没进展 |
-| 🖼️ **AgentImage** | 让支持识图的在线或本地模型先描述图片 | 当前模型不能看图 |
-| ⚡ **AgentFusion** | 启动独立持久会话，执行调查、批量阅读、独立复现或局部实现 | 日志很多、搜索范围很大、需要一个独立副手 |
+## 30 秒看懂
 
-### 🚦 Hook 门禁
-
-- 🧾 你提交消息后，Hook 先用本地规则判断是不是中大型任务；不会额外请求模型。
-- 🛑 需要确认时，Agent 必须先展示需求卡/确认卡，批准前不能写文件。
-- ⚠️ 遇到删除、破坏性 Git、依赖安装、数据库迁移、部署等高风险命令时直接拦下。
-- ✅ 批准只对当前方案生效；危险命令只允许完全相同的输入重试一次。
-- 🧠 你回复 `好的`、`OK`、`没问题`、`执行吧`、`行吧`、`1` 等自然语言时，由主 Agent
-  结合上下文理解；Hook 只生成语义审批候选，不再靠固定关键词直接授权。
-
-### 👑 AgentRelay 里还有 Commander
-
-Commander 适合跨模块或高风险任务：
-
-- 👥 按任务实际需要启动 1 到 5 个隔离子 Agent
-- 🧩 前端、后端、数据库、测试、Git 审计可以分别处理
-- 🔒 每个 Agent 使用隔离 workspace
-- 🙅 未经确认不会直接合并回你的工作区
-- 🔁 某个角色提前完成时，可以继续协助其他角色
-
-### 🌐 三种外援 Provider
-
-| 类型 | 适合什么 | 例子 |
-|---|---|---|
-| 🌐 `web` | 已有网页账号，希望直接使用网页模型 | DeepSeek、千问、Kimi |
-| 🔌 `api` | 有 OpenAI 兼容 API 或中转接口 | Kimi API、其他兼容网关 |
-| 💻 `local` | 希望数据留在本机 | Ollama、LM Studio、vLLM、llama.cpp |
-
-> ⚠️ **配置提醒：**<br>
-> 配置中心里的 `local` 和 `api` 是**协作模型**，不是正在驱动 Codex 的主模型。<br>
-> 不要把主模型本身，或者与主模型共用同一个服务、endpoint、API 的模型填进去。<br>
-> 否则两边会争用同一个资源，出现排队、串行、超时，也会失去独立复核的价值。
-
-### 🧮 并发、排队和路由边界
-
-每个 Provider 都像一个小型服务台，所有 Codex 会话、Fusion 和 Commander 共用同一套名额：
-
-| 类型 | 默认并发 | 适合怎么用 |
-|---|---:|---|
-| 🌐 网页模型 | 1 | 编号网页会话；每个会话同一时间只处理一个请求 |
-| 💻 本地模型 | 1 | 默认假设本地服务只有一个推理槽位 |
-| 🔌 API 模型 | 10 | 按账号限额调整；提高前先确认接口真的支持并发 |
-
-- ⏳ 满载时先进入全局 FIFO 队列，默认最多等待 30 秒。
-- 🛑 排队超时会返回明确的 `FUSION_PROVIDER_BUSY`，不会偷偷改成另一个模型继续执行。
-- 🧹 每个请求持有短租约；调用方异常退出后，租约默认在 90 秒内自动回收。
-- 🧠 需要读写文件或执行命令的任务只走 `api → local`。网页模型只能提供咨询、代码建议、
-  网页搜索、数据整理或在配置支持时识图，不能获得本机读写和 shell 执行能力。
-- 🔢 网页会话使用 `AgentRelay-DeepSeek-1`、`-2`、`-3` 这样的全局编号槽位；不同业务流程
-  不复用彼此历史。没有空闲槽位时排队，不会通过混用旧上下文假装扩容。
-- 🕵️ 发给网页模型前会替换识别到的密钥、令牌、邮箱和手机号；恢复映射只留在当前本机进程
-  内存中，不写盘。遇到不完整私钥等无法安全处理的内容时会停止发送。
-
----
-
-## 🚦 什么时候会触发？
-
-采用和 Pi 类似的两层方式：Hook 做轻量预检和状态校验，主 Agent 做最终语义判断。
-
-| 触发场景 | 系统会做什么 |
+| 名词 | 大白话解释 |
 |---|---|
-| 📝 你提交一个中大型任务 | `UserPromptSubmit` 注入任务门禁，要求先展示确认卡 |
-| 🧱 任务尚未批准但要写文件 | `PreToolUse` 硬阻断写入，只读检查和安全测试仍可继续 |
-| ⚠️ 即将执行高风险命令 | 硬阻断并给出安全门禁，要求先解释影响、等待确认 |
-| 🧠 有待审批项时收到自然回复 | Hook 注入“语义审批桥”，主 Agent 判断后通过当前消息哈希写回 |
-| 🔁 同一问题重复失败 | 生成“可以找外援”的候选提醒 |
-| ⏱️ 单问题有效处理时间过长 | 达到门槛后生成候选提醒 |
-| 🗣️ 你明确说“现在调用 DeepSeek”“让 Fusion 看一下” | 进入显式协作流程 |
-| 🗂️ 本地归档命中相似问题 | 先推荐历史结论，不直接调用在线模型 |
+| `Hook` | 主 Agent 每次提交任务、调用工具或结束时触发的本地检查器 |
+| `Skill` | 交给 Agent 阅读的协作规则，告诉它何时确认、找外援或审查 |
+| `Provider` | 外部帮手，可以是网页模型、OpenAI 兼容 API 或本地模型 |
+| `AgentFusion` | 一个持久的外援会话，适合处理大日志、大范围阅读和边界明确的局部任务 |
+| `Commander` | 临时项目组，最多启动 5 个隔离子 Agent 分工完成复杂任务 |
+| `AgentImage` | 当前主模型不能识图时，把图片交给支持视觉的模型描述 |
+| `确认卡` | 真正修改前给用户看的“准备做什么、改哪里、不能碰什么、怎么验收” |
+| `工作档` | Agent 为当前写任务选择的流程深度，从轻量到完整审查 |
 
-Hook 不会因为看到“AgentRelay”“模型”几个字就替 Agent 认定你在下命令。是否调用外援、
-调用哪个 Provider，仍由主 Agent 结合完整语境判断。
+AgentRelay 负责提供边界、证据和协作能力，最终判断仍由主 Agent 负责。网页模型给出的建议
+不能直接当答案，必须由主 Agent 结合代码和测试验证。
 
-审批同样不让用户背固定口令。Hook 只识别“这可能是对当前确认卡的回复”，并把当前
-`source-sha256` 和待审批范围交给主 Agent。主 Agent 判断为明确批准或拒绝后，才调用
-`resolve-intent` 写回；问句、否定、假设、条件和新范围不能批准。旧消息哈希、范围变化后的
-快照和重复写回都会被拒绝，危险命令仍只放行完全相同的输入一次。
+## 新手安装
 
-### 🧾 确认卡到底会显示什么？
-
-当 Hook 判断任务需要确认，或者 Agent 在没有获得批准时尝试写入文件、执行高风险命令，
-会先出现一张确认卡。它不是为了增加步骤，而是让你在真正修改前看清楚：
-
-- 🎯 准备做什么，和你原始需求是否一致
-- 📂 可能影响哪些模块、文件和命令
-- ⚠️ 有哪些风险，失败后怎么回滚
-- 🧪 完成后准备运行哪些验证
-- ✅ 本次批准到底允许哪些操作
-
-AgentRelay 会根据场景使用三种卡片：
-
-| 卡片 | 什么时候出现 | 主要用途 |
-|---|---|---|
-| 🧾 **需求确认卡** | 你提交了中大型任务，或者任务包含明确的重构、迁移、配置、依赖、部署等操作 | 先确认目标、范围、风险、验证和回滚方式 |
-| 📝 **写入确认卡** | 任务仍在等待批准，但 Agent 尝试修改工作区文件 | 阻断写入，提醒 Agent 先取得你的明确批准 |
-| 🛑 **危险操作确认卡** | 即将执行删除、破坏性 Git、数据库迁移、部署等高风险命令 | 展示实际命令和影响，只允许你针对同一输入单独确认 |
-
-在 Codex CLI 中，卡片通过 Hook 的 `systemMessage` 显示在终端界面里。Codex 当前会把
-`systemMessage` 当普通提示展示，不能保证 ANSI 颜色或 Markdown 样式生效，所以 AgentRelay
-使用 emoji 给字段分区，并保持纯文本结构：
-
-| 内容 | 显示方式 |
-|---|---|
-| 卡片类型 | 🧭 需求、📝 写入或 🛑 危险操作 |
-| 任务和状态 | 🎯 任务、⏳ 当前状态 |
-| 修改内容 | 📝 需求、📦 影响范围、📂 操作内容 |
-| 风险和批准边界 | ⚠️ 主要风险、🔐 批准边界 |
-| 验证和回滚 | 🧪 验证、↩️ 回滚 |
-| 操作选项 | ✅ 批准、🛠️ 调整、⛔ 取消 |
-
-这种格式不依赖终端颜色，在 Codex CLI 和其他支持 Hook `systemMessage` 的环境中都能稳定
-阅读。`additionalContext` 只提供给主 Agent，不会变成用户可见的卡片。
-
-下面是一个简化后的需求确认卡示例：
-
-```text
-🧭 AgentRelay / 需求确认卡
-────────────────────────────────────────
-🎯 任务
-task-a1b2c3d4e5
-📝 用户需求
-重构整个项目的 Hook、Skill、安装流程和测试
-🔎 触发原因
-包含重构、配置、依赖或部署操作
-🧭 处理方式
-先核对修改目标和影响范围；你批准后再动文件，完成后运行验证。
-📦 影响范围
-模块：Hook、Skill、安装
-文件：待读取相关代码后确认
-⏳ 当前状态
-waiting_for_approval
-✅ 批准后
-执行当前卡片展示的修改方案，并运行专项检查和完整验证。
-⚠️ 主要风险
-将修改工作区文件，方案或修改范围变化时需要重新确认。
-🧪 验证
-先运行与改动直接相关的测试或构建命令。
-确认通过后，再运行项目已有的完整测试。
-↩️ 回滚
-修改前保留原文件内容；验证失败时按文件恢复，并记录失败原因。
-────────────────────────────────────────
-✅ [1] 批准执行
-🛠️ [2] 调整方案
-⛔ [3] 取消任务
-```
-
-卡片底部固定提供三个选择。它们是需要你回复的文字选项，不是 Codex 原生按钮：
-
-- `[1]` 批准当前卡片展示的方案。不同卡片可能显示为“批准执行”“确认需求”或“启用审查”。
-- `[2]` 要求 Agent 调整范围、风险处理或验证方式，调整后重新确认。
-- `[3]` 取消当前任务。
-
-批准只对当前卡片生效，不会自动扩展到其他文件、其他命令或之后的新需求。危险命令即使批准，
-也只允许完全相同的输入重试一次。
-
-### ⚡ AgentFusion 的触发方式
-
-Fusion 能力默认开启，但 **不等于每轮都会自动干活，也不会自动选择 Provider**：
-
-- ✅ 已配置可用 Provider，且状态为 `delegable=true`：主 Agent 可以委派
-- ⏸️ 未配置 Provider、Fusion 已关闭或 Provider 不可用：立即跳过，不等待、不探网
-- ⏳ Provider 满载：按配置进入 FIFO 队列；超时后明确报告忙，不会静默降级成网页执行
-- 👑 Commander 运行时：Fusion 强制暂停，避免两个调度器互相抢占
-- 🎯 Provider 必须显式指定，例如 `web:deepseek-web`、`local:local-llm` 或
-  `api:kimi-api`；没有 `provider_id` 时不会偷偷借用 Codex 主模型
-- 🌐 指定网页 Provider 时只能做咨询；需要 Fusion 实际改文件或跑命令时必须选择 API 或本地模型
-
-Fusion 适合“输出很多、边界清楚、可以独立完成”的工作，例如：
-
-- 跑完整测试并汇总数百行日志
-- 跨多个文件搜索、批量阅读和整理
-- 独立复现一个 bug
-- 按主 Agent 已确定的方案修改局部代码
-
-需求仍然模糊、涉及密钥、必须由主 Agent 做最终判断的工作，不会交给 Fusion。
-
----
-
-## 🚀 快速开始
-
-### 1️⃣ 准备环境
+### 1. 准备环境
 
 需要：
 
-- 🐍 Python 3.10 或更高版本
-- 📦 Python `venv`
-- 🤖 至少一个支持的 Agent，例如 Codex CLI
-- 🌐 首次安装时可访问 PyPI 和 Playwright 下载源
-- 🔐 对应网页、API 或本地模型的访问权限
+- Python 3.10 或更高版本。
+- Git。
+- 至少一个支持的编程 Agent，例如 Codex CLI。
+- 首次安装时可访问 PyPI 和 Playwright 下载源。
+- 如果使用网页 Provider，需要一个可正常登录的模型网页账号。
 
-### 2️⃣ 安装
+不需要单独安装数据库，也不需要让 AgentRelay 常驻后台。
+
+### 2. 下载并安装
+
+macOS 或 Linux：
 
 ```bash
-git clone git@github.com:Geek-Dream/AgentRelay-Hub.git
+git clone https://github.com/Geek-Dream/AgentRelay-Hub.git
 cd AgentRelay-Hub
 python3 install.py
 ```
 
-Windows 可以使用：
+Windows PowerShell：
 
 ```powershell
+git clone https://github.com/Geek-Dream/AgentRelay-Hub.git
+cd AgentRelay-Hub
 py install.py
 ```
 
-安装器会：
+如果系统没有 `py`，把 `py` 换成 `python`。
 
-- 📦 安装 `agent-relay`、`agent-image`、`agent-fusion`
-- 🐍 创建独立环境 `$CODEX_HOME/agentrelay-env/`
-- 🌐 安装 Playwright Chromium
-- 🔐 加密保存 Provider 配置
-- 🔗 注册 Agent Hook
-- ✅ 自动检查 Skill、Hook、Tracker 和合成事件
+安装器会做这些事：
 
-如果你以前装过旧版，重新运行 `python3 install.py` 即可。安装器会识别旧的
-`agent_relay_hook.sh` 命令，升级为新版 `.py` 入口，清理重复的旧 AgentRelay Hook，
-同时保留你自己已有的 Hook。
+1. 创建独立的 `agentrelay-env` Python 环境。
+2. 安装 Python 依赖和 Playwright Chromium。
+3. 安装 `agent-relay`、`agent-fusion`、`agent-image` 三个 Skill。
+4. 把 Hook、运行脚本和参考文档安装到对应 Agent 目录。
+5. 合并已有 Hook 配置，不覆盖用户自己配置的其他 Hook。
+6. 运行基础检查和合成 Hook 事件检查。
 
-安装完成后，重启正在使用的 Agent，让 Hook 重新加载。
+如果以前安装过旧版本，重新运行安装器即可。安装器会备份被更新的旧文件。
 
-### 3️⃣ 打开网页配置中心
+### 3. 选择要接入的 Agent
+
+交互安装开始时会显示类似下面的清单：
+
+```text
+[x] 1. Codex CLI
+[ ] 2. Claude Code
+[x] 3. Pi
+```
+
+输入编号切换勾选，直接回车确认。安装器会自动识别本机已经安装的 Agent，并默认勾选它们。
+
+也可以只接入指定宿主：
+
+```bash
+python3 install.py --targets codex,claude,pi,hermes
+```
+
+Codex 是共享运行时和默认安装路径。即使命令行里没有写 `codex`，安装器也会保留 Codex 基础组件。
+
+### 4. 配置一个外援
+
+安装器通常会自动打开本地网页配置中心。如果没有打开，运行：
 
 ```bash
 python3 install.py --menu
 ```
 
-选择“打开本地网页配置”，或者安装时直接输入：
+然后选择“打开本地网页配置”。
+
+在网页里完成：
+
+1. 添加网页、API 或本地模型 Provider。
+2. 网页模型点击“打开网页登录”，由用户手动完成登录和人机验证。
+3. 点击“测试”确认 Provider 可用。
+4. 按需设置并发上限、排队超时和租约时间。
+5. 保存并关闭。
+
+没有 Provider 也能使用 Hook 门禁、确认卡、本地归档和只读检查，只是不能调用外部模型。
+
+不要把正在驱动当前 Agent 的主模型重复填成协作 Provider。尤其不要填写同一个本地服务或
+相同 endpoint，否则两个进程会抢同一份推理资源，出现排队和超时。
+
+### 5. 重启 Agent
+
+安装 Hook 或更新 Skill 后，重启正在使用的 Codex、Claude Code、Pi 或 Hermes。
+
+Codex 用户可以在终端检查 Hook 是否加载：
 
 ```text
-0
+/hooks
 ```
 
-也可以输入：
+如果看不到 AgentRelay Hook，先重启，再重新运行安装器。
+
+## 第一次使用
+
+安装完成后，不需要改变平时的提问方式。
+
+### 普通问答
+
+可以直接问：
 
 ```text
-web
+请解释这个函数，不要修改文件。
 ```
 
-在配置中心依次完成：
+这类问题只读，不创建需求卡、不启动交付审计，也不会为了普通问答无意义调用 Fusion。
 
-1. 🌐 添加网页、本地或 API 模型
-2. 🔑 网页模型点击“打开网页登录”，手动完成登录
-3. 🧪 点击“测试”确认模型可用
-4. 🧮 为每个协作模型设置最大并发、排队超时和租约回收时间
-5. 👑 按需启用 Commander
-6. ✅ 点击“完成并关闭”
+### 普通小改
 
-> 🔒 登录状态和 API Key 只保存在本机加密目录。<br>
-> 🚫 AgentRelay 不会绕过 CAPTCHA，也不会自动填写账号密码。
-
----
-
-## 🧭 怎么使用？
-
-### 💬 日常使用：不用记命令
-
-安装并配置 Provider 后，继续正常使用 Codex、Claude Code、Kimi Code、Pi 或 Hermes 即可。
-
-当问题重复失败、耗时过长，或者你明确说出：
+可以直接说：
 
 ```text
-现在调用 DeepSeek
-请让 Fusion 独立检查这个问题
-用 AgentRelay 查一下本地归档
+把这个按钮文字从“保存”改成“保存修改”，只改这个文件。
 ```
 
-Agent 会结合 Hook 提醒和 Skill 规则决定是否调用外援。
+清晰、局部、低风险的小改通常走 `light` 工作档，不显示用户确认卡。Hook 仍会要求主 Agent
+在第一次写入前记录工作档，防止绕过审计基线。
 
-### ⚡ 使用 AgentFusion
+### 复杂修改
 
-Pi 中直接输入：
+如果任务是跨文件、共享组件、高风险或目标本身比较模糊，主 Agent 应该先展示五栏确认卡，
+而不是直接改：
 
 ```text
-/agent-fusion
+请把支付模块从旧接口迁移到新接口，保持页面行为不变，并说明影响范围、验证方式和回滚方式。
 ```
 
-会打开中文选择菜单，可以开关 Fusion、选择 Provider、切换 `readonly` / `coding` 模式和重置会话。
+五栏分别是：
 
-其他 Agent 通常只需自然语言提出委派需求，例如：
+| 栏目 | 要回答的问题 |
+|---|---|
+| `现象` | 现在实际看到的问题是什么 |
+| `期望` | 改完后具体要达到什么状态 |
+| `定位` | 已经查到哪些真实文件、函数或页面元素 |
+| `边界` | 哪些文件、模块和行为不能改 |
+| `疑点` | 哪里还不确定，推荐采用什么方案 |
+
+卡片还会补充影响范围、风险、验证命令和回滚方式。批准只对当前卡片展示的同一范围生效。
+如果修改范围扩大，必须重新确认。
+
+### 让 Fusion 帮忙
+
+可以明确提出：
 
 ```text
-请先检查 AgentFusion 状态。
-如果 delegable=true，就把测试日志调查交给 Fusion；
-如果不可用，不要等待，继续本地处理。
+请先检查 AgentFusion 状态。如果 delegable=true，就把完整测试日志分析交给 Fusion；
+如果不可用，不要等待，继续由你本地处理。
 ```
 
-如果要直接使用 CLI：
+Fusion 适合测试日志、批量阅读、跨文件搜索、独立复现和边界明确的局部实现。它默认只读，
+写文件和执行命令需要明确切换到 `coding`。
+
+### 让 Commander 分工
+
+可以明确提出：
+
+```text
+这个任务涉及前端、后端和测试。请用 Commander 拆分隔离子 Agent，
+完成后先汇总审查，再逐文件合并，不要直接覆盖主工作区。
+```
+
+Commander 适合真正需要多人并行的工作。一个普通单文件任务启用 Commander 只会增加成本和
+等待时间，所以是否启动应由任务复杂度和用户要求决定。
+
+### 让别的模型看图
+
+只有当前主模型确实不能识图，而且你明确要求借用其他模型时，才使用 AgentImage：
+
+```text
+$agent-image /path/to/screenshot.png
+```
+
+也可以直接说“让在线模型看一下这张图”。AgentImage 不会自动拦截所有图片。当前主模型本身
+能读图时，应直接使用原生视觉能力，避免多一次转述丢失细节。
+
+## 什么时候会出现确认卡
+
+不是每个任务都会建卡。
+
+| 场景 | 是否建卡 | 说明 |
+|---|---|---|
+| 普通问答、解释、搜索、只读检查 | 不建卡 | 不写文件，也不建立交付审计 |
+| 清晰、局部、低风险的小改 | 默认不出用户卡 | 使用 `light` 工作档，仍记录审计基线 |
+| 普通实现需要明确范围和验收 | 可能出卡 | Hook 给出最低工作档，主 Agent 选择具体档位 |
+| 跨文件、共享组件、高风险、参考图驱动 | 出卡 | 通常至少为 `strict` |
+| 用户要求完整审查、全量回归、逐项核对 | 出卡 | 使用 `user_required`，不能自行降档 |
+| 未批准时尝试写文件 | 写入确认卡 | Hook 硬阻断，只允许继续只读检查和安全测试 |
+| 删除、破坏性 Git、部署、数据库迁移 | 危险操作确认卡 | 展示实际命令，只允许完全相同的输入批准一次 |
+
+常见卡片类型：
+
+- **需求确认卡**：先确认目标、范围、风险、验证和回滚。
+- **五栏确认卡**：把截图、一句抱怨或模糊目标翻译成可执行、可验收的修改合同。
+- **写入确认卡**：任务未批准却要写文件时出现。
+- **危险操作确认卡**：高风险命令前出现。
+- **权限设置菜单**：`/agent-approval` 或 `/设置`，只用于切模式，不批准当前任务。
+
+`/agent-audit` 不是审批卡。它只显示当前交付审计还缺哪些证据，不代表审计已经通过。
+
+简单卡片的字段大致如下：
+
+```text
+「确认卡」
+--------------------------------
+- 任务：修复登录页提交按钮无法点击
+- 现象：点击后没有请求发出
+- 期望：点击后发起登录请求并显示加载状态
+- 定位：src/pages/Login.tsx，onSubmit 被条件提前返回
+- 边界：只允许修改 Login.tsx，不改接口和其他页面
+- 疑点：无
+- 验证：运行登录页测试，并在 Chromium 中真实点击
+- 回滚：失败时恢复修改前文件
+--------------------------------
+```
+
+用户可以用自然语言批准，例如“可以”“按这个范围改”“批准修改这个范围”。主 Agent 会结合
+当前卡片判断语义，Hook 不依赖固定口令。问句、否定、假设、补充条件和新范围都不会被当成
+批准。
+
+## 权限模式与工作档
+
+这两个概念名字相似，作用不同。
+
+### 权限模式
+
+权限模式控制“什么时候需要问你”。可在 Agent 中输入 `/agent-approval` 或 `/设置`，也可以
+直接运行：
+
+```bash
+scripts/approval_policy.py show
+scripts/approval_policy.py set standard
+```
+
+| 模式 | 适合谁 | 行为 |
+|---|---|---|
+| `strict` | 生产项目、高风险仓库 | 所有新增、修改和删除先确认 |
+| `standard` | 大多数用户，默认 | 清晰小改可直接做；跨文件、高风险和模糊任务先确认 |
+| `relaxed` | 个人试验、低风险项目 | 小任务更少打断；危险命令、共享影响和越界仍会拦截 |
+
+模式放宽不会放开危险 Git、部署、越界修改或未批准的新范围。
+
+### 工作档
+
+工作档由主 Agent 在每次实际写任务开始前选择，Hook 会给出最低档。Agent 可以选更高档，
+不能自行降档。
+
+| 工作档 | 用于什么任务 | 用户是否看到卡 |
+|---|---|---|
+| `light` | 单文件、清晰、低风险、有直接验证方式 | 通常不显示 |
+| `standard` | 普通实现，需要需求、diff、行为和审查证据 | 显示 |
+| `strict` | 跨文件、共享、高风险、模糊或参考图任务 | 显示 |
+| `user_required` | 用户明确要求完整审查和逐项验证 | 显示 |
+
+纯问答和只读检查不选择工作档，也不创建审计。
+
+更详细的规则见：
+
+- [work-profiles.md](skills/agent-relay/references/work-profiles.md)
+- [confirmation-card.md](skills/agent-relay/references/confirmation-card.md)
+- [red-green-review.md](skills/agent-relay/references/red-green-review.md)
+
+## AgentFusion 和 Commander
+
+| 能力 | 主要用途 | 启动方式 | 默认安全边界 |
+|---|---|---|---|
+| AgentFusion | 一个持久副手，处理高输出量或可隔离的工作 | 主 Agent 检查 `delegable=true` 后委派 | 默认 `readonly`，`coding` 需要明确开启 |
+| Commander | 多角色并行处理跨模块任务 | 用户明确要求或任务复杂度足够时启动 | 子 Agent 使用隔离 workspace，合并前需确认 |
+
+Fusion 的典型任务：
+
+- 跑完整测试并汇总大量日志。
+- 批量阅读多个目录。
+- 独立复现一个 bug。
+- 按主 Agent 已确定的方案修改局部代码。
+
+Commander 的典型任务：
+
+- 前端、后端、数据库、测试分别处理。
+- 多个角色需要并行工作。
+- 主工作区必须先保持不动，最后统一审查和逐文件合并。
+
+两者不会递归启动。Commander 运行时会抢占 Fusion；子 Agent 不能继续启动 Commander 或 Fusion。
+
+检查 Fusion 状态：
 
 ```bash
 PYTHON="${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python"
 FUSION="${CODEX_HOME:-$HOME/.codex}/skills/agent-fusion/scripts/agent_fusion.py"
-
 "$PYTHON" "$FUSION" status --json
-"$PYTHON" "$FUSION" provider web:deepseek-web
+```
+
+Fusion 默认开启，但不会自己猜 Provider。必须明确选择，例如：
+
+```bash
+# 如果新开了一个终端，先重新执行上一段命令，设置 PYTHON 和 FUSION。
+"$PYTHON" "$FUSION" provider api:kimi-api
 "$PYTHON" "$FUSION" mode readonly
 ```
 
-需要允许 Fusion 写文件和执行命令时：
+允许 Fusion 修改文件或执行命令前，必须确认任务边界和 Provider 类型：
 
 ```bash
 "$PYTHON" "$FUSION" mode coding --confirm-coding
 ```
 
-> 🛡️ `coding` 模式会真实修改工作区并执行命令。只在任务边界清楚、你明确同意时使用。
+网页 Provider 只提供咨询，不能获得本机文件写入和 shell 能力。需要实际执行时只能选择 API
+或本地 Provider。
 
-### 🖼️ 使用 AgentImage
+完整说明见 [agent-fusion/SKILL.md](skills/agent-fusion/SKILL.md)。
 
-当前模型不能识图时，可以显式调用：
+## 支持的 Agent
 
-```bash
-python3 scripts/agent_image.py /path/to/image.png
-```
-
-也可以使用 Agent 提供的 `$agent-image` 或 `@agent-image` 入口。
-
-AgentImage 不会自动拦截所有图片，只有你明确要求识图时才执行。
-
-### 👑 使用 Commander
-
-遇到跨模块、高风险或适合并行的任务，可以明确告诉主 Agent：
-
-```text
-这个任务跨前端和后端，请启用 Commander，
-拆分隔离 Agent，完成后先审查，再逐文件合并。
-```
-
-Commander 会：
-
-1. 🧾 生成需求和执行计划
-2. 👥 创建 1 到 5 个隔离 Agent
-3. 🔍 汇总结果并做审查
-4. ✅ 经你确认后才合并回主工作区
-
-主工作区在审查期间被修改，或者两个 Agent 对同一文件产生冲突时，合并会暂停，不会覆盖你的文件。
-
----
-
-## 🛠️ 支持的 Agent
-
-| Agent | 支持情况 | 说明 |
+| Agent | 当前支持 | 说明 |
 |---|---|---|
-| 🟢 Codex CLI | 完整支持 | 始终安装 |
-| 🟢 Claude Code | 完整支持 | 自动合并 `hooks` 配置 |
-| 🟢 Kimi Code | 完整支持 | 支持失败与 Stop Hook |
-| 🟢 Pi | 完整支持 | 提供原生 Fusion 工具与中文菜单 |
-| 🟢 Hermes | 完整支持 | 首次触发需要在终端确认 |
-| 🟡 OpenCode | 仅 Skill | 没有 Prompt 注入 Hook |
-| 🔴 deepseek-cli | 不支持 | 没有 Hook、插件或 Skill 机制 |
+| Codex CLI | 完整 | 主路径，Hook、Skill、确认卡、Fusion 和 Commander |
+| Claude Code | 完整 | 安装器写入 `~/.claude/settings.json` 的 hooks |
+| Pi | 完整 | 安装原生扩展，提供 Fusion 菜单和工具阻断 |
+| Kimi Code | 完整 | 写入 `$KIMI_CODE_HOME/config.toml`，失败和 Stop Hook 可用 |
+| Hermes | 代码已接入 | `pre_llm_call`、`post_tool_call`、`subagent_stop`；真实宿主可见性仍需实测 |
+| OpenCode | 仅 Skill | 没有 Prompt 注入 Hook，自动提醒不可用 |
+| DeepSeek CLI | 不支持自动接入 | 没有 Hook、插件或 Skill 机制；DeepSeek 网页可作为 Provider |
 
-安装器只新增或更新 AgentRelay 自己的配置，不会删除已有 Hook。
+多 Agent 共用一套 Provider 并发额度。网页和本地默认各 1 个并发，API 默认 10 个并发，可按
+账号能力调整。满载时先排队，排队超时会明确返回忙，不会偷偷换另一个模型冒充原 Provider。
 
----
+### Windows 支持进度
 
-## ✅ 安装后检查
+代码已经使用 Windows 的 `Scripts/python.exe` 路径、`subprocess.list2cmdline` 和 Python
+参数列表，避免依赖 macOS 固定路径或 `/bin/sh`。
 
-查看 Tracker 状态：
+但当前发布验证仍以 macOS 为主。Windows 用户可以做真实安装测试，但在完成独立 Windows
+端到端验收前，README 不把“代码兼容”写成“Windows 已验证完成”。
 
-```bash
-"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" \
-  "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" status
-```
+## 常见问题
 
-查看最近问题：
+### Hook 没有反应
 
-```bash
-"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" \
-  "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" problems
-```
+1. 重启对应 Agent。
+2. Codex 中运行 `/hooks`，确认 AgentRelay Hook 已被识别或信任。
+3. 重新运行 `python3 install.py`。
+4. 检查安装输出里对应宿主的验证结果。
 
-正常的新状态应包含：
+### 看不到确认卡
 
-```text
-retry_count: 0
-relay_triggered: false
-relay_call_count: 0
-should_trigger: false
-```
+- 普通问答和小改本来就可能没有用户卡。
+- 复杂任务要求主 Agent 先生成确认卡。
+- 某些宿主不保证显示同一种卡片界面。Hermes 仍需真实宿主验证。
+- Kimi 可能通过 Stop 原因或普通文本提示，不承诺与 Codex 完全相同的卡片 UI。
 
-如果 Hook 没有反应，先重启 Agent，再检查：
+### Fusion 不工作
 
-```text
-$CODEX_HOME/hooks.json
-$CODEX_HOME/agent_relay_tracker/logs/error.log
-```
-
----
-
-## 🩺 常见问题
-
-| 现象 | 先检查什么 |
-|---|---|
-| 🔔 Hook 没反应 | 是否重启 Agent；`hooks.json` 是否包含 `agent_relay_hook.py` |
-| 🧾 Codex 看不到确认卡 | 是否重启过 Codex；在 Codex 中运行 `/hooks` 检查 Hook 是否已信任；配置和 Skill 是否为最新版 |
-| 🔑 网页登录失效 | 重新打开配置中心并登录；不要手动编辑登录状态文件 |
-| 🌐 网页保存了但不能自动对话 | 网站是否有适配器；DeepSeek 已内置，其他网站能力取决于当前 Adapter |
-| ⚡ Fusion 不工作 | 是否配置 Provider；`status --json` 是否返回 `delegable=true` |
-| ⏳ Fusion 一直排队或返回忙 | 查看该 Provider 的 `max_concurrency`；确认没有把主模型或同一本地服务重复填入 |
-| 👑 Commander 合并暂停 | 主工作区是否被改动；不同 Agent 是否修改了同一个文件 |
-| 🖥️ Chromium 找不到 | 重新运行 `python3 install.py`，或设置 `AGENT_RELAY_BROWSER_PATH` |
-
----
-
-## 🛡️ 安全边界
-
-- 🚫 不绕过 CAPTCHA，不保存账号密码
-- 🔒 任务门禁只做本地规则预检和状态校验，不额外调用第二个模型；自然语言含义由当前主 Agent 判断
-- 🛑 Codex 当前不支持 Hook 原生 `ask` 审批按钮；AgentRelay 用
-  `deny + systemMessage 纯文本 emoji 确认卡 + 原输入重试` 实现安全确认
-- 🧠 外部模型建议必须由主 Agent 验证，不能直接当作最终答案
-- 🧰 Fusion 只能访问指定 workspace
-- 👑 Commander 使用隔离 workspace，默认不会覆盖主工作区
-- 🕵️ 网页咨询发送前做可逆脱敏；敏感映射只保存在当前进程内存，不写入项目或运行文件
-- 🔐 Cookie、登录状态和 API Key 不写入项目、日志或 Git
-
----
-
-## ⚙️ 它是怎么实现的？
-
-### 🪝 五个 Hook 各做什么
-
-| Hook 事件 | AgentRelay 用来做什么 |
-|---|---|
-| `SessionStart` | 初始化会话状态，恢复安全边界 |
-| `UserPromptSubmit` | 本地预检任务大小，注入任务门禁和确认要求 |
-| `PreToolUse` | 检查危险命令和未批准写入，必要时直接 `deny` |
-| `PostToolUse` | 记录工具结果、失败次数和处理耗时 |
-| `Stop` | 判断本轮是否结束，必要时注入后续提醒 |
-
-Codex 的 Hook schema 虽然列出了 `permissionDecision: ask`，但当前官方解析器明确拒绝它。
-因此 AgentRelay 不依赖这个无效选项，而是使用可验证的：
-
-```text
-PreToolUse deny
-   ↓
-Agent 展示确认卡
-   ↓
-用户明确批准
-   ↓
-只重试完全相同的工具输入一次
-```
-
-### 🔁 一次外援请求的完整链路
-
-```text
-Agent 会话
-   │
-   ▼
-Hook 观察失败次数、有效耗时和显式调用语句
-   │
-   ▼
-Tracker 按 Session 和问题隔离状态
-   │
-   ▼
-向 Agent 注入候选提醒 additionalContext
-   │
-   ▼
-Agent 结合上下文判断：现在是否需要外援
-   │
-   ▼
-Skill 选择 web / api / local Provider
-   │
-   ▼
-主 Agent 按能力判断：API / 本地可执行，网页只提供咨询
-   │
-   ▼
-Provider 租约或编号网页会话槽位（全局 FIFO 排队）
-   │
-   ▼
-网页请求发送前脱敏，返回后在本机恢复原值
-   │
-   ▼
-Provider Adapter 调用外部模型
-   │
-   ▼
-主 Agent 验证结果、修改代码并重新测试
-```
-
-### 🧩 主要模块
-
-| 模块 | 作用 |
-|---|---|
-| `hooks/` | 监听 Agent 事件、计时、记录重试和生成提醒 |
-| `skills/agent-relay/` | 决定什么时候查询 Provider、归档和发起协作 |
-| `skills/agent-image/` | 把图片交给支持识图的 Provider |
-| `skills/agent-fusion/` | 管理 Fusion 开关、Provider、模式、会话和工具循环 |
-| `scripts/agent_provider.py` | 统一处理网页、API 和本地模型 |
-| `scripts/provider_leases.py` | 跨进程 Provider 并发租约、FIFO 排队和异常回收 |
-| `scripts/web_session_pool.py` | 全局编号网页会话、业务流程隔离和槽位复用 |
-| `scripts/sensitive_redaction.py` | 网页咨询前的可逆脱敏与本机恢复 |
-| `scripts/model_router.py` | 根据能力选择可执行或只读咨询 Provider |
-| `scripts/fusion_runner.py` | Fusion 的持久会话、工具调用、步数限制和交接 |
-| `scripts/research_commander.py` | Commander 的角色规划、隔离执行和结果汇总 |
-| `scripts/agentrelay_console.py` | 确认卡、Commander 和逐文件合并入口 |
-| `scripts/config_web.py` | 本机网页配置中心 |
-
-### ⚖️ 触发权重
-
-AgentRelay 使用简单的时间与失败阶梯，不靠无限轮询：
-
-| 权重 | 条件 | 行为 |
-|---|---|---|
-| 1️⃣ | 刚开始处理，未命中归档 | 正常继续 |
-| 2️⃣ | 5 到 15 分钟，或命中归档 | 先查本地历史结论 |
-| 3️⃣ | 15 分钟以上，或重复失败明显 | 进入“是否叫外援”的判断 |
-
-系统只给候选建议，不会越过主 Agent 直接做决定。
-
-### 🧮 Provider 调度怎么工作？
-
-- 每个 Provider 的并发上限由所有 Agent 进程共享，不按单个会话重新计算。
-- 调用开始前先获取租约；轮到谁由持久化队列的 ticket 顺序决定。
-- 租约记录 PID、心跳和过期时间。进程崩溃后，不再存活或过期的名额会被下一个调用回收。
-- 网页 Provider 使用同一套租约，但每个名额对应一个编号会话和业务流程绑定范围。
-- 需要执行本机操作时，路由器按 `API → 本地` 选择；网页 Provider 会被标记为 advisory，
-  即使它满载、排队或不可用，也不能被当成隐式执行器。
-- 队列超时会返回结构化错误，主 Agent 必须报告“当前 Provider 忙”，不能伪造成功或静默
-  换用另一种能力。
-
-### ⚡ Fusion 为什么不会递归？
-
-- Fusion 子进程会设置 `AGENTRELAY_FUSION_CHILD=1`
-- Commander 子进程会设置 `AGENTRELAY_COMMANDER_CHILD=1`
-- 子 Agent 不允许再次启动 Fusion 或 Commander
-- Commander 运行时持有最高优先级锁，Fusion 会在下一次模型或工具调用前暂停
-- 被中断的 Fusion 会生成交接快照，不会静默丢失工作
-
-### 🔐 权限容忍度：一次动作，一张确认卡
-
-直接输入 `/agent-approval` 或 `/设置`，可查看当前模式及每档说明，再回复数字：
-
-```text
-[1] strict    严格：所有新增、修改、删除先确认
-[2] standard  标准（默认）：清晰小改免确认，多文件、多领域、大工程、共享或模糊需求先确认
-[3] relaxed   宽松：危险命令、大工程、共享影响和越界仍需确认
-```
-
-也支持 `/agent-approval 2` 一步切换。Pi 使用原生选择菜单；其他已接入 Hook 的宿主显示
-设置卡并读取下一次数字回复，菜单未打开时不会把单独的 `1`、`2`、`3` 当成设置。
-切换后立即回读配置验证；不会批准当前待确认任务，也不会放宽危险命令或元素边界。
-Kimi 等没有普通可见卡的宿主、OpenCode 及不支持 Hook 的 DeepSeek CLI，请使用下面的
-本地脚本菜单，不承诺宿主内自动选择界面。
+先检查：
 
 ```bash
-scripts/approval_policy.py            # 显示菜单；交互终端可继续输入 1/2/3
-scripts/approval_policy.py 2          # 直接选择 standard
-scripts/approval_policy.py show
-scripts/approval_policy.py set strict
-scripts/approval_policy.py set standard
-scripts/approval_policy.py set relaxed
+"$PYTHON" "$FUSION" status --json
 ```
 
-配置保存在 `~/.codex/agent_relay_tracker/approval-policy.json`。同一动作只显示一张
-`systemMessage` 确认卡，模型上下文只提示等待批准，不再生成第二张默认卡。
-危险命令、共享影响、未批准的元素级约束不被宽松模式豁免。
+关注：
 
-### 🧩 多 Agent 与跨平台确认卡
+- `delegable=false`：当前不能委派。
+- `FUSION_PROVIDER_NOT_CONFIGURED`：还没有选择 Provider。
+- `FUSION_DISABLED`：Fusion 已关闭。
+- `COMMANDER_ACTIVE`：Commander 正在运行，Fusion 按设计暂停。
+- `FUSION_PROVIDER_BUSY`：Provider 满载，排队超时。
 
-卡片使用共享纯文本核心（中文标题 + 上下分割线 + 仅操作项 emoji），按宿主能力适配：
+### Provider 一直排队
 
-| 宿主 | 可见确认卡 | 写入/危险阻断 | 边界 |
-|---|---|---|---|
-| Codex | `systemMessage` | 完整 Hook | 协议与模型上下文分离 |
-| Claude Code | `systemMessage` | 完整 Hook，含 `PreToolUse` | 安装时合并现有 hooks |
-| Pi | `ctx.ui.notify` | `tool_call` 阻断 | 模型仍收隐藏 message，卡片对用户可见 |
-| Hermes | `systemMessage` 协议输出 + `context` | 按宿主已有事件 | `pre_llm_call/post_tool_call/subagent_stop`；可见性需宿主实测 |
-| Kimi | 不承诺普通可见卡 | Stop 阻断原因回写 | stderr + 退出码 2；其余提示只给模型 |
-| OpenCode | 手动确认流程 | 不承诺自动 Hook | 当前为 skill-only |
-| DeepSeek CLI | 不支持自动卡 | 不支持 | 没有 Hook/Skill/插件机制 |
+检查 Provider 的并发设置。不要为了“解决排队”把主模型和协作模型指向同一个本地服务。
 
-Windows 使用 Python argv、`subprocess.list2cmdline` 与 `agentrelay-env/Scripts/python.exe`；
-不依赖 macOS 路径或 `/bin/sh`。真实 Windows 端到端仍需在 Windows 主机验证，不能用 macOS
-测试代替。
+### 网页登录失效
 
-### 🔎 分档交付审计：通过后才汇报
+重新运行安装器并打开本地网页配置，在浏览器中手动重新登录。AgentRelay 不绕过 CAPTCHA，
+也不自动填写账号密码。
 
-AgentRelay 参考 [gstack](https://github.com/garrytan/gstack) 的 review/QA 闭环，
-把**需求对照、真实 diff、测试/行为、页面视觉和最终审查**绑定到当前工作区版本。
-参考来源、提交号与 MIT 许可见 `skills/agent-relay/references/delivery-audit-gstack.md`；
-不需要安装 gstack，也不使用其遥测或安装器。
+### 安装后页面检查失败
 
-`/agent-approval` 同时选择权限和审计深度：
-
-| 模式 | 日常流程 | 完成前要求 |
-|---|---|---|
-| `strict` | 所有写入先确认 | 逐项需求、完整 diff、真实行为、主审、独立审查；页面另需目标/边界/视觉认证 |
-| `standard`（默认） | 普通代码小改轻量检查 | 单点颜色/圆角/按钮方圆/字号/间距只验目标、关键边界和基本交互；复杂/共享/高风险自动升级 |
-| `relaxed` | 小任务不做正式审计 | 仅大型、多文件、多目标、共享或高风险任务审计；危险命令、越界和虚假完成不豁免 |
-
-修改后输入 `/agent-audit` 查看待办。该命令只展示状态，不会自动把审计标成通过，也不是要求
-Agent 立即执行的授权。普通问答、概念解释和 Hook 提醒本身不会触发审计；只有当前修改任务
-需要该档位审计时才执行。已结束任务或新问题的旧待办不能反复拦截新问答。
-当前主 Agent 能读图时默认使用原生视觉，未调用 agent-image 不等于没有视觉。
-
-主 Agent 必须真实读取 diff、逐项对照原始需求，并用 `delivery_audit.py run-behavior`
-执行项目已有测试或本地行为探针，再用 `record` 保存证据。测试数量为 0、退出码非 0、
-后续文件变化、未完成的页面视觉认证都会阻断完成。
-
-需要独立审查时，只有真实 Fusion `delegate` 成功才能登记；未配置或调用失败由主 Agent
-完成本地对抗性审查并如实标记独立覆盖缺失。无视觉不强制截图，但必须完成结构化浏览器
-检查并请求用户复查，不能声称视觉通过。
-
-```bash
-AUDIT="${CODEX_HOME:-$HOME/.codex}/skills/agent-relay/scripts/delivery_audit.py"
-python3 "$AUDIT" status --home "${CODEX_HOME:-$HOME/.codex}" --session "<session_id>"
-python3 "$AUDIT" run-behavior --home "${CODEX_HOME:-$HOME/.codex}" \
-  --session "<session_id>" --cmd "python -m unittest discover -s tests" --kind test
-```
-
-### 🎨 严格变更约束：默认按参考，授权后发挥
-
-- 默认严格按指定 UI 参考修改；只有明确授权“自由发挥/自由优化”才可调整设计，
-  但不因此扩大文件、接口、数据或业务范围。
-- 确认卡明确具体参考、创作权限、允许文件、禁止范围和额外 Bug 只报告；
-  名单外写入会被 Hook 阻断，范围变化必须重新批准。
-- 批准后冻结基线，样式任务冻结接口、字段、数据、排序和业务逻辑；最终用真实 diff 验收。
-- 浏览器能运行不等于参考一致。对照截图/报告后，用
-  `scripts/change_contract.py verify-reference --session <session_id> --evidence <路径>`
-  绑定参考验收证据；报告逐项使用 `项目: 实际对照结果`，必须覆盖目标和目标外检查，
-  任意非空文件或只存在截图不能替代对照。缺证据或越界不能声称完成。
-- 作用域以用户指定对象为准：指定模块/容器/元素就只改它；只有明确全局/全部才可改公共组件。
-  `target_scope` 限定 DOM/模块，`allowed_properties` 限定属性，`forbidden_effects` 冻结兄弟元素、
-  父布局和其他模块；局部需求写共享文件会被阻断，连带影响必须重新确认。
-- `unchanged_checks` 明确目标外验收，例如导出按钮仍在最右侧、其他模块滚动条不变；
-  参考证据必须同时覆盖目标和这些无副作用检查。
-- Commander/Fusion 子 Agent 通过环境和任务提示继承同一约束，不能在隔离工作区自由扩大范围。
-
-- **目标元素验收**：`verify_page.py --target-selector` 修改前采集计算样式、位置尺寸和局部截图，
-  修改后 `--after` 验证目标确实达成；自动继承 before 的 `--invariant`，对照目标外位置尺寸及计算样式。
-  验收后再次编辑会使证据失效，缺目标/边界证据不放行。
-- **真实视觉审查**：有视觉时实际读取整页与局部截图，再用 `visual_review.py record --passed`
-  逐项传 `--observation 'target=实际观察'`、`--observation '<目标外项>=实际观察'` 和
-  `--self-reviewed --attestation '已逐项读取截图并对照页面'`。多目标用 `--target-item` 和
-  `--item-screenshot` 绑定每项独立截图；相同图片哈希、缺少逐项观察或拿点击/DOM/尺寸测量
-  代替视觉检查都会被拒绝。完成声明声称的象限、表格或页面范围超过认证目标数时，Hook 阻断，
-  不能把“只看了其中一个”写成全量通过。
-- **无视觉降级**：`verify_page.py --no-screenshots` 用真实 Chromium 完成 DOM/布局、控制台、文件哈希、
-  按钮点击/输入和目标外检查；`visual_review.py nonvisual` 只登记结构化证据，最终必须请用户复查，
-  不能声称视觉通过。agent-image 也必须逐项给出实际观察，Provider 失败则降级。
-- **复用优先**：普通 UI 请求自动生成约束草案；公共组件/样式证据必须真实存在，禁止绕过公共实现
-  自绘同类骨架。确需新组件必须明确授权。草案不重复审批，strict/standard/relaxed 仍按权限模式执行。
-- **清理证据**：视觉审查通过后优先运行 `visual_review.py cleanup`；未登记的临时截图用
-  `--screenshot` 显式逐张列出。宿主若拒绝 `rm -f`，立即逐张执行绝对路径 `unlink` 并回查，
-  不重复同一命令；只保留文字结果，清理后不再要求图片文件存在。
-
-### 👑 Commander 如何避免写坏项目？
-
-- 每个子 Agent 使用独立 workspace
-- 主 Agent 负责最终审查
-- 合并前检查主工作区是否发生变化
-- 同一个文件出现多个不同版本时停止自动合并
-- 只有明确确认后才逐文件写回
-
-### 🧪 本地验证
-
-运行主要测试：
-
-```bash
-"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" \
-  -m unittest discover -s tests -v
-```
-
-检查差异格式：
-
-```bash
-git diff --check
-```
-
-真实页面检查（Chromium 必须已安装；失败返回 1，不会把跳过当通过）：
+修改 HTML、CSS、JavaScript 或页面模板后，可以使用真实 Chromium 检查：
 
 ```bash
 "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" \
   scripts/verify_page.py --output runtime/page-verification
 ```
 
-检查会实际打开配置中心，点击全部导航、切换明暗主题，检查桌面与手机布局，并保存截图、
-控制台错误和 `result.json`。修改 HTML/CSS/JS/页面模板后，Hook 会按会话记录文件哈希；
-声称“页面完成/验证通过”时，必须有覆盖当前文件版本的真实浏览器证据，否则 Stop 会阻断。
-再次修改文件会使旧证据失效；非页面任务不触发。CI 同样运行页面检查并上传截图。
+失败返回非零退出码。截图、控制台错误和 `result.json` 会保存在输出目录，便于定位。
 
-Hook 和 Provider 租约都按需运行，不需要常驻服务。网页配置服务在关闭页面后停止；可选的
-`agentrelay_daemon.py` 只负责周期监控和汇总 Provider 租约状态，不是 Fusion 调度的前提。
+## 安全边界
 
----
+- 不绕过 CAPTCHA，不保存账号密码。
+- Cookie、登录状态和 API Key 不写入项目、日志或 Git。
+- 网页咨询发送前会替换识别到的密钥、令牌、邮箱和手机号。
+- 危险命令必须单独确认，只允许完全相同的输入重试一次。
+- Fusion 只能访问指定 workspace。
+- Commander 子 Agent 使用隔离 workspace，默认不覆盖主工作区。
+- 外部模型建议必须由主 Agent 验证，不能直接当作最终答案。
+- 删除策略与权限模式绑定。普通项目文件默认先确认，永久删除在默认模式下不允许。
+- “测试通过”必须有当前文件版本的证据；旧截图、旧测试结果或空测试数量不能冒充通过。
 
-<div align="center">
+## 工作原理
 
-### ⭐ 如果 AgentRelay 对你有帮助，欢迎 Star
+### 一次普通任务
 
-**MIT License** · 详见 [LICENSE](LICENSE)
+```text
+用户提交任务
+    |
+    v
+Hook 做本地预检
+    |
+    +-- 纯问答/只读 -> 正常回答
+    |
+    +-- 小改 -> light 工作档 -> 写入 -> 对应验证
+    |
+    +-- 复杂任务 -> 确认卡 -> 用户批准 -> 写入 -> 审计和验证
+```
 
-</div>
+Hook 只做确定性本地检查，不会为了判断任务大小偷偷调用第二个模型。最终语义判断仍由主
+Agent 完成。
+
+### 五个 Hook 事件
+
+| 事件 | 作用 |
+|---|---|
+| `SessionStart` | 初始化会话状态 |
+| `UserPromptSubmit` | 判断是否需要任务门禁和确认卡 |
+| `PreToolUse` | 拦截未批准写入和危险命令 |
+| `PostToolUse` | 记录工具结果、失败和耗时 |
+| `Stop` | 检查是否还有未完成的确认或交付证据 |
+
+### Provider 调度
+
+- 每个 Provider 的并发名额由所有 Agent 会话共享。
+- 满载请求进入持久化 FIFO 队列。
+- 请求持有带心跳和过期时间的租约，异常退出后可回收。
+- 网页 Provider 使用编号会话，避免不同任务混用上下文。
+- 需要本机执行时按 `API -> 本地` 路由，网页 Provider 只做 advisory。
+
+### 交付审计
+
+普通问答不会启动审计。实际修改任务会绑定当前工作区指纹，按工作档收集证据：
+
+- 原始需求是否逐项完成。
+- 真实 diff 是否只改了允许范围。
+- 测试或行为探针是否真实执行。
+- 页面是否有当前版本的浏览器和视觉证据。
+- 主 Agent 是否完成自审，必要时是否有独立审查。
+- 逻辑改动是否在修改前得到真实 RED，修改后得到真实 GREEN。
+
+这些机制参考了 gstack 的 review/QA 思路，但没有复制它依赖宿主 Bun 和大量 Hook 的整套重流程。
+AgentRelay 把重流程放在按需读取的 reference 中，由任务复杂度决定加载深度。
+
+来源和许可见
+[delivery-audit-gstack.md](skills/agent-relay/references/delivery-audit-gstack.md)。
+
+### 主要目录
+
+| 目录 | 内容 |
+|---|---|
+| `hooks/` | Hook 入口、任务门禁、计时和状态 |
+| `scripts/` | Provider、Fusion、Commander、审计、页面验证和配置中心 |
+| `skills/agent-relay/` | 主协作规则和按需流程 reference |
+| `skills/agent-fusion/` | Fusion 使用规则 |
+| `skills/agent-image/` | 图片识别中继规则 |
+| `tests/` | 正式自动化测试，不是临时演示垃圾 |
+| `runtime/` | 本地运行数据，默认被 Git 忽略 |
+
+## 开发与测试
+
+开发测试需要额外的 `pytest` 依赖。先创建独立环境并安装：
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+```
+
+运行完整测试：
+
+```bash
+.venv/bin/python -m pytest -q
+```
+
+Windows 下把 `.venv/bin/python` 换成 `.venv\Scripts\python.exe`。
+
+检查 Python 语法：
+
+```bash
+.venv/bin/python -m compileall -q hooks scripts tests install.py
+```
+
+检查 diff 格式：
+
+```bash
+git diff --check
+```
+
+真实浏览器检查：
+
+```bash
+python scripts/verify_page.py --output runtime/page-verification
+```
+
+CI 会执行：
+
+1. Python 编译检查。
+2. Shell 语法和示例 JSON 检查。
+3. 完整单元测试。
+4. 真实 Chromium 页面验证。
+5. 私密运行文件、个人路径和内嵌凭据扫描。
+
+`runtime/`、缓存、日志、Cookie、登录状态和本地备份不应提交到 Git。正式 `tests/` 应保留，
+它们是发布质量门，不是测试残留。
+
+## 贡献
+
+提交改动前至少完成：
+
+```bash
+.venv/bin/python -m pytest -q
+.venv/bin/python -m compileall -q hooks scripts tests install.py
+git diff --check
+```
+
+涉及页面时再运行真实 Chromium 检查。涉及 Hook、确认卡或多 Agent 协议时，应同时验证至少
+一个真实宿主，不能只依赖 mock。
+
+## License
+
+MIT License，详见 [LICENSE](LICENSE)。
