@@ -89,6 +89,8 @@ RELAY_ESCALATION_WAIT_SECONDS = {1: 600, 2: 300, 3: 300}
 RELAY_MAX_SIGNALS = 3
 
 HOOK_CARD_DIVIDER = "--------------------------------"
+CHANGE_HISTORY_LIMIT = 2
+CHANGE_HISTORY_TEXT_WIDTH = 68
 
 
 def normalize_agent_id(agent_id):
@@ -556,6 +558,20 @@ def default_state(session_id=None, agent_id=None):
         "last_prompt": None,
         "problem_prompts": [],
         "last_assistant_message": None,
+
+        # 一轮真实写任务的简短修改记录。Stop 最终放行时写入独立历史，
+        # 纯问答和只读检查保持静默。
+        "change_tracking": {
+            "turn_id": None,
+            "started_at": None,
+            "request": None,
+            "workspace": None,
+            "files": [],
+            "tools": [],
+            "had_write": False,
+            "recorded": False,
+            "recorded_at": None,
+        },
 
         "turn_count": 0,
         "turn_closed": False,
@@ -2260,6 +2276,11 @@ def _tool_targets(tool_name, tool_input):
                 patch,
                 flags=re.MULTILINE,
             ))
+            targets.extend(re.findall(
+                r"^\*\*\* Move to:\s*(.+)$",
+                patch,
+                flags=re.MULTILINE,
+            ))
         if targets:
             return list(dict.fromkeys(targets))[:12]
 
@@ -2267,6 +2288,364 @@ def _tool_targets(tool_name, tool_input):
     if command:
         return [_clip_card_text(command, 500)]
     return []
+
+
+def _change_workspace(workspace=None):
+    """Return one stable workspace identity for history isolation."""
+
+    value = str(workspace or os.getcwd()).strip()
+    try:
+        return str(Path(value).expanduser().resolve())
+    except (OSError, RuntimeError, ValueError):
+        return value
+
+
+def new_change_tracking(prompt=None, session_id=None, workspace=None):
+    """Create a blank record for one user-visible write turn."""
+
+    request = normalize_text(prompt)
+    turn_seed = "|".join([
+        str(session_id or ""),
+        _change_workspace(workspace),
+        str(time.time_ns()),
+    ])
+    turn_id = hashlib.sha256(turn_seed.encode("utf-8")).hexdigest()[:20]
+    return {
+        "turn_id": turn_id,
+        "started_at": iso_now(),
+        "request": request or None,
+        "workspace": _change_workspace(workspace),
+        "files": [],
+        "tools": [],
+        "had_write": False,
+        "recorded": False,
+        "recorded_at": None,
+    }
+
+
+def _change_request_for_prompt(state, prompt):
+    """Keep the original task when the latest message only says continue."""
+
+    normalized = normalize_text(prompt)
+    tracking = state.get("change_tracking")
+    previous = (
+        normalize_text(tracking.get("request"))
+        if isinstance(tracking, dict)
+        else ""
+    )
+    fallback = (
+        previous
+        or normalize_text(state.get("initial_prompt"))
+        or normalize_text(state.get("last_prompt"))
+        or normalized
+    )
+    if not normalized:
+        return fallback
+    generic_continuation = (
+        is_explicit_task_approval(normalized)
+        or (
+            matches_any_pattern(normalized, CONTINUATION_PATTERNS)
+            and not matches_any_pattern(normalized, TASK_WRITE_ACTION_PATTERNS)
+        )
+    )
+    return fallback if generic_continuation and fallback else normalized
+
+
+def change_tracking(state):
+    """Read and repair the per-session change tracker without losing data."""
+
+    value = state.get("change_tracking")
+    if not isinstance(value, dict):
+        value = {}
+    tracking = {
+        "turn_id": value.get("turn_id"),
+        "started_at": value.get("started_at"),
+        "request": normalize_text(value.get("request")) or None,
+        "workspace": _change_workspace(value.get("workspace") or os.getcwd()),
+        "files": [
+            str(item) for item in (value.get("files") or [])
+            if str(item or "").strip()
+        ],
+        "tools": [
+            str(item) for item in (value.get("tools") or [])
+            if str(item or "").strip()
+        ],
+        "had_write": bool(value.get("had_write", False)),
+        "recorded": bool(value.get("recorded", False)),
+        "recorded_at": value.get("recorded_at"),
+    }
+    state["change_tracking"] = tracking
+    return tracking
+
+
+def _append_unique_strings(values, additions, limit=None):
+    result = list(values or [])
+    seen = {str(item) for item in result}
+    for item in additions or []:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    if limit is not None:
+        result = result[-limit:]
+    return result
+
+
+def _normalized_changed_path(value, workspace):
+    """Prefer a workspace-relative path; retain external paths as absolute."""
+
+    text = str(value or "").strip().strip("\"'")
+    if not text:
+        return ""
+    try:
+        root = Path(workspace).expanduser().resolve()
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        candidate = candidate.resolve()
+        try:
+            return candidate.relative_to(root).as_posix()
+        except ValueError:
+            return str(candidate)
+    except (OSError, RuntimeError, ValueError):
+        return text
+
+
+def written_file_targets(tool_name, tool_input, workspace=None):
+    """Extract changed paths without confusing shell command text for a file."""
+
+    if not tool_writes_files(tool_name, tool_input):
+        return []
+    workspace = _change_workspace(workspace)
+    raw_targets = []
+    if isinstance(tool_input, dict):
+        for key in (
+            "file_path",
+            "path",
+            "file",
+            "target",
+            "target_file",
+        ):
+            value = tool_input.get(key)
+            if isinstance(value, str) and value.strip():
+                raw_targets.append(value)
+        patch = tool_input.get("input") or tool_input.get("patch")
+        if isinstance(patch, str):
+            raw_targets.extend(re.findall(
+                r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+)$",
+                patch,
+                flags=re.MULTILINE,
+            ))
+            raw_targets.extend(re.findall(
+                r"^\*\*\* Move to:\s*(.+)$",
+                patch,
+                flags=re.MULTILINE,
+            ))
+    paths = [
+        _normalized_changed_path(item, workspace)
+        for item in raw_targets
+    ]
+    paths = [item for item in paths if item]
+    return list(dict.fromkeys(paths))[:50]
+
+
+def change_history_file(workspace=None, agent_id=None):
+    """Return the private history file for one workspace and Agent pair."""
+
+    workspace_key = os.path.normcase(_change_workspace(workspace))
+    agent_key = normalize_agent_id(agent_id) or "default"
+    digest = hashlib.sha256(
+        f"{workspace_key}\0{agent_key}".encode("utf-8")
+    ).hexdigest()[:24]
+    return HISTORY_DIR / "change-summaries" / f"{digest}.json"
+
+
+def read_change_history(workspace=None, agent_id=None):
+    """Read recent summaries; a malformed file is treated as empty history."""
+
+    workspace = _change_workspace(workspace)
+    agent_id = normalize_agent_id(agent_id)
+    path = change_history_file(workspace, agent_id)
+    empty = {
+        "schema_version": 1,
+        "workspace": workspace,
+        "agent_id": agent_id or "default",
+        "entries": [],
+    }
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return empty
+    if not isinstance(value, dict):
+        return empty
+    entries = [
+        item for item in (value.get("entries") or [])
+        if isinstance(item, dict) and str(item.get("summary") or "").strip()
+    ]
+    return {
+        "schema_version": 1,
+        "workspace": workspace,
+        "agent_id": agent_id or "default",
+        "entries": entries[:CHANGE_HISTORY_LIMIT],
+    }
+
+
+def _assistant_change_hint(message):
+    """Extract one short final-answer sentence as an optional summary hint."""
+
+    text = normalize_text(message)
+    text = re.sub(
+        r"^(?:#{1,6}\s*|[-*+]\s*|\d+[.)、]\s*)+",
+        "",
+        text,
+    )
+    text = re.sub(
+        r"^(?:是的|对的|好的|可以|已完成)[，,:：\s]*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"^本次(?:修改|变更|改动)[:：]\s*", "", text)
+    for sentence in re.split(r"(?<=[。！？.!?])\s*", text):
+        sentence = sentence.strip()
+        if len(sentence) < 6:
+            continue
+        if not re.search(
+            r"(?:完成|修复|修改|更新|实现|优化|新增|删除|调整|接入|清理|"
+            r"fixed|updated|implemented|added|removed|changed)",
+            sentence,
+            flags=re.IGNORECASE,
+        ):
+            continue
+        return _clip_card_text(sentence, 100).rstrip("。！？.!?")
+    return ""
+
+
+def build_change_summary(tracking, assistant_message=None):
+    """Build a deterministic summary that remains useful without Agent output."""
+
+    files = list(tracking.get("files") or [])
+    tools = list(tracking.get("tools") or [])
+    request = _clip_card_text(tracking.get("request") or "当前任务", 64)
+    hint = _assistant_change_hint(assistant_message)
+    if files:
+        preview = "、".join(files[:3])
+        if len(files) > 3:
+            preview += f" 等 {len(files)} 个"
+        summary = f"按需求“{request}”修改了 {preview}"
+    elif hint:
+        summary = f"按需求“{request}”：{hint}"
+    else:
+        tool_text = "、".join(tools[:3]) or "文件工具"
+        summary = f"按需求“{request}”通过 {tool_text} 修改了工作区文件"
+    return _clip_card_text(summary, 220)
+
+
+def _wrap_change_history_text(value):
+    """Wrap summary text by terminal display width, including CJK characters."""
+
+    remaining = _clip_card_text(value, 220)
+    if not remaining:
+        return ["暂无记录"]
+
+    lines = []
+    while remaining:
+        used_width = 0
+        cut_index = 0
+        preferred_cut = 0
+        preferred_breaks = set(" \t、，。；：,.;:/-")
+        for index, char in enumerate(remaining):
+            char_width = (
+                2
+                if unicodedata.east_asian_width(char) in {"W", "F"}
+                else 1
+            )
+            if cut_index and used_width + char_width > CHANGE_HISTORY_TEXT_WIDTH:
+                break
+            used_width += char_width
+            cut_index = index + 1
+            if char in preferred_breaks:
+                preferred_cut = cut_index
+
+        if cut_index >= len(remaining):
+            lines.append(remaining)
+            break
+
+        break_index = (
+            preferred_cut
+            if preferred_cut >= max(1, cut_index // 2)
+            else cut_index
+        )
+        line = remaining[:break_index].rstrip()
+        if line:
+            lines.append(line)
+        remaining = remaining[break_index:].lstrip()
+    return lines
+
+
+def render_change_history(entries):
+    """Render two indented summaries with wrapped content."""
+
+    labels = ("📝 本次修改", "🕘 上次修改")
+    blocks = []
+    for index, label in enumerate(labels):
+        entry = entries[index] if index < len(entries) else None
+        summary = (
+            _clip_card_text(entry.get("summary"), 220)
+            if isinstance(entry, dict)
+            else ""
+        )
+        lines = [f"  {label}："]
+        lines.extend(
+            f"    {line}"
+            for line in _wrap_change_history_text(summary)
+        )
+        blocks.append("\n".join(lines))
+    return "\n" + "\n\n".join(blocks)
+
+
+def record_change_history(state, assistant_message=None):
+    """Persist and render the latest two write summaries for this Stop."""
+
+    tracking = change_tracking(state)
+    if tracking.get("recorded") or not tracking.get("had_write"):
+        return ""
+
+    workspace = _change_workspace(
+        tracking.get("workspace") or os.getcwd()
+    )
+    agent_id = normalize_agent_id(state.get("agent_id"))
+    entry = {
+        "turn_id": tracking.get("turn_id") or hashlib.sha256(
+            f"{workspace}|{time.time_ns()}".encode("utf-8")
+        ).hexdigest()[:20],
+        "session_id": normalize_session_id(state.get("session_id")),
+        "workspace": workspace,
+        "created_at": iso_now(),
+        "summary": build_change_summary(tracking, assistant_message),
+        "changed_files": list(tracking.get("files") or []),
+        "tools": list(tracking.get("tools") or []),
+    }
+    history = read_change_history(workspace, agent_id)
+    previous = [
+        item for item in history.get("entries", [])
+        if item.get("turn_id") != entry["turn_id"]
+    ]
+    output_entries = [entry] + previous
+    history["entries"] = output_entries[:CHANGE_HISTORY_LIMIT]
+    history["updated_at"] = iso_now()
+    try:
+        atomic_write_json(
+            change_history_file(workspace, agent_id),
+            history,
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        log_event("change_history_write_error", {"error": str(exc)})
+
+    tracking["recorded"] = True
+    tracking["recorded_at"] = entry["created_at"]
+    return render_change_history(output_entries[:CHANGE_HISTORY_LIMIT])
 
 
 def _tool_gate_is_danger(reason):
@@ -2336,6 +2715,19 @@ def emit_hook_context(event_name, context, system_message=None):
     if system_message and visible_hook_cards_enabled():
         payload["systemMessage"] = system_message
     print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+
+def emit_stop_summary(message):
+    """Print the non-blocking recent-change summary after a final Stop."""
+
+    text = str(message or "").rstrip()
+    if not text.strip() or not visible_hook_cards_enabled():
+        return False
+    print(
+        json.dumps({"systemMessage": text}, ensure_ascii=False),
+        flush=True,
+    )
+    return True
 
 
 def emit_pre_tool_deny(reason, system_message=None):
@@ -4646,6 +5038,7 @@ def create_new_problem(
     prompt=None,
     session_id=None,
     agent_id=None,
+    workspace=None,
 ):
     """
     创建一个全新的问题。
@@ -4696,6 +5089,11 @@ def create_new_problem(
     state["last_prompt"] = normalized_prompt
     state["problem_prompts"] = (
         [normalized_prompt] if normalized_prompt else []
+    )
+    state["change_tracking"] = new_change_tracking(
+        normalized_prompt,
+        session_id=session_id,
+        workspace=workspace,
     )
 
     state["turn_count"] = 1
@@ -5103,6 +5501,7 @@ def task_context_snapshot(state):
 def handle_user_prompt(
     prompt,
     session_id=None,
+    workspace=None,
 ):
     """
     用户提交新消息。
@@ -5123,6 +5522,36 @@ def handle_user_prompt(
         state = read_state(
             session_id=session_id
         )
+        workspace = _change_workspace(workspace)
+        tracking = change_tracking(state)
+        approval_continuation = (
+            is_gate_response_candidate(state, prompt)
+            or is_explicit_task_approval(prompt)
+        )
+        reset_change_tracking = (
+            not tracking.get("turn_id")
+            or tracking.get("recorded")
+            or (
+                bool(state.get("turn_closed"))
+                and not tracking.get("had_write")
+                and not approval_continuation
+            )
+            or (
+                tracking.get("workspace")
+                and tracking.get("workspace") != workspace
+                and not tracking.get("had_write")
+            )
+        )
+        if reset_change_tracking:
+            state["change_tracking"] = new_change_tracking(
+                _change_request_for_prompt(state, prompt),
+                session_id=session_id,
+                workspace=workspace,
+            )
+        else:
+            tracking["workspace"] = workspace
+            if not tracking.get("request") and prompt:
+                tracking["request"] = prompt
 
         pause_requested = (
             matches_any_pattern(prompt, PAUSE_PROBLEM_PATTERNS)
@@ -5145,6 +5574,7 @@ def handle_user_prompt(
                 prompt,
                 session_id=session_id,
                 agent_id=state.get("agent_id"),
+                workspace=workspace,
             )
 
             write_state(
@@ -5169,6 +5599,7 @@ def handle_user_prompt(
                     prompt,
                     session_id=session_id,
                     agent_id=agent_id,
+                    workspace=workspace,
                 )
             else:
                 state = default_state(
@@ -5199,6 +5630,7 @@ def handle_user_prompt(
                 prompt,
                 session_id=session_id,
                 agent_id=agent_id,
+                workspace=workspace,
             )
             log_event(
                 "problem_switched",
@@ -5282,6 +5714,7 @@ def handle_pre_tool_use(
     tool_input=None,
     tool_use_id=None,
     session_id=None,
+    workspace=None,
 ):
     """
     工具开始执行。
@@ -5327,6 +5760,7 @@ def handle_pre_tool_use(
             state = create_new_problem(
                 session_id=session_id,
                 agent_id=state.get("agent_id"),
+                workspace=workspace,
             )
 
         # UserPromptSubmit 到工具启动之间是 Agent 的主动分析/思考时间。
@@ -5339,6 +5773,7 @@ def handle_pre_tool_use(
 
         pending_tools[tool_id] = {
             "tool_name": tool_name,
+            "tool_input": tool_input,
             "started_at": started_at,
             "excluded": excluded,
             "solution_key": build_solution_key(
@@ -5388,6 +5823,8 @@ def handle_post_tool_use(
     tool_output=None,
     tool_use_id=None,
     session_id=None,
+    workspace=None,
+    record_write=True,
 ):
     """
     工具执行结束。
@@ -5433,6 +5870,8 @@ def handle_post_tool_use(
             tool_id,
             None,
         )
+        if pending and not tool_input:
+            tool_input = pending.get("tool_input")
 
         duration = 0.0
         excluded = False
@@ -5524,6 +5963,50 @@ def handle_post_tool_use(
         tool_failed = is_error_like_output(
             tool_output
         )
+
+        # Only a successful PostToolUse can produce the user-facing change
+        # summary. Failed writes and PostToolUseFailure stay out of history.
+        if (
+            record_write
+            and not tool_failed
+            and tool_writes_files(tool_name, tool_input)
+        ):
+            tracking = change_tracking(state)
+            if (
+                not tracking.get("turn_id")
+                or tracking.get("recorded")
+                or (
+                    bool(state.get("turn_closed"))
+                    and not tracking.get("had_write")
+                )
+            ):
+                tracking = new_change_tracking(
+                    _change_request_for_prompt(
+                        state,
+                        state.get("last_prompt"),
+                    ),
+                    session_id=session_id,
+                    workspace=workspace or tracking.get("workspace"),
+                )
+                state["change_tracking"] = tracking
+            tracking["workspace"] = _change_workspace(
+                workspace or tracking.get("workspace")
+            )
+            tracking["files"] = _append_unique_strings(
+                tracking.get("files"),
+                written_file_targets(
+                    tool_name,
+                    tool_input,
+                    tracking["workspace"],
+                ),
+                limit=50,
+            )
+            tracking["tools"] = _append_unique_strings(
+                tracking.get("tools"),
+                [tool_name],
+                limit=12,
+            )
+            tracking["had_write"] = True
 
         if tool_failed:
             state[
@@ -5654,6 +6137,10 @@ def handle_stop(session_id=None, last_assistant_message=None):
         stop_event_state = state
 
         if informational_reply:
+            change_summary = record_change_history(
+                state,
+                assistant_message,
+            )
             state["turn_closed"] = True
             state["active_started_at"] = None
             try:
@@ -5661,6 +6148,7 @@ def handle_stop(session_id=None, last_assistant_message=None):
             except (ImportError, OSError, ValueError, TypeError) as exc:
                 log_event("delivery_audit_close_error", {"error": str(exc)})
             write_state(state, session_id=session_id)
+            emit_stop_summary(change_summary)
             return state
 
         # 助手已明确宣告解决时，优先按解决处理：
@@ -5677,6 +6165,11 @@ def handle_stop(session_id=None, last_assistant_message=None):
             start_active_time(state)
             write_state(state, session_id=session_id)
             return state
+
+        change_summary = record_change_history(
+            state,
+            assistant_message,
+        )
 
         if (
             state.get("problem_active")
@@ -5741,6 +6234,7 @@ def handle_stop(session_id=None, last_assistant_message=None):
             state,
             session_id=session_id,
         )
+        emit_stop_summary(change_summary)
 
         return state
 
@@ -7253,6 +7747,7 @@ def handle_hook_event(
         state = handle_user_prompt(
             prompt,
             session_id=session_id,
+            workspace=data.get("cwd"),
         )
         restore_approval_controls(state, approval_controls)
         if approval_controls:
@@ -7334,6 +7829,7 @@ def handle_hook_event(
                 data
             ),
             session_id=session_id,
+            workspace=data.get("cwd"),
         )
 
     if event_name in ("PostToolUse", "PostToolUseFailure"):
@@ -7365,6 +7861,8 @@ def handle_hook_event(
                 data
             ),
             session_id=session_id,
+            workspace=data.get("cwd"),
+            record_write=event_name == "PostToolUse",
         )
 
     if event_name == "Stop":

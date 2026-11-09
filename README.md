@@ -377,7 +377,7 @@ Fusion 默认开启，但不会自己猜 Provider。必须明确选择，例如�
 |---|---|---|
 | Codex CLI | 完整 | 主路径，Hook、Skill、确认卡、Fusion 和 Commander |
 | Claude Code | 完整 | 安装器写入 `~/.claude/settings.json` 的 hooks |
-| Pi | 完整 | 安装原生扩展，提供 Fusion 菜单和工具阻断 |
+| Pi | 完整 | 安装原生扩展，提供 Fusion 菜单、工具阻断和 Stop 修改摘要 |
 | Kimi Code | 完整 | 写入 `$KIMI_CODE_HOME/config.toml`，失败和 Stop Hook 可用 |
 | Hermes | 代码已接入 | `pre_llm_call`、`post_tool_call`、`subagent_stop`；真实宿主可见性仍需实测 |
 | OpenCode | 仅 Skill | 没有 Prompt 注入 Hook，自动提醒不可用 |
@@ -485,8 +485,38 @@ Agent 完成。
 | `SessionStart` | 初始化会话状态 |
 | `UserPromptSubmit` | 判断是否需要任务门禁和确认卡 |
 | `PreToolUse` | 拦截未批准写入和危险命令 |
-| `PostToolUse` | 记录工具结果、失败和耗时 |
-| `Stop` | 检查是否还有未完成的确认或交付证据 |
+| `PostToolUse` | 记录工具结果、失败、耗时和本轮真实写入 |
+| `Stop` | 检查未完成证据，并输出最近两次修改摘要 |
+
+### 修改摘要历史
+
+只有本轮真正成功写过文件，并且 `Stop` 的确认、交付审计和验证门禁全部放行后，Hook 才会
+在控制台打印一次：
+
+```text
+
+  📝 本次修改：
+    按需求“修复登录超时”：已完成修复
+    （src/login.py、tests/test_login.py）
+
+  🕘 上次修改：
+    按需求“补充安装说明”：已更新 README.md（README.md）
+```
+
+开头会保留一个空行。`📝 本次修改` 和 `🕘 上次修改` 标题缩进两格，正文缩进四格并单独
+换行；正文超过约 68 列显示宽度时会自动折行，中文按双宽计算。两组之间空一行，不使用
+分隔线。没有历史时显示 `🕘 上次修改：` 标题，正文为“暂无记录”。之后最多保留和显示
+两条，不显示“上上次修改”。纯问答、只读搜索、危险命令被拦截或交付审计尚未通过时都
+不会记账，也不会反复刷屏。
+
+历史按“工作区 + Agent”隔离，保存在：
+
+```text
+~/.codex/agent_relay_tracker/history/change-summaries/
+```
+
+它是帮助回忆“刚才改了什么”的摘要历史，不是 Git，也不是一键回滚 checkpoint。需要真正
+撤回代码时仍使用 Git、修改前备份或专门的回滚工具。
 
 ### Provider 调度
 

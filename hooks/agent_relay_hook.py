@@ -212,11 +212,13 @@ def valid_hook_output(value: str, event_name: str | None = None) -> bool:
     if "systemMessage" in payload and not isinstance(payload["systemMessage"], str):
         return False
     if event_name == "Stop":
-        return (
+        block_ok = (
             payload.get("decision") == "block"
             and isinstance(payload.get("reason"), str)
             and bool(payload.get("reason", "").strip())
         )
+        summary_ok = bool(str(payload.get("systemMessage") or "").strip())
+        return block_ok or summary_ok
     output = payload.get("hookSpecificOutput")
     if not isinstance(output, dict):
         return False

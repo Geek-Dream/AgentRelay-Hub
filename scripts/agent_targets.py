@@ -510,16 +510,24 @@ function runPython(script, args, options) {{
 }}
 
 function relay(payload) {{
+  let rawPayload;
+  try {{
+    rawPayload = JSON.stringify(payload);
+  }} catch {{
+    return {{ context: "", card: "", denial: "", stopBlock: "" }};
+  }}
   const res = runPython(
     SHIM,
     ["--target", "pi", "--event", payload.hook_event_name || "UserPromptSubmit"],
     {{
-      input: JSON.stringify(payload),
+      input: rawPayload,
       encoding: "utf-8",
       timeout: 12000,
     }},
   );
-  if (!res || res.status !== 0 || !res.stdout) return {{ context: "", card: "", denial: "" }};
+  if (!res || res.status !== 0 || !res.stdout) {{
+    return {{ context: "", card: "", denial: "", stopBlock: "" }};
+  }}
   try {{
     const out = JSON.parse(String(res.stdout).trim());
     return {{
@@ -528,9 +536,12 @@ function relay(payload) {{
       denial: out?.hookSpecificOutput?.permissionDecision === "deny"
         ? String(out?.hookSpecificOutput?.permissionDecisionReason || out?.systemMessage || "操作未获批准")
         : "",
+      stopBlock: out?.decision === "block"
+        ? String(out?.reason || out?.systemMessage || "任务尚未完成")
+        : "",
     }};
   }} catch {{
-    return {{ context: "", card: "", denial: "" }};
+    return {{ context: "", card: "", denial: "", stopBlock: "" }};
   }}
 }}
 
@@ -731,6 +742,28 @@ function contextSessionId(ctx) {{
       || process.env.PI_SESSION_ID
       || ""
   ).trim();
+}}
+
+function assistantText(message) {{
+  const content = message?.content;
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part) => part?.type === "text" && typeof part?.text === "string")
+    .map((part) => part.text)
+    .join("")
+    .trim();
+}}
+
+function lastAssistantText(messages) {{
+  if (!Array.isArray(messages)) return "";
+  for (let index = messages.length - 1; index >= 0; index -= 1) {{
+    const message = messages[index];
+    if (message?.role !== "assistant") continue;
+    const text = assistantText(message);
+    if (text) return text;
+  }}
+  return "";
 }}
 
 function fusionDelegateContext(params) {{
@@ -994,6 +1027,55 @@ async function fusionCommand(args, ctx) {{
 }}
 
 export default function agentRelay(pi) {{
+  let lastReplyText = "";
+  let finalStopEmitted = false;
+  let agentSettledSupported = false;
+  let pendingAgentEndCheck = null;
+  let pendingAgentEndContext = null;
+
+  function clearPendingAgentEndCheck() {{
+    if (pendingAgentEndCheck !== null) clearTimeout(pendingAgentEndCheck);
+    pendingAgentEndCheck = null;
+    pendingAgentEndContext = null;
+  }}
+
+  function emitFinalStop(ctx, event) {{
+    if (finalStopEmitted) return;
+    finalStopEmitted = true;
+    clearPendingAgentEndCheck();
+    const message = lastAssistantText(event?.messages) || lastReplyText;
+    const result = relay({{
+      hook_event_name: "Stop",
+      session_id: contextSessionId(ctx),
+      cwd: ctx?.cwd ?? process.cwd(),
+      last_assistant_message: message,
+    }});
+    const notice = result.card || result.stopBlock;
+    if (notice) {{
+      ctx?.ui?.notify(notice, result.stopBlock ? "warning" : "info");
+    }}
+  }}
+
+  function checkPendingAgentEnd() {{
+    pendingAgentEndCheck = null;
+    const ctx = pendingAgentEndContext;
+    if (!ctx || finalStopEmitted) return;
+    try {{
+      if (ctx.isIdle() === true) {{
+        pendingAgentEndContext = null;
+        emitFinalStop(ctx);
+        return;
+      }}
+    }} catch {{
+      pendingAgentEndContext = null;
+      return;
+    }}
+    pendingAgentEndCheck = setTimeout(checkPendingAgentEnd, 25);
+    if (typeof pendingAgentEndCheck.unref === "function") {{
+      pendingAgentEndCheck.unref();
+    }}
+  }}
+
   pi.registerTool({{
     name: FUSION_TOOL_NAME,
     label: "Delegate to AgentRelay Fusion",
@@ -1113,6 +1195,9 @@ export default function agentRelay(pi) {{
   }});
 
   pi.on("before_agent_start", (event, ctx) => {{
+    clearPendingAgentEndCheck();
+    lastReplyText = "";
+    finalStopEmitted = false;
     const fusionState = fusionStatus();
     syncFusionTool(pi, fusionState);
     const relayResult = relay({{
@@ -1149,6 +1234,50 @@ export default function agentRelay(pi) {{
     if (result.card) ctx?.ui?.notify(result.card, result.denial ? "warning" : "info");
     if (result.denial) return {{ block: true, reason: result.denial }};
     return undefined;
+  }});
+
+  pi.on("tool_result", (event, ctx) => {{
+    const result = relay({{
+      hook_event_name: "PostToolUse",
+      session_id: contextSessionId(ctx),
+      cwd: ctx?.cwd ?? process.cwd(),
+      tool_name: event?.toolName,
+      tool_input: event?.input ?? {{}},
+      tool_use_id: event?.toolCallId,
+      tool_response: {{
+        exit_code: event?.isError ? 1 : 0,
+      }},
+    }});
+    if (result.card) ctx?.ui?.notify(result.card, "info");
+    return undefined;
+  }});
+
+  pi.on("message_end", (event) => {{
+    if (event?.message?.role !== "assistant") return undefined;
+    const text = assistantText(event.message);
+    if (text) lastReplyText = text;
+    return undefined;
+  }});
+
+  pi.on("agent_settled", (event, ctx) => {{
+    agentSettledSupported = true;
+    clearPendingAgentEndCheck();
+    emitFinalStop(ctx, event);
+  }});
+
+  pi.on("agent_end", (event, ctx) => {{
+    lastReplyText = lastAssistantText(event?.messages) || lastReplyText;
+    if (event?.willContinue === true || agentSettledSupported || finalStopEmitted) return;
+    if (!ctx || typeof ctx.isIdle !== "function") {{
+      emitFinalStop(ctx, event);
+      return;
+    }}
+    clearPendingAgentEndCheck();
+    pendingAgentEndContext = ctx;
+    pendingAgentEndCheck = setTimeout(checkPendingAgentEnd, 0);
+    if (typeof pendingAgentEndCheck.unref === "function") {{
+      pendingAgentEndCheck.unref();
+    }}
   }});
 }}
 """

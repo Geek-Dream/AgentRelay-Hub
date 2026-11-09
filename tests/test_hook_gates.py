@@ -58,6 +58,25 @@ class HookGateTests(unittest.TestCase):
     def assert_hook_ok(self, result):
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def assert_change_summary_format(self, message):
+        lines = message.splitlines()
+        self.assertEqual(lines[0], "")
+        self.assertEqual(lines[1], "  📝 本次修改：")
+        separator = lines.index("", 2)
+        self.assertEqual(lines[separator + 1], "  🕘 上次修改：")
+        self.assertTrue(
+            all(line.startswith("    ") for line in lines[2:separator])
+        )
+        self.assertTrue(
+            all(
+                line.startswith("    ")
+                for line in lines[separator + 2:]
+            )
+        )
+        self.assertTrue(message.startswith("\n  📝 本次修改："))
+        self.assertNotIn("--------------------------------", message)
+        self.assertNotIn("上上次修改", message)
+
     def run_tracker(self, *args):
         return subprocess.run(
             [sys.executable, str(TRACKER), *args],
@@ -636,6 +655,159 @@ class HookGateTests(unittest.TestCase):
                                   tool_input={"file_path": str(source)}, tool_response={"success": True}))
         audit_path = self.codex_home / "agent_relay_tracker" / "delivery-audit" / "relaxed-code.json"
         self.assertFalse(audit_path.exists())
+
+    def test_shell_wrapper_forwards_change_summary_after_final_stop(self):
+        workspace = self.codex_home / "shell-wrapper-workspace"
+        workspace.mkdir()
+        source = workspace / "app.py"
+        source.write_text("VALUE = 1\n", encoding="utf-8")
+        session = "shell-wrapper-change-summary"
+
+        prompt = self.run_hook(self.payload(
+            session, "UserPromptSubmit", cwd=str(workspace),
+            prompt="修复 app.py 里的一个拼写错误",
+        ), shell_wrapper=True)
+        self.assert_hook_ok(prompt)
+
+        source.write_text("VALUE = 2  # fixed\n", encoding="utf-8")
+        written = self.run_hook(self.payload(
+            session, "PostToolUse", cwd=str(workspace), tool_name="Edit",
+            tool_input={"file_path": str(source)},
+            tool_response={"success": True},
+        ), shell_wrapper=True)
+        self.assert_hook_ok(written)
+
+        stopped = self.run_hook(self.payload(
+            session, "Stop", cwd=str(workspace),
+            last_assistant_message="已完成修改，拼写问题已修复。",
+        ), shell_wrapper=True)
+        self.assert_hook_ok(stopped)
+        output = json.loads(stopped.stdout)
+        self.assert_change_summary_format(output["systemMessage"])
+        self.assertIn("app.py", output["systemMessage"])
+        self.assertNotIn("decision", output)
+
+    def test_claude_shim_forwards_change_summary_after_final_stop(self):
+        workspace = self.codex_home / "claude-workspace"
+        workspace.mkdir()
+        source = workspace / "app.py"
+        source.write_text("VALUE = 1\n", encoding="utf-8")
+        session = "claude-change-summary"
+        env = {
+            **self.env,
+            "AGENTRELAY_MAIN_HOOK": str(HOOK),
+        }
+
+        def run_claude(event, payload):
+            return subprocess.run(
+                [
+                    sys.executable,
+                    str(PROJECT_ROOT / "scripts/agentrelay_hook_shim.py"),
+                    "--target",
+                    "claude",
+                    "--event",
+                    event,
+                ],
+                input=json.dumps(payload, ensure_ascii=False),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                check=False,
+                env=env,
+            )
+
+        prompt = run_claude("UserPromptSubmit", self.payload(
+            session, "UserPromptSubmit", cwd=str(workspace),
+            prompt="修复 app.py 里的一个拼写错误",
+        ))
+        self.assert_hook_ok(prompt)
+
+        source.write_text("VALUE = 2  # fixed\n", encoding="utf-8")
+        written = run_claude("PostToolUse", self.payload(
+            session, "PostToolUse", cwd=str(workspace), tool_name="Edit",
+            tool_input={"file_path": str(source)},
+            tool_response={"success": True},
+        ))
+        self.assert_hook_ok(written)
+
+        stopped = run_claude("Stop", self.payload(
+            session, "Stop", cwd=str(workspace),
+            last_assistant_message="已完成修改，拼写问题已修复。",
+        ))
+        self.assert_hook_ok(stopped)
+        output = json.loads(stopped.stdout)
+        self.assert_change_summary_format(output["systemMessage"])
+        self.assertIn("app.py", output["systemMessage"])
+        self.assertNotIn("decision", output)
+
+    def test_blocked_stop_does_not_record_until_the_gate_allows_completion(self):
+        from scripts import delivery_audit
+
+        workspace = self.codex_home / "blocked-stop-workspace"
+        workspace.mkdir()
+        source = workspace / "app.py"
+        source.write_text("VALUE = 1\n", encoding="utf-8")
+        session = "blocked-stop-change-summary"
+
+        prompt = self.run_hook(self.payload(
+            session, "UserPromptSubmit", cwd=str(workspace),
+            prompt="修复 app.py 的常量错误",
+        ))
+        self.assert_hook_ok(prompt)
+        state = json.loads(
+            (
+                self.codex_home / "agent_relay_tracker" / "sessions"
+                / f"{session}.json"
+            ).read_text(encoding="utf-8")
+        )
+
+        source.write_text("VALUE = 2  # fixed\n", encoding="utf-8")
+        written = self.run_hook(self.payload(
+            session, "PostToolUse", cwd=str(workspace), tool_name="Edit",
+            tool_input={"file_path": str(source)},
+            tool_response={"success": True},
+        ))
+        self.assert_hook_ok(written)
+        delivery_audit.begin(
+            self.codex_home,
+            session,
+            workspace,
+            "修复 app.py 的常量错误",
+            mode="strict",
+            files=[str(source)],
+            task_id=state["task_id"],
+            activate=True,
+            work_profile="light",
+            logic_change=False,
+        )
+
+        blocked = self.run_hook(self.payload(
+            session, "Stop", cwd=str(workspace),
+            last_assistant_message="已完成修改，常量和测试均已修复。",
+        ))
+        self.assert_hook_ok(blocked)
+        blocked_output = json.loads(blocked.stdout)
+        self.assertEqual(blocked_output["decision"], "block")
+        self.assertIn("交付审计", blocked_output["reason"])
+        history_dir = (
+            self.codex_home / "agent_relay_tracker" / "history"
+            / "change-summaries"
+        )
+        self.assertEqual(list(history_dir.glob("*.json")), [])
+
+        delivery_audit.close(self.codex_home, session)
+        allowed = self.run_hook(self.payload(
+            session, "Stop", cwd=str(workspace),
+            last_assistant_message="已完成修改，常量和测试均已修复。",
+        ))
+        self.assert_hook_ok(allowed)
+        allowed_output = json.loads(allowed.stdout)
+        self.assertIn("本次修改：", allowed_output["systemMessage"])
+        history_files = list(history_dir.glob("*.json"))
+        self.assertEqual(len(history_files), 1)
+        history = json.loads(history_files[0].read_text(encoding="utf-8"))
+        self.assertEqual(len(history["entries"]), 1)
 
     def test_delivery_audit_freezes_baseline_before_write_and_advances_candidate_after(self):
         workspace = self.codex_home / "workspace"

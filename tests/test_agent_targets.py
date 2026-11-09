@@ -357,6 +357,13 @@ class PiExtensionTests(unittest.TestCase):
         self.assertIn("AGENTRELAY_FUSION", content)
         self.assertIn('import { Type } from "typebox"', content)
         self.assertIn('pi.on("tool_call"', content)
+        self.assertIn('pi.on("tool_result"', content)
+        self.assertIn('pi.on("message_end"', content)
+        self.assertIn('pi.on("agent_settled"', content)
+        self.assertIn('pi.on("agent_end"', content)
+        self.assertIn('hook_event_name: "PostToolUse"', content)
+        self.assertIn('hook_event_name: "Stop"', content)
+        self.assertIn("event?.isError ? 1 : 0", content)
         self.assertIn('ctx?.ui?.notify', content)
         self.assertIn('block: true, reason: result.denial', content)
         self.assertIn('out?.systemMessage', content)
@@ -399,6 +406,146 @@ class PiExtensionTests(unittest.TestCase):
         meta = {"config_path": extension, "level": "full"}
         ok, detail = targets.registered_in_config("pi", meta, None, None)
         self.assertTrue(ok, detail)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js 未安装")
+    def test_generated_extension_bridges_pi_write_results_to_change_history(self):
+        tmp = Path(tempfile.mkdtemp(prefix="agentrelay-pi-history-test-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        workspace = tmp / "workspace"
+        workspace.mkdir()
+        source = workspace / "app.py"
+        source.write_text("VALUE = 1\n", encoding="utf-8")
+        codex_home = tmp / ".codex"
+        subprocess.run(
+            [
+                sys.executable,
+                str(PROJECT_ROOT / "scripts/approval_policy.py"),
+                "set",
+                "relaxed",
+                "--codex-home",
+                str(codex_home),
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        extension = tmp / "extensions" / "agent-relay.ts"
+        targets.write_pi_extension(
+            extension,
+            Path("/venv/bin/python"),
+            PROJECT_ROOT / "scripts/agentrelay_hook_shim.py",
+        )
+        typebox = tmp / "node_modules" / "typebox"
+        typebox.mkdir(parents=True)
+        (typebox / "package.json").write_text(
+            json.dumps({"name": "typebox", "type": "module", "main": "index.js"}),
+            encoding="utf-8",
+        )
+        (typebox / "index.js").write_text(
+            "export const Type = {\n"
+            "  Object: (properties) => ({ type: 'object', properties }),\n"
+            "  String: (options = {}) => ({ type: 'string', ...options }),\n"
+            "  Optional: (schema) => schema,\n"
+            "};\n",
+            encoding="utf-8",
+        )
+
+        driver = tmp / "history-driver.mjs"
+        driver.write_text(
+            "import agentRelay from './extensions/agent-relay.ts';\n"
+            "import { spawnSync } from 'node:child_process';\n"
+            "const handlers = new Map();\n"
+            "const notifications = [];\n"
+            "const pi = {\n"
+            "  registerTool() {},\n"
+            "  registerCommand() {},\n"
+            "  on(name, handler) { handlers.set(name, handler); },\n"
+            "  getActiveTools() { return []; },\n"
+            "  setActiveTools() {},\n"
+            "};\n"
+            "const ctx = {\n"
+            f"  cwd: {json.dumps(str(workspace))},\n"
+            "  sessionManager: { getSessionId() { return 'pi-history-session'; } },\n"
+            "  hasUI: true,\n"
+            "  isIdle() { return false; },\n"
+            "  ui: { notify(message, type) { notifications.push({ message, type }); } },\n"
+            "};\n"
+            "await agentRelay(pi);\n"
+            "await handlers.get('session_start')({}, ctx);\n"
+            "const prompt = await handlers.get('before_agent_start')(\n"
+            "  { prompt: '修复 app.py 里的一个拼写错误', systemPrompt: '' }, ctx);\n"
+            "const selected = spawnSync(\n"
+            "  process.env.AGENTRELAY_PYTHON,\n"
+            "  [process.env.AGENTRELAY_TRACKER, 'select-work-profile',\n"
+            "   '--session', 'pi-history-session', '--profile', 'light',\n"
+            "   '--reason', 'Pi 黑盒测试选择轻量工作档'],\n"
+            "  { encoding: 'utf-8', env: process.env },\n"
+            ");\n"
+            "if (selected.status !== 0) throw new Error(selected.stderr || selected.stdout);\n"
+            "const toolCall = await handlers.get('tool_call')(\n"
+            "  { toolName: 'edit', input: { path: 'app.py' }, toolCallId: 'pi-edit-1' }, ctx);\n"
+            "const toolResult = await handlers.get('tool_result')(\n"
+            "  { toolName: 'edit', input: { path: 'app.py' }, toolCallId: 'pi-edit-1',\n"
+            "    content: [{ type: 'text', text: 'updated' }], isError: false }, ctx);\n"
+            "const assistant = { role: 'assistant', content: [\n"
+            "  { type: 'text', text: '已完成修改，app.py 拼写问题已修复。' },\n"
+            "] };\n"
+            "await handlers.get('message_end')({ message: assistant }, ctx);\n"
+            "await handlers.get('agent_end')({ messages: [assistant], willContinue: false }, ctx);\n"
+            "await handlers.get('agent_settled')({ aborted: false }, ctx);\n"
+            "await handlers.get('agent_settled')({ aborted: false }, ctx);\n"
+            "console.log(JSON.stringify({ prompt, toolCall, toolResult, notifications }));\n",
+            encoding="utf-8",
+        )
+
+        env = {
+            **os.environ,
+            "HOME": str(tmp),
+            "CODEX_HOME": str(codex_home),
+            "AGENTRELAY_PYTHON": sys.executable,
+            "AGENTRELAY_SHIM": str(PROJECT_ROOT / "scripts/agentrelay_hook_shim.py"),
+            "AGENTRELAY_MAIN_HOOK": str(PROJECT_ROOT / "hooks/agent_relay_hook.py"),
+            "AGENTRELAY_APPROVAL": str(PROJECT_ROOT / "scripts/approval_policy.py"),
+            "AGENTRELAY_TRACKER": str(PROJECT_ROOT / "hooks/agent_relay_tracker.py"),
+        }
+        completed = subprocess.run(
+            ["node", "--experimental-strip-types", str(driver)],
+            cwd=tmp,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        runtime = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertNotIn("toolCall", runtime)
+        self.assertNotIn("toolResult", runtime)
+        summaries = [
+            item["message"]
+            for item in runtime["notifications"]
+            if "本次修改：" in item["message"]
+        ]
+        self.assertEqual(len(summaries), 1, runtime["notifications"])
+        lines = summaries[0].splitlines()
+        self.assertEqual(lines[0], "")
+        self.assertEqual(lines[1], "  📝 本次修改：")
+        separator = lines.index("", 2)
+        self.assertEqual(lines[separator + 1], "  🕘 上次修改：")
+        self.assertTrue(
+            all(line.startswith("    ") for line in lines[2:separator])
+        )
+        self.assertEqual(lines[separator + 2], "    暂无记录")
+        self.assertNotIn("--------------------------------", summaries[0])
+        self.assertNotIn("上上次修改", summaries[0])
+        self.assertIn("app.py", summaries[0])
+        history_dir = codex_home / "agent_relay_tracker" / "history" / "change-summaries"
+        history_files = list(history_dir.glob("*.json"))
+        self.assertEqual(len(history_files), 1)
+        history = json.loads(history_files[0].read_text(encoding="utf-8"))
+        self.assertEqual(len(history["entries"]), 1)
+        self.assertIn("app.py", history["entries"][0]["summary"])
 
     @unittest.skipUnless(shutil.which("node"), "Node.js 未安装")
     def test_generated_extension_registers_and_executes_fusion_tool(self):

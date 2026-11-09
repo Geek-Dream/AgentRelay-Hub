@@ -331,6 +331,13 @@ python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" sessions
 python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" problems
 ```
 
+Hook 会自动记录真实写任务的简短摘要，并在最终 `Stop` 放行后显示 `📝 本次修改` /
+`🕘 上次修改`，最多两条。输出以空行开头；标题缩进两格，正文缩进四格并另起一行，长正文
+按约 68 列显示宽度自动折行。两个标题之间空一行，不使用分隔线；没有上一条记录时，
+`🕘 上次修改：` 的正文为“暂无记录”。该记录按工作区和 Agent 隔离，不需要 Agent 手动
+创建；纯问答和只读检查不会产生记录。它只是修改摘要历史，不是代码回滚 checkpoint，不能
+替代 Git。
+
 ## 问题权重
 
 有效处理时间决定 weight：

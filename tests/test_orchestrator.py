@@ -982,6 +982,14 @@ class CrossPlatformHookTests(unittest.TestCase):
     def test_hook_forwards_valid_stop_block(self):
         value = '{"decision":"block","reason":"call AgentRelay"}'
         self.assertTrue(self.hook.valid_hook_output(value, event_name="Stop"))
+        self.assertTrue(self.hook.valid_hook_output(
+            '{"systemMessage":"本次修改：updated hooks\\n上次修改：updated tests"}',
+            event_name="Stop",
+        ))
+        self.assertFalse(self.hook.valid_hook_output(
+            '{"systemMessage":"   "}',
+            event_name="Stop",
+        ))
         self.assertFalse(
             self.hook.valid_hook_output(
                 '{"decision":"block"}',

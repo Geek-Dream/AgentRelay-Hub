@@ -92,7 +92,9 @@ event = os.environ.get("EVENT_TYPE")
 if "systemMessage" in data and not isinstance(data.get("systemMessage"), str):
     valid = False
 elif event == "Stop":
-    valid = data.get("decision") == "block" and bool(str(data.get("reason") or "").strip())
+    block_ok = data.get("decision") == "block" and bool(str(data.get("reason") or "").strip())
+    summary_ok = bool(str(data.get("systemMessage") or "").strip())
+    valid = block_ok or summary_ok
 else:
     output = data.get("hookSpecificOutput")
     expected = "PostToolUse" if event == "PostToolUseFailure" else event
