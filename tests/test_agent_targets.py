@@ -531,12 +531,14 @@ class PiExtensionTests(unittest.TestCase):
         lines = summaries[0].splitlines()
         self.assertEqual(lines[0], "")
         self.assertEqual(lines[1], "  📝 本次修改：")
-        separator = lines.index("", 2)
-        self.assertEqual(lines[separator + 1], "  🕘 上次修改：")
+        previous_index = lines.index("  🕘 上次修改：")
         self.assertTrue(
-            all(line.startswith("    ") for line in lines[2:separator])
+            all(
+                not line or line.startswith("    ")
+                for line in lines[2:previous_index]
+            )
         )
-        self.assertEqual(lines[separator + 2], "    暂无记录")
+        self.assertEqual(lines[previous_index + 1], "    暂无记录")
         self.assertNotIn("--------------------------------", summaries[0])
         self.assertNotIn("上上次修改", summaries[0])
         self.assertIn("app.py", summaries[0])

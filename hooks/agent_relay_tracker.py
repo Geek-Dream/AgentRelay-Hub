@@ -567,6 +567,8 @@ def default_state(session_id=None, agent_id=None):
             "request": None,
             "workspace": None,
             "files": [],
+            "file_groups": [],
+            "summary": None,
             "tools": [],
             "had_write": False,
             "recorded": False,
@@ -2316,6 +2318,8 @@ def new_change_tracking(prompt=None, session_id=None, workspace=None):
         "request": request or None,
         "workspace": _change_workspace(workspace),
         "files": [],
+        "file_groups": [],
+        "summary": None,
         "tools": [],
         "had_write": False,
         "recorded": False,
@@ -2366,6 +2370,11 @@ def change_tracking(state):
             str(item) for item in (value.get("files") or [])
             if str(item or "").strip()
         ],
+        "file_groups": [
+            item for item in (value.get("file_groups") or [])
+            if isinstance(item, dict)
+        ],
+        "summary": normalize_text(value.get("summary")) or None,
         "tools": [
             str(item) for item in (value.get("tools") or [])
             if str(item or "").strip()
@@ -2492,7 +2501,7 @@ def read_change_history(workspace=None, agent_id=None):
 
 
 def _assistant_change_hint(message):
-    """Extract one short final-answer sentence as an optional summary hint."""
+    """Extract one completed-change sentence from the Agent's final reply."""
 
     text = normalize_text(message)
     text = re.sub(
@@ -2501,13 +2510,21 @@ def _assistant_change_hint(message):
         text,
     )
     text = re.sub(
-        r"^(?:是的|对的|好的|可以|已完成)[，,:：\s]*",
+        r"^(?:是的|对的|好的|可以)(?:[，,:：]\s*|\s+)|^已完成[，,:：]\s*",
         "",
         text,
         flags=re.IGNORECASE,
     )
     text = re.sub(r"^本次(?:修改|变更|改动)[:：]\s*", "", text)
-    for sentence in re.split(r"(?<=[。！？.!?])\s*", text):
+    text = re.sub(
+        r"^(?:按用户需求|按需求)[“\"].*?[”\"]\s*[:：]?\s*",
+        "",
+        text,
+    )
+    for sentence in re.split(
+        r"(?<=[。！？])\s*|(?<=[.!?])\s+",
+        text,
+    ):
         sentence = sentence.strip()
         if len(sentence) < 6:
             continue
@@ -2522,32 +2539,160 @@ def _assistant_change_hint(message):
     return ""
 
 
-def build_change_summary(tracking, assistant_message=None):
-    """Build a deterministic summary that remains useful without Agent output."""
+def _fallback_change_file_group(path):
+    """Return a stable, truthful grouping when the Agent gave no labels."""
+
+    normalized = str(path or "").replace("\\", "/").lstrip("./")
+    lower = normalized.lower()
+    if lower.startswith("tests/") or "/__tests__/" in lower:
+        return "测试"
+    if lower.startswith("hooks/"):
+        return "Hook"
+    if lower.startswith("scripts/"):
+        return "脚本"
+    if lower.startswith("skills/"):
+        return "Skill 文档"
+    if lower == "readme.md" or lower.startswith("docs/") or lower.endswith(".md"):
+        return "文档"
+    if lower.startswith("src/") or lower.startswith("app/"):
+        return "源代码"
+    return "其他文件"
+
+
+def default_change_file_groups(files):
+    """Group changed files by broad repository role without inventing intent."""
+
+    groups = {}
+    for value in files or []:
+        path = str(value or "").strip()
+        if not path:
+            continue
+        label = _fallback_change_file_group(path)
+        groups.setdefault(label, [])
+        if path not in groups[label]:
+            groups[label].append(path)
+    return [
+        {"label": label, "files": grouped_files}
+        for label, grouped_files in groups.items()
+    ]
+
+
+def normalize_change_file_groups(file_groups, files, workspace=None, strict=False):
+    """Normalize Agent-provided groups and append every unmentioned file once."""
+
+    workspace = workspace or os.getcwd()
+    allowed_files = []
+    for value in files or []:
+        normalized = _normalized_changed_path(value, workspace)
+        if normalized and normalized not in allowed_files:
+            allowed_files.append(normalized)
+    allowed = set(allowed_files)
+    grouped_files = set()
+    result = []
+    for raw_group in file_groups or []:
+        label = ""
+        raw_files = []
+        if isinstance(raw_group, dict):
+            label = normalize_text(raw_group.get("label"))
+            raw_files = raw_group.get("files") or []
+            if isinstance(raw_files, str):
+                raw_files = re.split(r"[,;]", raw_files)
+        elif isinstance(raw_group, str):
+            group_text = raw_group.strip()
+            if "=" in group_text:
+                label, paths = group_text.split("=", 1)
+                raw_files = re.split(r"[,;]", paths)
+            else:
+                label, raw_files = "", [group_text]
+        label = _clip_card_text(label, 80)
+        if not label:
+            if strict:
+                raise ValueError("每个文件分组都必须提供名称")
+            continue
+        normalized_files = []
+        for value in raw_files:
+            path = _normalized_changed_path(value, workspace)
+            if not path:
+                continue
+            if path not in allowed:
+                if strict:
+                    raise ValueError(f"文件分组包含本轮未修改的文件：{path}")
+                continue
+            if path in grouped_files or path in normalized_files:
+                continue
+            normalized_files.append(path)
+        if not normalized_files:
+            if strict:
+                raise ValueError(f"文件分组“{label}”没有包含本轮修改的文件")
+            continue
+        existing = next(
+            (item for item in result if item.get("label") == label),
+            None,
+        )
+        if existing is None:
+            existing = {"label": label, "files": []}
+            result.append(existing)
+        existing["files"].extend(normalized_files)
+        grouped_files.update(normalized_files)
+
+    remaining = [path for path in allowed_files if path not in grouped_files]
+    if remaining and (result or strict):
+        existing = next(
+            (item for item in result if item.get("label") == "其他文件"),
+            None,
+        )
+        if existing is None:
+            result.append({"label": "其他文件", "files": remaining})
+        else:
+            existing["files"].extend(remaining)
+    return result
+
+
+def build_change_entry(tracking, assistant_message=None):
+    """Build the persisted semantic summary and grouped file manifest."""
 
     files = list(tracking.get("files") or [])
-    tools = list(tracking.get("tools") or [])
-    request = _clip_card_text(tracking.get("request") or "当前任务", 64)
+    explicit_summary = normalize_text(tracking.get("summary"))
     hint = _assistant_change_hint(assistant_message)
-    if files:
-        preview = "、".join(files[:3])
-        if len(files) > 3:
-            preview += f" 等 {len(files)} 个"
-        summary = f"按需求“{request}”修改了 {preview}"
-    elif hint:
-        summary = f"按需求“{request}”：{hint}"
-    else:
-        tool_text = "、".join(tools[:3]) or "文件工具"
-        summary = f"按需求“{request}”通过 {tool_text} 修改了工作区文件"
-    return _clip_card_text(summary, 220)
+    summary = explicit_summary or hint
+    if summary:
+        summary = re.sub(
+            r"^(?:按用户需求|按需求)[“\"].*?[”\"]\s*[:：]?\s*",
+            "",
+            summary,
+        ).strip()
+    if not summary:
+        summary = "已完成文件写入，但未记录具体修改说明。"
+
+    workspace = tracking.get("workspace")
+    explicit_groups = tracking.get("file_groups") or []
+    file_groups = normalize_change_file_groups(
+        explicit_groups,
+        files,
+        workspace=workspace,
+    )
+    if not file_groups:
+        file_groups = default_change_file_groups(files)
+    return {
+        "summary": _clip_card_text(summary, 220),
+        "file_groups": file_groups,
+        "changed_files": files,
+    }
 
 
-def _wrap_change_history_text(value):
+def build_change_summary(tracking, assistant_message=None):
+    """Return the truthful completion text stored in change history."""
+
+    return build_change_entry(tracking, assistant_message)["summary"]
+
+
+def _wrap_change_history_text(value, width=None, limit=220):
     """Wrap summary text by terminal display width, including CJK characters."""
 
-    remaining = _clip_card_text(value, 220)
+    remaining = _clip_card_text(value, limit)
     if not remaining:
         return ["暂无记录"]
+    width = width or CHANGE_HISTORY_TEXT_WIDTH
 
     lines = []
     while remaining:
@@ -2561,7 +2706,7 @@ def _wrap_change_history_text(value):
                 if unicodedata.east_asian_width(char) in {"W", "F"}
                 else 1
             )
-            if cut_index and used_width + char_width > CHANGE_HISTORY_TEXT_WIDTH:
+            if cut_index and used_width + char_width > width:
                 break
             used_width += char_width
             cut_index = index + 1
@@ -2585,7 +2730,7 @@ def _wrap_change_history_text(value):
 
 
 def render_change_history(entries):
-    """Render two indented summaries with wrapped content."""
+    """Render two indented summaries with grouped changed-file details."""
 
     labels = ("📝 本次修改", "🕘 上次修改")
     blocks = []
@@ -2601,8 +2746,78 @@ def render_change_history(entries):
             f"    {line}"
             for line in _wrap_change_history_text(summary)
         )
+        file_groups = (
+            normalize_change_file_groups(
+                entry.get("file_groups") or [],
+                entry.get("changed_files") or [],
+                workspace=entry.get("workspace"),
+            )
+            if isinstance(entry, dict)
+            else []
+        )
+        if not file_groups and isinstance(entry, dict):
+            file_groups = default_change_file_groups(
+                entry.get("changed_files") or []
+            )
+        if file_groups:
+            lines.extend(["", "    涉及到的文件："])
+            for group in file_groups:
+                group_label = _clip_card_text(group.get("label"), 80)
+                group_lines = _wrap_change_history_text(
+                    group_label,
+                    width=CHANGE_HISTORY_TEXT_WIDTH - 10,
+                    limit=80,
+                )
+                lines.append(f"      · {group_lines[0]}：")
+                lines.extend(
+                    f"        {continuation}"
+                    for continuation in group_lines[1:]
+                )
+                for path in group.get("files") or []:
+                    path_lines = _wrap_change_history_text(
+                        path,
+                        width=CHANGE_HISTORY_TEXT_WIDTH - 8,
+                        limit=500,
+                    )
+                    lines.append(f"        {path_lines[0]}")
+                    lines.extend(
+                        f"        {continuation}"
+                        for continuation in path_lines[1:]
+                    )
         blocks.append("\n".join(lines))
     return "\n" + "\n\n".join(blocks)
+
+
+def annotate_change_summary(session_id, summary, file_groups):
+    """Store the Agent's actual completion description before Stop renders it."""
+
+    clean_summary = _clip_card_text(normalize_text(summary), 220)
+    if not clean_summary:
+        raise ValueError("--summary 不能为空")
+    lock = acquire_lock()
+    try:
+        state = read_state(session_id=session_id)
+        tracking = change_tracking(state)
+        if not tracking.get("had_write"):
+            raise ValueError("当前任务还没有成功写入文件")
+        if tracking.get("recorded"):
+            raise ValueError("当前任务的修改摘要已经记录")
+        normalized_groups = normalize_change_file_groups(
+            file_groups,
+            tracking.get("files") or [],
+            workspace=tracking.get("workspace"),
+            strict=True,
+        )
+        tracking["summary"] = clean_summary
+        tracking["file_groups"] = normalized_groups
+        write_state(state, session_id=session_id)
+    finally:
+        release_lock(lock)
+    return {
+        "summary": clean_summary,
+        "file_groups": normalized_groups,
+        "changed_files": list(tracking.get("files") or []),
+    }
 
 
 def record_change_history(state, assistant_message=None):
@@ -2615,6 +2830,7 @@ def record_change_history(state, assistant_message=None):
     workspace = _change_workspace(
         tracking.get("workspace") or os.getcwd()
     )
+    change_entry = build_change_entry(tracking, assistant_message)
     agent_id = normalize_agent_id(state.get("agent_id"))
     entry = {
         "turn_id": tracking.get("turn_id") or hashlib.sha256(
@@ -2623,8 +2839,9 @@ def record_change_history(state, assistant_message=None):
         "session_id": normalize_session_id(state.get("session_id")),
         "workspace": workspace,
         "created_at": iso_now(),
-        "summary": build_change_summary(tracking, assistant_message),
-        "changed_files": list(tracking.get("files") or []),
+        "summary": change_entry["summary"],
+        "changed_files": change_entry["changed_files"],
+        "file_groups": change_entry["file_groups"],
         "tools": list(tracking.get("tools") or []),
     }
     history = read_change_history(workspace, agent_id)
@@ -6731,6 +6948,64 @@ def cli():
                     resolved_session,
                     values["profile"],
                     values.get("reason") or "",
+                )
+            except ValueError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 2
+            print(json.dumps({"ok": True, **result}, ensure_ascii=False))
+            return 0
+
+        if command == "change-summary":
+            summary = ""
+            file_groups = []
+            remaining = list(args)
+            while remaining:
+                option = remaining.pop(0)
+                if option not in {"--summary", "--file-group"}:
+                    print(
+                        "Error: unexpected arguments: " + option,
+                        file=sys.stderr,
+                    )
+                    return 1
+                if not remaining:
+                    print(
+                        f"Error: {option} requires a value",
+                        file=sys.stderr,
+                    )
+                    return 1
+                value = remaining.pop(0)
+                if option == "--summary":
+                    summary = value
+                else:
+                    file_groups.append(value)
+            if not normalize_text(summary):
+                print("Error: --summary is required", file=sys.stderr)
+                return 1
+            resolved_session = (
+                session_id
+                or normalize_session_id(os.environ.get("CODEX_SESSION_ID"))
+                or normalize_session_id(os.environ.get("CODEX_THREAD_ID"))
+            )
+            if not resolved_session:
+                try:
+                    resolved_session = _page_verification_module().resolve_current_session(
+                        CODEX_DIR,
+                        cwd=os.getcwd(),
+                        environ=dict(os.environ),
+                    )
+                except (AttributeError, ImportError, OSError, ValueError, TypeError):
+                    resolved_session = ""
+            if not resolved_session:
+                print(
+                    "Error: cannot resolve a unique current session; pass --session",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                result = annotate_change_summary(
+                    resolved_session,
+                    summary,
+                    file_groups,
                 )
             except ValueError as exc:
                 print(f"Error: {exc}", file=sys.stderr)

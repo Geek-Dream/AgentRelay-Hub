@@ -331,11 +331,24 @@ python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" sessions
 python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" problems
 ```
 
-Hook 会自动记录真实写任务的简短摘要，并在最终 `Stop` 放行后显示 `📝 本次修改` /
-`🕘 上次修改`，最多两条。输出以空行开头；标题缩进两格，正文缩进四格并另起一行，长正文
-按约 68 列显示宽度自动折行。两个标题之间空一行，不使用分隔线；没有上一条记录时，
-`🕘 上次修改：` 的正文为“暂无记录”。该记录按工作区和 Agent 隔离，不需要 Agent 手动
-创建；纯问答和只读检查不会产生记录。它只是修改摘要历史，不是代码回滚 checkpoint，不能
+真实写文件并且准备宣称完成时，必须在最终回复前运行一次：
+
+```bash
+python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" change-summary \
+  --summary "本轮实际完成了什么，以及为什么这样改" \
+  --file-group "修改目的=路径1,路径2" \
+  --file-group "另一修改目的=路径3"
+```
+
+`--summary` 不得复述用户请求，也不得写“已处理”这类空话；要具体说明实际完成结果。
+`--file-group` 按用户能理解的修改目的给每个本轮文件分组，可重复。Hook 会拒绝本轮未成功
+写入的文件。当前会话无法唯一识别时才追加 `--session <session-id>`。
+
+Hook 在最终 `Stop` 放行后显示 `📝 本次修改` / `🕘 上次修改`，最多两条。输出以空行开头；
+标题缩进两格，正文和文件清单缩进，长文本按约 68 列显示宽度自动折行。两个标题之间空一行，
+不使用分隔线；没有上一条记录时，`🕘 上次修改：` 的正文为“暂无记录”。漏登记时 Hook 会
+诚实显示“未记录具体修改说明”，不会拿用户原话冒充完成摘要。该记录按工作区和 Agent
+隔离；纯问答和只读检查不会产生记录。它只是修改摘要历史，不是代码回滚 checkpoint，不能
 替代 Git。
 
 ## 问题权重

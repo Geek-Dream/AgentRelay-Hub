@@ -62,15 +62,17 @@ class HookGateTests(unittest.TestCase):
         lines = message.splitlines()
         self.assertEqual(lines[0], "")
         self.assertEqual(lines[1], "  📝 本次修改：")
-        separator = lines.index("", 2)
-        self.assertEqual(lines[separator + 1], "  🕘 上次修改：")
+        previous_index = lines.index("  🕘 上次修改：")
         self.assertTrue(
-            all(line.startswith("    ") for line in lines[2:separator])
+            all(
+                not line or line.startswith("    ")
+                for line in lines[2:previous_index]
+            )
         )
         self.assertTrue(
             all(
-                line.startswith("    ")
-                for line in lines[separator + 2:]
+                not line or line.startswith("    ")
+                for line in lines[previous_index + 1:]
             )
         )
         self.assertTrue(message.startswith("\n  📝 本次修改："))
