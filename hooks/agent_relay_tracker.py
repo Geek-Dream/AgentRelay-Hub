@@ -2257,6 +2257,39 @@ def render_task_gate_card(prompt, gate):
     return "\n".join(lines)
 
 
+def _patch_text(tool_name, tool_input):
+    """Read patch text from the field shapes used by supported hosts."""
+
+    if not isinstance(tool_input, dict):
+        return ""
+
+    patch = tool_input.get("input") or tool_input.get("patch")
+    if isinstance(patch, str) and patch.strip():
+        return patch
+
+    command = tool_input.get("command")
+    normalized = re.sub(
+        r"[^a-z0-9_]+",
+        "_",
+        normalize_text(tool_name).lower(),
+    )
+    is_patch_tool = (
+        normalized in {"apply_patch", "applypatch"}
+        or normalized.endswith("_apply_patch")
+    )
+    if (
+        is_patch_tool
+        and isinstance(command, str)
+        and re.search(
+            r"^\*\*\* (?:Begin Patch|Add File:|Update File:|Delete File:)",
+            command,
+            flags=re.MULTILINE,
+        )
+    ):
+        return command
+    return ""
+
+
 def _tool_targets(tool_name, tool_input):
     if isinstance(tool_input, dict):
         targets = []
@@ -2271,7 +2304,7 @@ def _tool_targets(tool_name, tool_input):
             if isinstance(value, str) and value.strip():
                 targets.append(value.strip())
 
-        patch = tool_input.get("input") or tool_input.get("patch")
+        patch = _patch_text(tool_name, tool_input)
         if isinstance(patch, str):
             targets.extend(re.findall(
                 r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+)$",
@@ -2439,7 +2472,7 @@ def written_file_targets(tool_name, tool_input, workspace=None):
             value = tool_input.get(key)
             if isinstance(value, str) and value.strip():
                 raw_targets.append(value)
-        patch = tool_input.get("input") or tool_input.get("patch")
+        patch = _patch_text(tool_name, tool_input)
         if isinstance(patch, str):
             raw_targets.extend(re.findall(
                 r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+)$",

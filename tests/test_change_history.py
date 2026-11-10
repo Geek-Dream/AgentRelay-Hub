@@ -457,6 +457,36 @@ class ChangeHistoryTests(unittest.TestCase):
 
         self.assertEqual(targets, ["src/app.py", "src/main.py"])
 
+    def test_apply_patch_command_field_extracts_changed_paths(self):
+        patch_text = (
+            "*** Begin Patch\n"
+            "*** Update File: hooks/agent_relay_tracker.py\n"
+            "*** Update File: tests/test_change_history.py\n"
+            "*** End Patch\n"
+        )
+
+        targets = self.tracker.written_file_targets(
+            "apply_patch",
+            {"command": patch_text},
+            str(self.workspace),
+        )
+
+        self.assertEqual(
+            targets,
+            [
+                "hooks/agent_relay_tracker.py",
+                "tests/test_change_history.py",
+            ],
+        )
+        self.assertEqual(
+            self.tracker._tool_targets("apply_patch", {"command": patch_text}),
+            targets,
+        )
+        self.assertEqual(
+            self.tracker._tool_targets("functions.apply_patch", {"command": patch_text}),
+            targets,
+        )
+
     def test_failed_write_is_not_recorded(self):
         state = self.tracker.create_new_problem(
             "修复失败写入",
