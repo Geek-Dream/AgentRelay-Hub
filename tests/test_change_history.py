@@ -487,6 +487,34 @@ class ChangeHistoryTests(unittest.TestCase):
             targets,
         )
 
+    def test_namespaced_apply_patch_command_tracks_changed_paths(self):
+        patch_text = (
+            "*** Begin Patch\n"
+            "*** Update File: hooks/agent_relay_tracker.py\n"
+            "*** End Patch\n"
+        )
+        state = self.tracker.create_new_problem(
+            "记录 namespaced apply_patch 修改",
+            session_id="namespaced-apply-patch",
+            workspace=str(self.workspace),
+        )
+        self.tracker.write_state(state, session_id="namespaced-apply-patch")
+
+        state = self.tracker.handle_post_tool_use(
+            tool_name="functions.apply_patch",
+            tool_input={"command": patch_text},
+            tool_output={"exit_code": 0},
+            tool_use_id="namespaced-apply-patch-write",
+            session_id="namespaced-apply-patch",
+            workspace=str(self.workspace),
+        )
+
+        self.assertEqual(
+            state["change_tracking"]["files"],
+            ["hooks/agent_relay_tracker.py"],
+        )
+        self.assertTrue(state["change_tracking"]["had_write"])
+
     def test_failed_write_is_not_recorded(self):
         state = self.tracker.create_new_problem(
             "修复失败写入",

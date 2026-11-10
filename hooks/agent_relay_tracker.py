@@ -2092,7 +2092,10 @@ def tool_writes_files(tool_name, tool_input):
         "_",
         normalize_text(tool_name).lower(),
     )
-    if normalized in WRITE_TOOL_NAMES:
+    if (
+        normalized in WRITE_TOOL_NAMES
+        or normalized.endswith("_apply_patch")
+    ):
         return True
 
     command = shell_command_text(tool_name, tool_input)
