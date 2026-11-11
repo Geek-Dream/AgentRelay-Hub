@@ -5,8 +5,8 @@ change. It is not a decorative restatement and it is not shown for every task.
 
 ## When it appears
 
-- `light`: no card. Record the explicit choice with `select-work-profile` before
-  the first write; the Hook still blocks an unselected write.
+- `light`: no card. The Hook records the simple local profile automatically; no
+  Agent or user command is needed before the first write.
 - `standard` or higher: show the five-column card before the first write.
 - When approving a card task through the semantic bridge, pass the chosen
   `--work-profile`; the user approves scope, while the Agent owns process depth.

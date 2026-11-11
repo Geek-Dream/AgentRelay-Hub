@@ -20,6 +20,7 @@ import config_manager  # noqa: E402
 import config_web  # noqa: E402
 import fusion_mode  # noqa: E402
 import fusion_runner  # noqa: E402
+import fusion_trace  # noqa: E402
 import research_commander  # noqa: E402
 from orchestrator_core import Orchestrator  # noqa: E402
 
@@ -649,6 +650,66 @@ class FusionProviderCallTests(unittest.TestCase):
         self.assertIn("input", payload)
         self.assertNotIn("messages", payload)
 
+    def test_provider_trace_distinguishes_queue_and_request_stages(self):
+        temp = tempfile.TemporaryDirectory(prefix="agentrelay-fusion-provider-trace-")
+        self.addCleanup(temp.cleanup)
+        trace_path = Path(temp.name) / "fusion-trace.jsonl"
+        environ = {
+            fusion_trace.TRACE_PATH_ENV: str(trace_path),
+            fusion_trace.TRACE_ID_ENV: "provider-trace",
+            fusion_trace.TRACE_SESSION_ENV: "provider-session",
+        }
+        manager = mock.MagicMock()
+        manager.queue_timeout = 3
+        manager.lease.return_value.__enter__.return_value.slot = 2
+        provider = {
+            "kind": "api",
+            "id": "test-api",
+            "ref": "api:test-api",
+            "entry": {
+                "id": "test-api",
+                "endpoint": "https://api.example/v1",
+                "model": "fusion-model",
+            },
+        }
+        response = {
+            "choices": [{
+                "message": {"role": "assistant", "content": "trace answer"},
+            }],
+        }
+
+        with mock.patch.dict(os.environ, environ, clear=False), \
+                mock.patch.object(
+                    agent_fusion.config_manager,
+                    "apply_config_to_environment",
+                ), \
+                mock.patch.object(
+                    fusion_mode,
+                    "provider_lease_manager",
+                    return_value=manager,
+                ), \
+                mock.patch.object(
+                    agent_fusion,
+                    "_call_formatted_model",
+                    return_value=response,
+                ):
+            result = agent_fusion._call_provider_model(
+                provider,
+                [{"role": "user", "content": "trace me"}],
+                [],
+                5,
+                None,
+            )
+
+        self.assertEqual(result, response)
+        events = fusion_trace.recent_events(trace_path, "provider-trace")
+        stages = [item["stage"] for item in events]
+        self.assertIn("provider_queue_wait", stages)
+        self.assertIn("provider_ready", stages)
+        self.assertIn("provider_request", stages)
+        self.assertIn("provider_response_received", stages)
+        self.assertIn("provider_call_finished", stages)
+
 
 class ConfigWebTests(unittest.TestCase):
     def test_local_and_api_forms_warn_against_using_the_main_model(self):
@@ -694,7 +755,13 @@ class FusionInstallTests(unittest.TestCase):
         self.assertIn("fusion_mode.py", installer.SCRIPT_FILES)
         self.assertEqual(
             set(installer.FUSION_SCRIPT_FILES),
-            {"agent_fusion.py", "fusion_mode.py", "fusion_runner.py"},
+            {
+                "agent_fusion.py",
+                "fusion_mode.py",
+                "fusion_assist.py",
+                "fusion_runner.py",
+                "fusion_trace.py",
+            },
         )
         self.assertEqual(installer.FUSION_SKILL_FILES, ("SKILL.md",))
 

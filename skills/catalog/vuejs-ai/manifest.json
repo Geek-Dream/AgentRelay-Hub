@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "id": "vuejs-ai",
+  "name": "Vue.js AI Skills",
+  "description": "Vue 3 development guidance for AI coding agents.",
+  "source": {
+    "repository": "https://github.com/vuejs-ai/skills",
+    "commit": "198f0cd8f7f9c0a3d9b566ccc16de6677519ee78"
+  },
+  "license": {
+    "spdx": "MIT",
+    "path": "LICENSE",
+    "sha256": "2ea4e714425cf682879c4dea3d0d0a1a379a1418f463063f9eea1aa709ad946d",
+    "copyright": "Copyright (c) 2025 hyf0, SerKo"
+  },
+  "content_files": 205,
+  "content_sha256": "fd2b03d0474dad660c8e4ceb039206ec5b7104fc597b61aea4eb9ed13e55b432",
+  "defaults": [
+    "vue-best-practices"
+  ],
+  "skills": [
+    {
+      "id": "create-adaptable-composable",
+      "name": "Create Adaptable Composable",
+      "version": "17.0.0",
+      "description": "Create library-grade composables with MaybeRef and MaybeRefOrGetter inputs."
+    },
+    {
+      "id": "vue-best-practices",
+      "name": "Vue Best Practices",
+      "version": "19.1.0",
+      "description": "Vue 3, Composition API, TypeScript, SSR, performance, and common gotchas."
+    },
+    {
+      "id": "vue-debug-guides",
+      "name": "Vue Debug Guides",
+      "version": "19.0.1",
+      "description": "Debug Vue runtime errors, warnings, async failures, and hydration issues."
+    },
+    {
+      "id": "vue-jsx-best-practices",
+      "name": "Vue JSX Best Practices",
+      "version": "2.0.0",
+      "description": "Vue JSX syntax and differences from React JSX."
+    },
+    {
+      "id": "vue-options-api-best-practices",
+      "name": "Vue Options API Best Practices",
+      "version": "2.0.0",
+      "description": "Options API patterns, TypeScript integration, lifecycle, and this context."
+    },
+    {
+      "id": "vue-pinia-best-practices",
+      "name": "Vue Pinia Best Practices",
+      "version": "1.0.0",
+      "description": "Pinia store setup, state management, and store reactivity patterns."
+    },
+    {
+      "id": "vue-router-best-practices",
+      "name": "Vue Router Best Practices",
+      "version": "1.0.0",
+      "description": "Vue Router 4 guards, route params, and route component lifecycles."
+    },
+    {
+      "id": "vue-testing-best-practices",
+      "name": "Vue Testing Best Practices",
+      "version": "1.0.0",
+      "description": "Vitest, Vue Test Utils, component tests, and Playwright E2E testing."
+    }
+  ]
+}

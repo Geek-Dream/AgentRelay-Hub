@@ -24,12 +24,17 @@ else:
 
 
 def _sample_config() -> dict[str, Any]:
+    from scripts import skill_catalog
+
+    catalog = skill_catalog.catalog_with_installed_skills(PROJECT_ROOT, {})
     return {
         "default_provider": "demo-web",
         "web_providers": [{"id": "demo-web", "name": "演示网页模型", "base_url": "https://example.invalid",
                            "enabled": True, "logged_in": False, "adapter": "generic"}],
         "local_providers": [], "api_providers": [], "agents": {},
         "install_targets": ["codex"], "fusion": {"enabled": True},
+        "install_skills": skill_catalog.default_skill_ids(catalog),
+        "skill_catalog": skill_catalog.public_catalog(catalog),
         "commander": {"enabled": False},
     }
 
@@ -301,7 +306,7 @@ def main() -> int:
             browser_name = browser.browser_type.name
             try:
                 content = None if args.url else _config_page()
-                if args.session:
+                if args.session and not args.url:
                     files = page_verification.read_state(codex_home, args.session).get("files") or {}
                     if any(Path(value).name == "config_web.py" for value in files):
                         content = _config_page()

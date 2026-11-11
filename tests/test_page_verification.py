@@ -10,6 +10,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 from scripts import page_verification
+from scripts import skill_catalog as package_catalog_module
+from scripts import verify_page
 from scripts import visual_review
 
 
@@ -456,6 +458,93 @@ class PageEvidenceTests(unittest.TestCase):
         source = self.workspace / "config_web.py"
         source.write_text("PAGE = '<html></html>'", encoding="utf-8")
         self.assertEqual(self.edit(source), [str(source)])
+
+    def test_explicit_url_wins_over_config_template_session_fallback(self):
+        source = self.workspace / "config_web.py"
+        source.write_text("PAGE = '<html></html>'", encoding="utf-8")
+        self.edit(source)
+        self.page.write_text(
+            '<main id="explicit-url-marker"><button>查询</button><input value=""></main>',
+            encoding="utf-8",
+        )
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(PROJECT_ROOT / "scripts" / "verify_page.py"),
+                "--session", self.session,
+                "--url", self.page.as_uri(),
+                "--no-screenshots",
+                "--target-selector", "#explicit-url-marker",
+                "--expected", '{"display":"block"}',
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            env={**os.environ, "CODEX_HOME": str(self.home)},
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["url"], self.page.as_uri())
+        self.assertEqual(result["status"], "passed")
+
+    def test_default_config_page_check_renders_catalog_skills(self):
+        source = self.workspace / "config_web.py"
+        source.write_text("PAGE = '<html></html>'", encoding="utf-8")
+        self.edit(source)
+        config = verify_page._sample_config()
+        page = verify_page._config_page()
+        self.assertEqual(
+            config["skill_catalog"]["defaults"],
+            list(package_catalog_module.PREFERRED_DEFAULT_SKILL_IDS),
+        )
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                rendered = browser.new_page()
+                rendered.set_content(page, wait_until="domcontentloaded")
+                rendered.wait_for_selector(
+                    '.skill-box:has(.skill-check[value="browser-automatic"])'
+                )
+                default_ids = rendered.eval_on_selector_all(
+                    ".skill-check:checked",
+                    "nodes => nodes.map(node => node.value)",
+                )
+            finally:
+                browser.close()
+
+        self.assertEqual(
+            set(default_ids),
+            set(package_catalog_module.PREFERRED_DEFAULT_SKILL_IDS),
+        )
+        self.assertEqual(
+            len(default_ids),
+            len(package_catalog_module.PREFERRED_DEFAULT_SKILL_IDS),
+        )
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(PROJECT_ROOT / "scripts" / "verify_page.py"),
+                "--session", self.session,
+                "--no-screenshots",
+                "--target-selector",
+                '.skill-box:has(.skill-check[value="browser-automatic"])',
+                "--invariant", ".mast",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            env={**os.environ, "CODEX_HOME": str(self.home)},
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["browser"], "chromium")
+        self.assertTrue(result["nonvisual_checks"])
 
     def test_concurrent_page_writes_keep_every_file_without_temp_collisions(self):
         pages = []

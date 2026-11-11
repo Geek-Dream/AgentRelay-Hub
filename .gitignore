@@ -44,6 +44,8 @@ agentrelay-env/
 归档/
 /skills/agent-relay/归档/
 /skills/agent-image/cache/
+/skills/bitch-skill/
+**/*bitch-skill*/
 .DS_Store
 .idea/
 .vscode/

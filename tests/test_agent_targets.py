@@ -488,7 +488,7 @@ class PiExtensionTests(unittest.TestCase):
             "  { toolName: 'edit', input: { path: 'app.py' }, toolCallId: 'pi-edit-1',\n"
             "    content: [{ type: 'text', text: 'updated' }], isError: false }, ctx);\n"
             "const assistant = { role: 'assistant', content: [\n"
-            "  { type: 'text', text: '已完成修改，app.py 拼写问题已修复。' },\n"
+            "  { type: 'text', text: '已完成修改，拼写问题已修复。' },\n"
             "] };\n"
             "await handlers.get('message_end')({ message: assistant }, ctx);\n"
             "await handlers.get('agent_end')({ messages: [assistant], willContinue: false }, ctx);\n"
@@ -541,13 +541,16 @@ class PiExtensionTests(unittest.TestCase):
         self.assertEqual(lines[previous_index + 1], "    暂无记录")
         self.assertNotIn("--------------------------------", summaries[0])
         self.assertNotIn("上上次修改", summaries[0])
-        self.assertIn("app.py", summaries[0])
+        self.assertNotIn("这次改了哪些文件：", summaries[0])
+        self.assertNotIn("app.py", summaries[0])
+        self.assertIn("拼写问题已修复", summaries[0])
         history_dir = codex_home / "agent_relay_tracker" / "history" / "change-summaries"
         history_files = list(history_dir.glob("*.json"))
         self.assertEqual(len(history_files), 1)
         history = json.loads(history_files[0].read_text(encoding="utf-8"))
         self.assertEqual(len(history["entries"]), 1)
-        self.assertIn("app.py", history["entries"][0]["summary"])
+        self.assertNotIn("app.py", history["entries"][0]["summary"])
+        self.assertIn("app.py", history["entries"][0]["changed_files"])
 
     @unittest.skipUnless(shutil.which("node"), "Node.js 未安装")
     def test_generated_extension_registers_and_executes_fusion_tool(self):

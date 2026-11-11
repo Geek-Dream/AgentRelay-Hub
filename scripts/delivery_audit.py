@@ -602,7 +602,13 @@ def independent_review(home: Path, session_id: str) -> dict[str, Any]:
     context = "仅只读审查，不修改文件。给出需求遗漏、风险、证据和未验证项，不要代主 Agent 宣布通过。"
     try:
         result = fusion.delegate(home, session_id, prompt, workspace=state["workspace"], context=context)
-    except (OSError, TimeoutError, ValueError) as exc:
+    except TimeoutError as exc:
+        result = {
+            "status": "failed",
+            "error": "FUSION_PROVIDER_TIMEOUT",
+            "message": f"Fusion Provider 调用超时（timeout）: {exc}",
+        }
+    except (OSError, ValueError) as exc:
         result = {
             "status": "failed",
             "error": "FUSION_PROVIDER_CALL_FAILED",

@@ -1024,7 +1024,7 @@ class SkillInstallerSourceTests(unittest.TestCase):
             "verify_target",
             return_value=[],
         ):
-            results, errors = installer.apply_agent_targets(["test"])
+            results, errors = installer.apply_agent_targets(["test"], [])
 
         self.assertEqual(results, {"test": []})
         self.assertEqual(errors, {})
@@ -1062,7 +1062,7 @@ class SkillInstallerSourceTests(unittest.TestCase):
                 {"name": "Hook 干跑", "ok": True, "detail": "正常"},
             ],
         ):
-            results, errors = installer.apply_agent_targets(["test"])
+            results, errors = installer.apply_agent_targets(["test"], [])
 
         self.assertEqual(len(results["test"]), 2)
         self.assertIn("可见卡协议", errors["test"])
@@ -1116,7 +1116,7 @@ class SkillInstallerSourceTests(unittest.TestCase):
             ), mock.patch.object(
                 agent_targets, "register_claude", return_value=True,
             ) as register:
-                results, errors = installer.apply_agent_targets(["claude"])
+                results, errors = installer.apply_agent_targets(["claude"], [])
 
         self.assertEqual(results, {"claude": []})
         self.assertEqual(errors, {})

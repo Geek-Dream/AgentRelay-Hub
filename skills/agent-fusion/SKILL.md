@@ -18,15 +18,18 @@ Fusion 永不启动另一个 Fusion，也永不启动 Commander。Commander 拥�
 
 - 对独立调查、批量阅读、代码审查、回归复核等适合委派的任务，先查 `delegable` 并实际
   `delegate`；只检查状态或收到提醒不等于 Fusion 已工作，不能声称“已复核”。
-- `scripts/fusion_assist.py remind --session <id> --home <CODEX_HOME> --prompt <任务>`
-  在任务开始、进度和交付前提供补救提示；Hook 不偷偷联网，主 Agent 必须实际 delegate。
+- Hook 不提醒、不阻塞 Stop，也不会因为关键词自动调用 Fusion。是否委派由主 Agent
+  根据任务边界判断；用户显式要求 Fusion 时直接执行下面的 `delegate`。
 - `scripts/fusion_assist.py delegate --session <id> --home <CODEX_HOME> --prompt <任务> --workspace <路径>`
   通过现有 `agent_fusion.py delegate` 调用一次，并把结果写入会话级 `fusion-assist` 证据。
 - 未配置 Provider、Commander/Fusion 子会话或不适合的任务直接本地处理，不打扰。
   API 过期、网络失败或调用异常后主 Agent 继续完成任务；回复说明“Fusion 调用失败，
-  请检查 Provider；本次任务由主 Agent 继续完成”。同一会话最多提醒 3 次，之后静默。
+  请检查 Provider；本次任务由主 Agent 继续完成”。超时、调用失败、结果缺失或 Provider
+  繁忙会在当前会话打开熔断，后续 `delegate` 不再次调用 Provider。
+- 熔断后只有 `scripts/fusion_assist.py retry` 或 `delegate(..., retry=True)` 可以重新尝试；
+  成功结果或显式重试会更新会话状态。
 - Fusion 成功也需主 Agent 审查与独立验收；没有真实成功结果不能说 Fusion 已复核。
-- `AGENTRELAY_FUSION_ASSIST=off` 可关闭辅助提醒，不改变现有 Fusion 开关或 Provider。
+- `AGENTRELAY_FUSION_ASSIST=off` 仍可让手动 `remind` 静默，不改变 Fusion 开关或 Provider。
 
 
 像 Pi 的双 Agent harness 一样，主 Agent 应保留计划、歧义解释和最终验收，把高输出量或可
@@ -181,6 +184,29 @@ coding 模式可以直接修改文件并执行命令，必须由用户明确确�
 1. 审查 Fusion 的报告、改动文件和验证结果是否符合用户约束。
 2. 对 coding 模式的写文件和命令结果重新验证。
 3. 在 Fusion 未配置、失败或不可用时继续本地处理，不阻塞主任务。
+
+## 超时与失败诊断
+
+Fusion 调用会写入有界 JSONL 诊断日志：
+
+```bash
+tail -n 100 "${CODEX_HOME:-$HOME/.codex}/agent_relay_tracker/logs/fusion-trace.jsonl"
+```
+
+日志只记录 trace ID、会话 ID、阶段、耗时、Provider 类型、模型、错误类型和少量状态，
+不记录完整 Prompt、API Key 或 Provider 回答。超时或失败结果会带回 `trace_path`、
+`last_stage` 和最近 12 条 `trace_tail`，优先看 `last_stage`：
+
+- `provider_queue_wait`：仍在本机 Provider 租约队列等待。
+- `provider_request`：请求已经发出，正在等上游 Provider。
+- `provider_error`：上游 HTTP/API 已返回错误，查看同一条 trace 的 `error` 和
+  `error_type`。
+- `model_request`：Fusion Runner 正在执行某一轮模型调用。
+- `tool_read_file`、`tool_grep`、`tool_run_command`：具体本地工具仍在执行。
+- `runner_complete`、`subprocess_complete`：业务已经返回，问题可能在收尾或读取结果。
+
+不要因为超时直接放大外层 120 秒限制；先根据最后阶段确认是排队、上游请求、模型多步循环、
+本地工具还是收尾问题，再调整对应配置。
 
 ## Commander 抢占与会话隔离
 

@@ -1,12 +1,13 @@
 # Work profiles
 
-Every task that may write a workspace file selects one process profile, including
-`light` tasks that do not show a user card. Pure questions, searches, and
-read-only checks do not select a profile and do not create an audit.
+Every task that may write a workspace file selects one process profile. The Hook
+automatically records `light` for simple local writes that do not show a user
+card. Pure questions, searches, and read-only checks do not select a profile and
+do not create an audit.
 
-The main Agent owns the choice. Hook rules compute a minimum so a difficult task
-cannot silently use a cheaper process. The Agent may choose a stronger profile
-than the minimum, but must never choose a weaker one.
+The main Agent owns choices above `light`. Hook rules compute a minimum so a
+difficult task cannot silently use a cheaper process. The Agent may choose a
+stronger profile than the minimum, but must never choose a weaker one.
 
 | Profile | Use when | User-visible card |
 |---|---|---|
@@ -28,12 +29,14 @@ The selected profile controls evidence depth, not permission to write. The
 normal task gate, dangerous-command gate, change contract, and user approval
 remain independent.
 
-For a non-card task, record the choice before the first write:
+For a simple `light` task, no command is needed; the Hook records it
+automatically. If the Agent intentionally upgrades a task to a non-light profile
+before the first write, record that choice explicitly:
 
 ```bash
 python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" \
-  select-work-profile --session "<当前真实 session_id>" --profile light \
-  --reason "单文件、低风险、单点样式修改"
+  select-work-profile --session "<当前真实 session_id>" --profile standard \
+  --reason "主 Agent 判断需要标准证据链"
 ```
 
 For a card task, pass the same decision with the semantic approval:
@@ -45,8 +48,8 @@ python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" \
   --reason "用户明确批准当前范围"
 ```
 
-The Hook blocks the first write until the Agent has recorded a profile. It never
-asks the user to choose one, and a missing or damaged audit baseline also blocks
-the write instead of silently continuing. If a task starts simple and later
-expands, stop, update the five-column card, and require confirmation on the
-larger scope.
+The Hook blocks the first write only when a non-light profile still needs the
+Agent's explicit choice. It never asks the user to choose one, and a missing or
+damaged audit baseline also blocks the write instead of silently continuing. If
+a task starts simple and later expands, stop, update the five-column card, and
+require confirmation on the larger scope.

@@ -16,9 +16,10 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
 try:
-    from . import fusion_mode
+    from . import fusion_mode, fusion_trace
 except ImportError:
     import fusion_mode  # type: ignore
+    import fusion_trace  # type: ignore
 
 
 MODEL_CALL = Callable[[list[dict[str, Any]], list[dict[str, Any]], int], dict[str, Any]]
@@ -957,7 +958,22 @@ def run_sidekick(
         )
     key = session_key(workspace, session_id)
     path = session_path(workspace, session_id=session_id, home=home)
+    trace_environ = environ if environ is not None else os.environ
+    run_started_at = time.monotonic()
+    fusion_trace.emit(
+        "runner.session_lock.wait",
+        environ=trace_environ,
+        stage="session_lock_wait",
+        workspace=str(workspace),
+        provider_ref=provider_ref,
+    )
     with _session_lock(path):
+        fusion_trace.emit(
+            "runner.session_lock.acquired",
+            environ=trace_environ,
+            stage="session_lock_acquired",
+            session_file=str(path),
+        )
         session, path = load_session(
             workspace,
             session_id=session_id,
@@ -1052,6 +1068,7 @@ def run_sidekick(
         try:
             for step in range(1, max(1, min(20, int(max_steps))) + 1):
                 steps_used = step
+                step_started_at = time.monotonic()
                 _check_run(
                     run_id,
                     home=home,
@@ -1064,7 +1081,28 @@ def run_sidekick(
                     phase="model",
                     step=step,
                 )
-                response = call_model(session["messages"], tools, timeout)
+                fusion_trace.emit(
+                    "runner.model.start",
+                    environ=trace_environ,
+                    stage="model_request",
+                    step=step,
+                    message_count=len(session["messages"]),
+                    tool_count=len(tools),
+                    provider_timeout_seconds=timeout,
+                )
+                try:
+                    response = call_model(session["messages"], tools, timeout)
+                except Exception as exc:
+                    fusion_trace.emit(
+                        "runner.model.error",
+                        environ=trace_environ,
+                        stage="model_error",
+                        step=step,
+                        duration_ms=round((time.monotonic() - step_started_at) * 1000),
+                        error_type=type(exc).__name__,
+                        error=str(exc)[:300],
+                    )
+                    raise
                 _check_run(
                     run_id,
                     home=home,
@@ -1074,6 +1112,15 @@ def run_sidekick(
                 message = _normalize_message(response)
                 session["messages"].append(message)
                 tool_calls = message.get("tool_calls") or []
+                fusion_trace.emit(
+                    "runner.model.end",
+                    environ=trace_environ,
+                    stage="model_response_received",
+                    step=step,
+                    duration_ms=round((time.monotonic() - step_started_at) * 1000),
+                    tool_call_count=len(tool_calls),
+                    content_chars=len(str(message.get("content") or "")),
+                )
                 if not tool_calls:
                     final_answer = str(message.get("content") or "").strip()
                     if not final_answer:
@@ -1098,6 +1145,14 @@ def run_sidekick(
                         phase=f"tool:{name}",
                         step=step,
                     )
+                    tool_started_at = time.monotonic()
+                    fusion_trace.emit(
+                        "runner.tool.start",
+                        environ=trace_environ,
+                        stage=f"tool_{name or 'unknown'}",
+                        step=step,
+                        tool=name,
+                    )
                     if parse_error:
                         result = {
                             "ok": False,
@@ -1116,6 +1171,15 @@ def run_sidekick(
                                 workspace=workspace,
                                 tool_mode=tool_mode,
                             )
+                    fusion_trace.emit(
+                        "runner.tool.end",
+                        environ=trace_environ,
+                        stage="tool_complete",
+                        step=step,
+                        tool=name,
+                        ok=bool(result.get("ok")),
+                        duration_ms=round((time.monotonic() - tool_started_at) * 1000),
+                    )
                     activity.append(_activity_entry(step, name, arguments, result))
                     session["messages"].append({
                         "role": "tool",
@@ -1187,11 +1251,25 @@ def run_sidekick(
                 "state": exc.state,
             }
         except Exception:
+            fusion_trace.emit(
+                "runner.error",
+                environ=trace_environ,
+                stage="runner_error",
+                steps=steps_used,
+                duration_ms=round((time.monotonic() - run_started_at) * 1000),
+            )
             session["state"] = "idle"
             session["updated_at"] = _now()
             _atomic_json(path, session)
             raise
         else:
+            fusion_trace.emit(
+                "runner.complete",
+                environ=trace_environ,
+                stage="runner_complete",
+                steps=steps_used,
+                duration_ms=round((time.monotonic() - run_started_at) * 1000),
+            )
             session["state"] = "idle"
             session["updated_at"] = _now()
             session["last_result"] = {
@@ -1215,4 +1293,11 @@ def run_sidekick(
                 "commander_results_applied": applied_results,
             }
         finally:
+            fusion_trace.emit(
+                "runner.finished",
+                environ=trace_environ,
+                stage="runner_finished",
+                steps=steps_used,
+                duration_ms=round((time.monotonic() - run_started_at) * 1000),
+            )
             fusion_mode.finish_fusion_run(run_id, home=home)

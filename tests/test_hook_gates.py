@@ -65,19 +65,24 @@ class HookGateTests(unittest.TestCase):
         previous_index = lines.index("  🕘 上次修改：")
         self.assertTrue(
             all(
-                not line or line.startswith("    ")
+                line.startswith("    ")
                 for line in lines[2:previous_index]
+                if line
             )
         )
         self.assertTrue(
             all(
-                not line or line.startswith("    ")
+                line.startswith("    ")
                 for line in lines[previous_index + 1:]
             )
         )
+        self.assertEqual(lines[previous_index - 1], "")
         self.assertTrue(message.startswith("\n  📝 本次修改："))
         self.assertNotIn("--------------------------------", message)
         self.assertNotIn("上上次修改", message)
+        self.assertNotIn("•", message)
+        self.assertNotIn("这次改了哪些文件：", message)
+        self.assertNotIn("涉及到的文件：", message)
 
     def run_tracker(self, *args):
         return subprocess.run(
@@ -266,7 +271,7 @@ class HookGateTests(unittest.TestCase):
         self.assertEqual(work_profile["profile"], "user_required")
         self.assertTrue(work_profile["card_required"])
 
-    def test_simple_write_selects_light_without_visible_card(self):
+    def test_simple_write_auto_records_light_and_allows_first_write(self):
         result = self.run_hook(self.payload(
             "simple-light",
             "UserPromptSubmit",
@@ -276,57 +281,49 @@ class HookGateTests(unittest.TestCase):
         self.assert_hook_ok(result)
         output = json.loads(result.stdout)
         self.assertNotIn("systemMessage", output)
-        self.assertIn("[AgentRelay 工作档]", output["hookSpecificOutput"]["additionalContext"])
+        self.assertNotIn(
+            "[AgentRelay 工作档]",
+            output["hookSpecificOutput"]["additionalContext"],
+        )
         state = json.loads(
             (self.codex_home / "agent_relay_tracker/sessions/simple-light.json").read_text(
                 encoding="utf-8"
             )
         )
-        self.assertEqual(state["task_gate"]["work_profile"]["profile"], "light")
-        self.assertFalse(state["task_gate"]["work_profile"]["card_required"])
-        self.assertNotEqual(
-            state["task_gate"]["work_profile"].get("selection_source"),
-            "agent",
+        work_profile = state["task_gate"]["work_profile"]
+        self.assertEqual(work_profile["profile"], "light")
+        self.assertEqual(work_profile["minimum"], "light")
+        self.assertFalse(work_profile["card_required"])
+        self.assertEqual(work_profile["selection_source"], "hook_auto_light")
+        events = [
+            json.loads(line)
+            for line in (
+                self.codex_home / "agent_relay_tracker/events.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        selection_event = next(
+            event for event in events
+            if event.get("event") == "work_profile_selected"
+            and event.get("data", {}).get("session_id") == "simple-light"
         )
-
-        blocked = self.run_hook(self.payload(
-            "simple-light",
-            "PreToolUse",
-            tool_name="apply_patch",
-            tool_input={"input": "*** Begin Patch"},
-            tool_use_id="simple-light-before-selection",
-        ))
-        self.assert_hook_ok(blocked)
-        denied = json.loads(blocked.stdout)
+        self.assertEqual(selection_event["data"]["minimum"], "light")
+        self.assertEqual(selection_event["data"]["profile"], "light")
         self.assertEqual(
-            denied["hookSpecificOutput"]["permissionDecision"],
-            "deny",
+            selection_event["data"]["selection_source"],
+            "hook_auto_light",
         )
-        self.assertIn("工作档", denied["hookSpecificOutput"]["permissionDecisionReason"])
-        self.assertNotIn("systemMessage", denied)
-
-        selected = self.run_tracker(
-            "select-work-profile",
-            "--session", "simple-light",
-            "--profile", "light",
-            "--reason", "单点样式小改",
-        )
-        self.assert_hook_ok(selected)
-        selection = json.loads(selected.stdout)
-        self.assertEqual(selection["profile"], "light")
-        self.assertEqual(selection["selection_source"], "agent")
 
         allowed = self.run_hook(self.payload(
             "simple-light",
             "PreToolUse",
             tool_name="apply_patch",
             tool_input={"input": "*** Begin Patch"},
-            tool_use_id="simple-light-after-selection",
+            tool_use_id="simple-light-before-selection",
         ))
         self.assert_hook_ok(allowed)
         self.assertEqual(allowed.stdout, "")
 
-    def test_actual_write_requires_profile_even_when_prompt_verb_is_not_detected(self):
+    def test_actual_simple_write_auto_records_light_when_prompt_verb_is_not_detected(self):
         session = "write-profile-runtime-fallback"
         initial = self.run_hook(self.payload(
             session,
@@ -336,41 +333,25 @@ class HookGateTests(unittest.TestCase):
         self.assert_hook_ok(initial)
         self.assertEqual(initial.stdout, "")
 
-        blocked = self.run_hook(self.payload(
+        allowed = self.run_hook(self.payload(
             session,
             "PreToolUse",
             tool_name="apply_patch",
             tool_input={"input": "*** Begin Patch"},
             tool_use_id="runtime-profile-before-selection",
         ))
-        self.assert_hook_ok(blocked)
-        denied = json.loads(blocked.stdout)
-        self.assertEqual(
-            denied["hookSpecificOutput"]["permissionDecision"],
-            "deny",
-        )
-        self.assertIn("工作档", denied["hookSpecificOutput"]["permissionDecisionReason"])
-
-        selected = self.run_tracker(
-            "select-work-profile",
-            "--session", session,
-            "--profile", "light",
-            "--reason", "单点样式小改",
-        )
-        self.assert_hook_ok(selected)
-        selection = json.loads(selected.stdout)
-        self.assertEqual(selection["profile"], "light")
-        self.assertFalse(selection["card_required"])
-
-        allowed = self.run_hook(self.payload(
-            session,
-            "PreToolUse",
-            tool_name="apply_patch",
-            tool_input={"input": "*** Begin Patch"},
-            tool_use_id="runtime-profile-after-selection",
-        ))
         self.assert_hook_ok(allowed)
         self.assertEqual(allowed.stdout, "")
+        state = json.loads(
+            (
+                self.codex_home / "agent_relay_tracker" / "sessions"
+                / f"{session}.json"
+            ).read_text(encoding="utf-8")
+        )
+        work_profile = state["task_gate"]["work_profile"]
+        self.assertEqual(work_profile["profile"], "light")
+        self.assertEqual(work_profile["minimum"], "light")
+        self.assertEqual(work_profile["selection_source"], "hook_auto_light")
 
     def test_agent_upgrade_from_light_to_standard_requires_a_five_column_card(self):
         session = "light-to-standard"
@@ -613,24 +594,10 @@ class HookGateTests(unittest.TestCase):
                         "--codex-home", str(self.codex_home)], check=True, capture_output=True)
         self.run_hook(self.payload("relaxed-style", "UserPromptSubmit", cwd=str(workspace),
                                   prompt="把圆形按钮改成方块，只改 border-radius"))
-        blocked = self.run_hook(self.payload(
-            "relaxed-style", "PreToolUse", cwd=str(workspace),
-            tool_name="Edit", tool_input={"file_path": str(source)},
-            tool_use_id="relaxed-style-before-profile",
-        ))
-        self.assert_hook_ok(blocked)
-        self.assertIn("工作档", json.loads(blocked.stdout)["hookSpecificOutput"]["permissionDecisionReason"])
-        selected = self.run_tracker(
-            "select-work-profile",
-            "--session", "relaxed-style",
-            "--profile", "light",
-            "--reason", "单点 border-radius 样式修改",
-        )
-        self.assert_hook_ok(selected)
         allowed = self.run_hook(self.payload(
             "relaxed-style", "PreToolUse", cwd=str(workspace),
             tool_name="Edit", tool_input={"file_path": str(source)},
-            tool_use_id="relaxed-style-edit",
+            tool_use_id="relaxed-style-before-profile",
         ))
         self.assert_hook_ok(allowed)
         self.assertEqual(allowed.stdout, "")
@@ -657,6 +624,38 @@ class HookGateTests(unittest.TestCase):
                                   tool_input={"file_path": str(source)}, tool_response={"success": True}))
         audit_path = self.codex_home / "agent_relay_tracker" / "delivery-audit" / "relaxed-code.json"
         self.assertFalse(audit_path.exists())
+
+    def test_hook_does_not_suggest_or_block_on_fusion(self):
+        workspace = self.codex_home / "hook-fusion-disabled"
+        workspace.mkdir()
+        session = "hook-fusion-disabled"
+
+        prompt = self.run_hook(self.payload(
+            session,
+            "UserPromptSubmit",
+            cwd=str(workspace),
+            prompt="请独立复核一个跨文件修改",
+        ))
+        self.assert_hook_ok(prompt)
+        self.assertNotIn("AgentRelay Fusion 辅助", prompt.stdout)
+
+        fusion_dir = self.codex_home / "agent_relay_tracker" / "fusion-assist"
+        fusion_dir.mkdir(parents=True)
+        (fusion_dir / f"{session}.json").write_text(json.dumps({
+            "status": "failed",
+            "error": "FUSION_PROVIDER_TIMEOUT",
+            "notice": "Fusion 调用超时",
+            "should_notify": True,
+        }, ensure_ascii=False), encoding="utf-8")
+        stop = self.run_hook(self.payload(
+            session,
+            "Stop",
+            cwd=str(workspace),
+            last_assistant_message="已查看，任务完成。",
+        ))
+        self.assert_hook_ok(stop)
+        self.assertNotIn("Fusion 调用超时", stop.stdout)
+        self.assertNotEqual(json.loads(stop.stdout or "{}").get("decision"), "block")
 
     def test_shell_wrapper_forwards_change_summary_after_final_stop(self):
         workspace = self.codex_home / "shell-wrapper-workspace"
@@ -686,7 +685,7 @@ class HookGateTests(unittest.TestCase):
         self.assert_hook_ok(stopped)
         output = json.loads(stopped.stdout)
         self.assert_change_summary_format(output["systemMessage"])
-        self.assertIn("app.py", output["systemMessage"])
+        self.assertNotIn("app.py", output["systemMessage"])
         self.assertNotIn("decision", output)
 
     def test_claude_shim_forwards_change_summary_after_final_stop(self):
@@ -740,7 +739,7 @@ class HookGateTests(unittest.TestCase):
         self.assert_hook_ok(stopped)
         output = json.loads(stopped.stdout)
         self.assert_change_summary_format(output["systemMessage"])
-        self.assertIn("app.py", output["systemMessage"])
+        self.assertNotIn("app.py", output["systemMessage"])
         self.assertNotIn("decision", output)
 
     def test_blocked_stop_does_not_record_until_the_gate_allows_completion(self):
@@ -1220,12 +1219,7 @@ class HookGateTests(unittest.TestCase):
         ))
 
         self.assert_hook_ok(result)
-        output = json.loads(result.stdout)
-        self.assertNotIn("systemMessage", output)
-        self.assertIn(
-            "[AgentRelay 工作档]",
-            output["hookSpecificOutput"]["additionalContext"],
-        )
+        self.assertEqual(result.stdout, "")
 
     def test_finish_check_is_read_only_for_delivery_audit(self):
         from scripts import delivery_audit
@@ -1903,29 +1897,17 @@ class HookGateTests(unittest.TestCase):
             tool_use_id="b-patch",
         ))
         self.assert_hook_ok(safe_other_session)
-        other_output = json.loads(safe_other_session.stdout)["hookSpecificOutput"]
-        self.assertEqual(other_output["permissionDecision"], "deny")
-        self.assertIn("工作档", other_output["permissionDecisionReason"])
-        self.assertNotIn(
-            "当前任务尚未获得用户批准",
-            other_output["permissionDecisionReason"],
+        self.assertEqual(safe_other_session.stdout, "")
+        other_state = json.loads(
+            (
+                self.codex_home / "agent_relay_tracker" / "sessions"
+                / "session-b.json"
+            ).read_text(encoding="utf-8")
         )
-        selected = self.run_tracker(
-            "select-work-profile",
-            "--session", "session-b",
-            "--profile", "light",
-            "--reason", "隔离测试中的单点写入",
+        self.assertEqual(
+            other_state["task_gate"]["work_profile"]["selection_source"],
+            "hook_auto_light",
         )
-        self.assert_hook_ok(selected)
-        allowed = self.run_hook(self.payload(
-            "session-b",
-            "PreToolUse",
-            tool_name="apply_patch",
-            tool_input={"input": "*** Begin Patch"},
-            tool_use_id="b-patch-after-profile",
-        ))
-        self.assert_hook_ok(allowed)
-        self.assertEqual(allowed.stdout, "")
 
     def test_missing_session_id_is_ignored_without_shared_state(self):
         result = self.run_hook({

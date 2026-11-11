@@ -10,6 +10,7 @@ from unittest import mock
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 from scripts import fusion_assist as assist
+from scripts import fusion_trace
 
 
 class FusionAssistTests(unittest.TestCase):
@@ -35,8 +36,8 @@ class FusionAssistTests(unittest.TestCase):
     def test_failure_notice_is_bounded_and_main_agent_continues(self):
         for index in range(4):
             state = assist.record_result(self.home, self.session, {"status": "failed", "error": f"API_EXPIRED_{index}"})
-            self.assertEqual(state["failure_notices"], min(index + 1, 3))
-            self.assertEqual(state["should_notify"], index < 3)
+            self.assertEqual(state["failure_notices"], min(index + 1, 1))
+            self.assertEqual(state["should_notify"], index < 1)
         self.assertEqual(assist.read_state(self.home, self.session)["should_notify"], False)
 
     def test_unconfigured_provider_is_silent_and_does_not_count_failure(self):
@@ -59,6 +60,164 @@ class FusionAssistTests(unittest.TestCase):
         self.assertEqual(second["display_state"], "retryable")
         self.assertIn("可重试", second["notice"])
         self.assertEqual(second["failure_notices"], 1)
+
+    def test_provider_timeout_is_classified_without_dumping_subprocess_command(self):
+        script = self.home / "skills" / "agent-fusion" / "scripts" / "agent_fusion.py"
+        script.parent.mkdir(parents=True)
+        script.write_text("pass\n", encoding="utf-8")
+        request_id = assist.request_identity(
+            self.session,
+            "复核测试",
+            str(self.home),
+        )
+        trace_path = self.home / "trace" / "fusion.jsonl"
+        trace_environ = {
+            fusion_trace.TRACE_PATH_ENV: str(trace_path),
+            fusion_trace.TRACE_ID_ENV: request_id,
+            fusion_trace.TRACE_SESSION_ENV: self.session,
+        }
+        fusion_trace.emit(
+            "provider.lease.wait",
+            environ=trace_environ,
+            stage="provider_queue_wait",
+        )
+        with mock.patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired(["agent_fusion.py", "delegate"], 120),
+        ):
+            result = assist.delegate(
+                self.home,
+                self.session,
+                "复核测试",
+                workspace=str(self.home),
+                environ=trace_environ,
+            )
+
+        self.assertEqual(result["error"], "FUSION_PROVIDER_TIMEOUT")
+        self.assertIn("120 秒", result["message"])
+        self.assertIn("provider_queue_wait", result["message"])
+        self.assertNotIn("agent_fusion.py", result["message"])
+        self.assertEqual(result["trace_path"], str(trace_path))
+        self.assertEqual(result["last_stage"], "provider_queue_wait")
+        self.assertTrue(any(
+            item["stage"] == "provider_queue_wait"
+            for item in result["trace_tail"]
+        ))
+        self.assertTrue(any(
+            item["event"] == "assist.invoke.timeout"
+            for item in result["trace_tail"]
+        ))
+        stored = trace_path.read_text(encoding="utf-8")
+        self.assertNotIn("复核测试", stored)
+        state = assist.read_state(self.home, self.session)
+        self.assertTrue(state["provider_circuit_open"])
+        self.assertEqual(state["provider_circuit_reason"], "FUSION_PROVIDER_TIMEOUT")
+
+    def test_provider_failure_returns_last_stage_and_trace_tail(self):
+        script = self.home / "skills" / "agent-fusion" / "scripts" / "agent_fusion.py"
+        script.parent.mkdir(parents=True)
+        script.write_text("pass\n", encoding="utf-8")
+        request_id = assist.request_identity(
+            self.session,
+            "复核测试",
+            str(self.home),
+        )
+        trace_path = self.home / "trace" / "fusion.jsonl"
+        trace_environ = {
+            fusion_trace.TRACE_PATH_ENV: str(trace_path),
+            fusion_trace.TRACE_ID_ENV: request_id,
+            fusion_trace.TRACE_SESSION_ENV: self.session,
+        }
+        fusion_trace.emit(
+            "provider.request.error",
+            environ=trace_environ,
+            stage="provider_error",
+            error_type="HTTPError",
+            error="HTTP Error 502: Bad Gateway",
+        )
+        fusion_trace.emit(
+            "provider.request.finished",
+            environ=trace_environ,
+            stage="provider_call_finished",
+        )
+        fusion_trace.emit(
+            "runner.model.error",
+            environ=trace_environ,
+            stage="model_error",
+            error="HTTP Error 502: Bad Gateway",
+        )
+        fusion_trace.emit(
+            "runner.error",
+            environ=trace_environ,
+            stage="runner_error",
+        )
+        fusion_trace.emit(
+            "runner.finished",
+            environ=trace_environ,
+            stage="runner_finished",
+        )
+        fusion_trace.emit(
+            "fusion.delegate.error",
+            environ=trace_environ,
+            stage="unhandled_error",
+        )
+        completed = subprocess.CompletedProcess(
+            args=["agent_fusion.py", "delegate"],
+            returncode=2,
+            stdout=(
+                'AGENT_FUSION_RESULT={"status":"failed",'
+                '"error":"FUSION_PROVIDER_CALL_FAILED",'
+                '"message":"HTTP Error 502: Bad Gateway"}\n'
+            ),
+            stderr="",
+        )
+        with mock.patch("subprocess.run", return_value=completed):
+            result = assist.delegate(
+                self.home,
+                self.session,
+                "复核测试",
+                workspace=str(self.home),
+                environ=trace_environ,
+            )
+
+        self.assertEqual(result["error"], "FUSION_PROVIDER_CALL_FAILED")
+        self.assertEqual(result["last_stage"], "provider_error")
+        self.assertTrue(any(
+            item.get("error") == "HTTP Error 502: Bad Gateway"
+            for item in result["trace_tail"]
+        ))
+
+    def test_circuit_breaker_blocks_new_automatic_calls_until_explicit_retry(self):
+        failed = {"status": "failed", "error": "FUSION_PROVIDER_TIMEOUT", "message": "timed out"}
+        with mock.patch.object(assist, "_invoke", return_value=failed):
+            assist.delegate(self.home, self.session, "复核第一项", workspace=str(self.home))
+
+        with mock.patch.object(assist, "_invoke") as invoke:
+            skipped = assist.delegate(
+                self.home,
+                self.session,
+                "复核另一项",
+                workspace=str(self.home),
+            )
+        self.assertEqual(skipped["error"], "FUSION_RECOVERY_REQUIRED")
+        invoke.assert_not_called()
+
+        with mock.patch.object(
+            assist,
+            "_invoke",
+            return_value={"status": "success", "answer": "recovered"},
+        ) as invoke:
+            recovered = assist.delegate(
+                self.home,
+                self.session,
+                "复核另一项",
+                workspace=str(self.home),
+                retry=True,
+            )
+        self.assertEqual(recovered["status"], "success")
+        invoke.assert_called_once()
+        state = assist.read_state(self.home, self.session)
+        self.assertFalse(state.get("provider_circuit_open", False))
 
     def test_delegate_reuses_success_for_same_request_without_second_provider_call(self):
         result = {"status": "success", "answer": "review", "session_id": "fusion-real"}

@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -21,6 +22,7 @@ try:
         config_manager,
         fusion_mode,
         fusion_runner,
+        fusion_trace,
         provider_leases,
         sensitive_redaction,
     )
@@ -28,6 +30,7 @@ except ImportError:
     import config_manager  # noqa: E402
     import fusion_mode  # noqa: E402
     import fusion_runner  # noqa: E402
+    import fusion_trace  # noqa: E402
     import provider_leases  # noqa: E402
     import sensitive_redaction  # noqa: E402
 
@@ -255,17 +258,113 @@ def _call_provider_model(
     config_manager.apply_config_to_environment(home)
     kind = str(provider["kind"])
     entry = provider["entry"]
+    provider_ref = str(provider["ref"])
+    diagnostics = {
+        "provider_ref": provider_ref,
+        "provider_kind": kind,
+        "model": str(entry.get("model") or entry.get("id") or ""),
+        "message_count": len(messages),
+        "tool_count": len(tools),
+        "timeout_seconds": timeout,
+    }
+    started_at = time.monotonic()
     # Web calls claim a numbered conversation slot inside run_provider(). Taking
     # a second lease here would reserve two slots for one request.
     if kind == "web":
-        return _call_web_provider(provider, messages, timeout, business=business)
+        fusion_trace.emit(
+            "provider.web.start",
+            stage="provider_request",
+            **diagnostics,
+        )
+        try:
+            response = _call_web_provider(provider, messages, timeout, business=business)
+        except Exception as exc:
+            fusion_trace.emit(
+                "provider.web.error",
+                stage="provider_error",
+                duration_ms=round((time.monotonic() - started_at) * 1000),
+                error_type=type(exc).__name__,
+                error=str(exc)[:300],
+                **diagnostics,
+            )
+            raise
+        fusion_trace.emit(
+            "provider.web.end",
+            stage="provider_response_received",
+            duration_ms=round((time.monotonic() - started_at) * 1000),
+            content_chars=len(_chat_answer(response)),
+            **diagnostics,
+        )
+        return response
     manager = fusion_mode.provider_lease_manager(provider, home=home)
-    with manager.lease(metadata={"caller": "fusion", "pid": os.getpid()}):
-        if kind == "local":
-            return _call_chat_model(entry, messages, tools, timeout)
-        if kind == "api":
-            return _call_formatted_model(entry, messages, tools, timeout)
-        raise RuntimeError(f"不支持的 Fusion Provider 类型：{kind}")
+    fusion_trace.emit(
+        "provider.lease.wait",
+        stage="provider_queue_wait",
+        queue_timeout_seconds=manager.queue_timeout,
+        **diagnostics,
+    )
+    try:
+        with manager.lease(metadata={"caller": "fusion", "pid": os.getpid()}) as lease:
+            fusion_trace.emit(
+                "provider.lease.acquired",
+                stage="provider_ready",
+                lease_slot=lease.slot,
+                **diagnostics,
+            )
+            fusion_trace.emit(
+                "provider.request.start",
+                stage="provider_request",
+                **diagnostics,
+            )
+            try:
+                if kind == "local":
+                    response = _call_chat_model(entry, messages, tools, timeout)
+                elif kind == "api":
+                    response = _call_formatted_model(entry, messages, tools, timeout)
+                else:
+                    raise RuntimeError(f"不支持的 Fusion Provider 类型：{kind}")
+            except Exception as exc:
+                fusion_trace.emit(
+                    "provider.request.error",
+                    stage="provider_error",
+                    duration_ms=round((time.monotonic() - started_at) * 1000),
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:300],
+                    **diagnostics,
+                )
+                raise
+            message = _assistant_message(response)
+            fusion_trace.emit(
+                "provider.request.end",
+                stage="provider_response_received",
+                duration_ms=round((time.monotonic() - started_at) * 1000),
+                content_chars=len(_chat_answer(response)),
+                tool_call_count=(
+                    len(message.get("tool_calls") or [])
+                    if isinstance(message.get("tool_calls"), list)
+                    else 0
+                ),
+                **diagnostics,
+            )
+            return response
+    except provider_leases.ProviderLeaseTimeout as exc:
+        fusion_trace.emit(
+            "provider.lease.timeout",
+            stage="provider_queue_timeout",
+            duration_ms=round((time.monotonic() - started_at) * 1000),
+            active=int(exc.status.get("active") or 0),
+            limit=int(exc.status.get("limit") or 0),
+            queued=int(exc.status.get("queued") or 0),
+            **diagnostics,
+        )
+        raise
+    finally:
+        fusion_trace.emit(
+            "provider.request.finished",
+            stage="provider_call_finished",
+            duration_ms=round((time.monotonic() - started_at) * 1000),
+            **diagnostics,
+        )
 
 
 def _delegate_error_messages() -> dict[str, str]:
@@ -295,7 +394,19 @@ def delegate(
     session_id: str = "",
 ) -> dict[str, Any]:
     question = str(prompt or "").strip()
+    started_at = time.monotonic()
+    fusion_trace.emit(
+        "fusion.delegate.start",
+        stage="delegate_start",
+        workspace=str(Path(workspace).expanduser().resolve()) if workspace is not None else str(Path.cwd()),
+        session_id=session_id,
+    )
     if not question:
+        fusion_trace.emit(
+            "fusion.delegate.rejected",
+            stage="prompt_empty",
+            duration_ms=round((time.monotonic() - started_at) * 1000),
+        )
         return _error("rejected", "FUSION_PROMPT_EMPTY", "Fusion 问题不能为空")
 
     config = config_manager.load_config(home)
@@ -306,6 +417,12 @@ def delegate(
         environ=environ,
     )
     if not state["delegable"]:
+        fusion_trace.emit(
+            "fusion.delegate.rejected",
+            stage="state_not_delegable",
+            reason=str(state.get("reason") or ""),
+            duration_ms=round((time.monotonic() - started_at) * 1000),
+        )
         messages = _delegate_error_messages()
         return _error(
             "rejected",
@@ -318,6 +435,15 @@ def delegate(
     if provider is None:
         return _error("failed", error, "无法解析 Fusion Provider", state=state)
     provider_public = fusion_mode.public_provider(provider)
+    fusion_trace.emit(
+        "fusion.provider.resolved",
+        stage="provider_resolved",
+        provider_ref=str(provider["ref"]),
+        provider_kind=str(provider["kind"]),
+        tool_mode=str(state["tool_mode"]),
+        max_steps=int(state["max_steps"]),
+        provider_timeout_seconds=int(state["timeout"]),
+    )
     environment = environ if environ is not None else os.environ
     web_business = str(
         environment.get("AGENTRELAY_WEB_SESSION_BUSINESS") or "default"
@@ -343,6 +469,11 @@ def delegate(
         )
 
     try:
+        fusion_trace.emit(
+            "fusion.runner.start",
+            stage="runner_start",
+            provider_ref=str(provider["ref"]),
+        )
         result = fusion_runner.run_sidekick(
             question,
             context=context,
@@ -358,7 +489,20 @@ def delegate(
             environ=environ,
             call_model=call_model,
         )
+        fusion_trace.emit(
+            "fusion.runner.end",
+            stage="runner_complete",
+            status=str(result.get("status") or ""),
+            steps=int(result.get("steps") or 0),
+            duration_ms=round((time.monotonic() - started_at) * 1000),
+        )
     except provider_leases.ProviderLeaseTimeout as exc:
+        fusion_trace.emit(
+            "fusion.delegate.error",
+            stage="provider_queue_timeout",
+            error="FUSION_PROVIDER_BUSY",
+            duration_ms=round((time.monotonic() - started_at) * 1000),
+        )
         current_state = fusion_mode.fusion_state(
             config=config,
             home=home,
@@ -377,6 +521,12 @@ def delegate(
             provider_lease=exc.status,
         )
     except fusion_runner.FusionRunnerError as exc:
+        fusion_trace.emit(
+            "fusion.delegate.error",
+            stage="runner_error",
+            error=str(exc.code),
+            duration_ms=round((time.monotonic() - started_at) * 1000),
+        )
         status = "rejected" if exc.code in {
             "FUSION_BUSY",
             "FUSION_WORKSPACE_NOT_FOUND",
@@ -391,6 +541,12 @@ def delegate(
             **exc.extra,
         )
     except fusion_mode.FusionPreempted as exc:
+        fusion_trace.emit(
+            "fusion.delegate.error",
+            stage="preempted",
+            error=str(exc.reason),
+            duration_ms=round((time.monotonic() - started_at) * 1000),
+        )
         return _error(
             "rejected",
             exc.reason,
@@ -399,6 +555,13 @@ def delegate(
             state=exc.state,
         )
     except Exception as exc:
+        fusion_trace.emit(
+            "fusion.delegate.error",
+            stage="unhandled_error",
+            error_type=type(exc).__name__,
+            error=str(exc)[:300],
+            duration_ms=round((time.monotonic() - started_at) * 1000),
+        )
         return _error(
             "failed",
             "FUSION_PROVIDER_CALL_FAILED",

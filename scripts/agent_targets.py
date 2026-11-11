@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime
+from collections.abc import Iterable
 from pathlib import Path
 
 try:
@@ -167,7 +168,7 @@ def atomic_write_json(path: Path, value: dict) -> None:
 def backup_file(path: Path, tag: str) -> Path | None:
     if not path.is_file():
         return None
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     backup = path.with_name(f"{path.name}.{tag}.{timestamp}")
     shutil.copy2(path, backup)
     return backup
@@ -223,8 +224,12 @@ def command_uses_shim_target(command: str, target: str) -> bool:
 
 def install_managed_file(source: Path, destination: Path) -> bool:
     """原子安装文件；旧版本不一致时先备份。"""
+    if source.is_symlink():
+        raise TargetError(f"拒绝安装符号链接文件：{source}")
     if not source.is_file():
         raise TargetError(f"发布包缺少必要文件：{source}")
+    if destination.is_symlink():
+        raise TargetError(f"拒绝覆盖符号链接目标：{destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.is_file():
         if source.read_bytes() == destination.read_bytes():
@@ -242,6 +247,200 @@ def install_managed_file(source: Path, destination: Path) -> bool:
         if temporary.exists():
             temporary.unlink()
     return True
+
+
+def _regular_tree_files(root: Path, label: str) -> list[Path]:
+    """Return regular files from a tree while rejecting links and special files."""
+
+    if root.is_symlink():
+        raise TargetError(f"{label}不能是符号链接：{root}")
+    if not root.exists():
+        raise TargetError(f"{label}不存在：{root}")
+    if not root.is_dir():
+        raise TargetError(f"{label}不是目录：{root}")
+
+    files: list[Path] = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise TargetError(f"{label}包含符号链接：{path}")
+        if path.is_file():
+            files.append(path)
+        elif not path.is_dir():
+            raise TargetError(f"{label}包含非普通文件：{path}")
+    return files
+
+
+def install_skill_tree_to(
+    source: Path,
+    destination: Path,
+    extra_files: Path | Iterable[Path] | None = None,
+) -> dict[str, int]:
+    """Recursively install a Skill tree without following links.
+
+    Existing files are backed up before replacement. Extra files keep their own
+    basename, which lets catalog installs attach a shared LICENSE to each Skill.
+    """
+
+    source = Path(source)
+    destination = Path(destination)
+    source_files = _regular_tree_files(source, "Skill 源目录")
+
+    if destination.is_symlink():
+        raise TargetError(f"拒绝安装到符号链接目标：{destination}")
+    if destination.exists() and not destination.is_dir():
+        raise TargetError(f"Skill 安装目标不是目录：{destination}")
+    if destination.exists():
+        _regular_tree_files(destination, "Skill 安装目标")
+
+    if destination.exists() and destination.resolve() == source.resolve():
+        return {"installed": 0, "files": len(source_files)}
+
+    try:
+        destination.resolve().relative_to(source.resolve())
+    except ValueError:
+        pass
+    else:
+        raise TargetError("Skill 安装目标不能位于源目录内部")
+
+    if extra_files is None:
+        extras: list[Path] = []
+    elif isinstance(extra_files, (str, Path)):
+        extras = [Path(extra_files)]
+    else:
+        extras = [Path(path) for path in extra_files]
+
+    planned: list[tuple[Path, Path]] = []
+    seen_destinations: set[Path] = set()
+    for path in source_files:
+        relative = path.relative_to(source)
+        target_path = destination / relative
+        if target_path in seen_destinations:
+            raise TargetError(f"Skill 安装计划包含重复文件：{target_path}")
+        seen_destinations.add(target_path)
+        planned.append((path, target_path))
+
+    for path in extras:
+        if path.is_symlink():
+            raise TargetError(f"附加文件不能是符号链接：{path}")
+        if not path.is_file():
+            raise TargetError(f"附加文件不存在：{path}")
+        target_path = destination / path.name
+        if target_path in seen_destinations:
+            raise TargetError(f"附加文件与 Skill 内文件重名：{path.name}")
+        seen_destinations.add(target_path)
+        planned.append((path, target_path))
+
+    installed = 0
+    for source_path, destination_path in planned:
+        if install_managed_file(source_path, destination_path):
+            installed += 1
+    return {"installed": installed, "files": len(planned)}
+
+
+def replace_skill_tree_to(source: Path, destination: Path) -> dict[str, int]:
+    """Atomically replace a downloaded Skill tree and retain the old tree."""
+
+    source = Path(source)
+    destination = Path(destination)
+    source_files = _regular_tree_files(source, "Skill 源目录")
+    if destination.is_symlink():
+        raise TargetError(f"拒绝安装到符号链接目标：{destination}")
+    if destination.exists() and not destination.is_dir():
+        raise TargetError(f"Skill 安装目标不是目录：{destination}")
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(
+        prefix=f".{destination.name}.agentrelay-staging.",
+        dir=destination.parent,
+    ))
+    staging_tree = staging / destination.name
+    backup: Path | None = None
+    try:
+        install_skill_tree_to(source, staging_tree)
+        staged_count, staged_digest = _tree_sha256_tree(staging_tree)
+        source_count, source_digest = _tree_sha256_tree(source)
+        if (
+            staged_count != source_count
+            or staged_digest != source_digest
+        ):
+            raise TargetError("下载 Skill 的暂存内容校验失败")
+
+        if destination.exists():
+            _regular_tree_files(destination, "Skill 安装目标")
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            backup = destination.with_name(
+                f"{destination.name}.before-agentrelay-update.{timestamp}"
+            )
+            os.replace(destination, backup)
+        try:
+            os.replace(staging_tree, destination)
+        except OSError:
+            if backup is not None and backup.exists() and not destination.exists():
+                os.replace(backup, destination)
+            raise
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+    return {"installed": len(source_files), "files": len(source_files)}
+
+
+def _tree_sha256_tree(root: Path) -> tuple[int, str]:
+    import hashlib
+
+    files = _regular_tree_files(root, "Skill 目录")
+    digest = hashlib.sha256()
+    for path in files:
+        relative = path.relative_to(root).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return len(files), digest.hexdigest()
+
+
+def install_catalog_skill_to(
+    target: dict,
+    project_root: Path,
+    skill_id: str,
+    catalog: dict | None = None,
+    archive_source: Path | None = None,
+) -> Path:
+    """Install one bundled, downloaded, or locally discovered Skill."""
+
+    try:
+        from . import skill_catalog
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import skill_catalog
+
+    try:
+        catalog = catalog or skill_catalog.load_catalog(project_root)
+        entry = skill_catalog.catalog_skill_entry(catalog, skill_id)
+        if not skill_catalog.skill_is_installable(entry):
+            reason = str(entry.get("restriction") or "")
+            detail = f"：{reason}" if reason else ""
+            raise skill_catalog.CatalogError(
+                f"Skill cannot be installed: {skill_id}{detail}"
+            )
+        destination = Path(target["skill_dir"]).parent / skill_id
+        if entry.get("install_method") == skill_catalog.OFFICIAL_DOWNLOAD_METHOD:
+            with skill_catalog.official_skill_source(
+                skill_id, archive_source=archive_source
+            ) as source:
+                replace_skill_tree_to(source, destination)
+            return destination
+        source = skill_catalog.skill_source_dir(project_root, catalog, skill_id)
+        extra_files = skill_catalog.skill_extra_files(
+            project_root, catalog, skill_id
+        )
+    except skill_catalog.CatalogError as exc:
+        raise TargetError(str(exc)) from exc
+    install_skill_tree_to(
+        source,
+        destination,
+        extra_files,
+    )
+    return destination
 
 
 def install_skill_to(

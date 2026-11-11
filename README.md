@@ -92,14 +92,16 @@ py install.py
 
 1. 创建独立的 `agentrelay-env` Python 环境。
 2. 安装 Python 依赖和 Playwright Chromium。
-3. 安装 `agent-relay`、`agent-fusion`、`agent-image` 三个 Skill。
-4. 把 Hook、运行脚本和参考文档安装到对应 Agent 目录。
-5. 合并已有 Hook 配置，不覆盖用户自己配置的其他 Hook。
-6. 运行基础检查和合成 Hook 事件检查。
+3. 安装 `agent-relay`、`agent-fusion`、`agent-image` 三个主 Skill。
+4. 按选择安装内置 Vue.js AI、AgentRelay Browser Automation、Anthropic 官方
+   Skills 和本机发现的 Skills。
+5. 把 Hook、运行脚本和参考文档安装到对应 Agent 目录。
+6. 合并已有 Hook 配置，不覆盖用户自己配置的其他 Hook。
+7. 运行基础检查和合成 Hook 事件检查。
 
 如果以前安装过旧版本，重新运行安装器即可。安装器会备份被更新的旧文件。
 
-### 3. 选择要接入的 Agent
+### 3. 选择 Agent 和 Skills
 
 交互安装开始时会显示类似下面的清单：
 
@@ -118,6 +120,55 @@ python3 install.py --targets codex,claude,pi,hermes
 ```
 
 Codex 是共享运行时和默认安装路径。即使命令行里没有写 `codex`，安装器也会保留 Codex 基础组件。
+
+选完 Agent 后，安装器会扫描这些 Agent 现有的 Skills 目录，把已经安装的
+Skill（例如 `mysql`）加入清单。预设默认清单是 `browser-automatic`、`docx`、
+`pdf`、`pptx`、`xlsx`、`vue-best-practices`、`web-artifacts-builder`；这些项目
+默认勾选，用户可以在确认前手动取消。其他许可证明确且允许复制的本机 Skill 会显示，
+但默认不勾选。AgentRelay 不读取模型的隐式调用记录，也不会统计你的使用行为。
+
+清单里同时保留内置 Vue.js AI Skills。即使本机没有装过 Vue Skill，也会默认
+选择 `vue-best-practices` 作为离线兜底。你可以输入编号取消或增加项目，然后
+按回车确认；输入 `0` 或 `none` 表示这次不安装额外 Skill。
+
+`browser-automatic` 是 AgentRelay 自己维护的 MIT Playwright Skill，不读取、也不复制
+本机已有的同名目录。安装器会从仓库内的可信包为每个选中的 Agent 分别创建独立副本，
+因此 Codex、Claude Code 和 Pi 可以同时安装，彼此不共享文件。
+
+其他许可证明确且允许复制的本机 Skill 安装到另一个 Agent 时，会完整复制目录、子目录
+和原有许可证文件。
+`agent-relay`、`agent-fusion`、`agent-image` 属于 AgentRelay 自己管理的组件，
+不会混进可选清单；符号链接和格式不安全的目录也会跳过。
+
+`docx`、`pdf`、`pptx`、`xlsx`、`web-artifacts-builder` 不复制任何本机副本。
+它们来自 Anthropic 官方
+[`anthropics/skills`](https://github.com/anthropics/skills)，固定到提交
+`2c5958ecac7cee2b583967a2c4981d0f4a75c579`，安装时由 AgentRelay 分别下载到每个
+被选中的 Agent。归档只允许 HTTPS 官方地址，限制下载和解压体积，拒绝绝对路径、
+`..`、符号链接、硬链接、设备文件和重复条目，并逐个校验文件数、内容 SHA-256、
+`SKILL.md` 与 Apache-2.0 `LICENSE.txt`。校验通过前不会改动目标 Agent；下载或
+校验失败会明确报告，不会把失败说成安装成功。
+
+许可证明确禁止复制或迁移、或者无法确认许可证的本机 Skill 仍会显示来源，但会标成
+“不可复制”并禁止勾选。AgentRelay 不会为了绕过许可证限制而复制它们，也不会把
+“没有许可证文件”当作允许复制。
+
+非交互安装可以显式指定 Skill：
+
+```bash
+python3 install.py --targets codex,claude,pi \
+  --skills browser-automatic,docx,pdf,vue-best-practices
+```
+
+不写 `--skills` 时，默认安装清单中可安全安装的项目，包括从 Anthropic 官方仓库
+独立下载的五个官方 Skills、AgentRelay 内置 Browser Skill、可复制的本机 Skills
+（若存在）和 `vue-best-practices` 兜底。`--skills all` 只选择可安装项，不会绕过
+非官方 Skill 的许可证限制。
+只需要 AgentRelay 基础能力时使用：
+
+```bash
+python3 install.py --targets codex --no-skills
+```
 
 ### 4. 配置一个外援
 
@@ -176,8 +227,8 @@ Codex 用户可以在终端检查 Hook 是否加载：
 把这个按钮文字从“保存”改成“保存修改”，只改这个文件。
 ```
 
-清晰、局部、低风险的小改通常走 `light` 工作档，不显示用户确认卡。Hook 仍会要求主 Agent
-在第一次写入前记录工作档，防止绕过审计基线。
+清晰、局部、低风险的小改通常走 `light` 工作档，不显示用户确认卡。Hook 会自动记录
+`light` 并允许首次写入，不需要主 Agent 或用户额外运行选档命令。
 
 ### 复杂修改
 
@@ -213,6 +264,10 @@ Codex 用户可以在终端检查 Hook 是否加载：
 Fusion 适合测试日志、批量阅读、跨文件搜索、独立复现和边界明确的局部实现。它默认只读，
 写文件和执行命令需要明确切换到 `coding`。
 
+Hook 只负责本地门禁、确认卡和修改摘要，不会主动提醒或调用 Fusion，也不会因为 Fusion
+超时阻塞本轮回复。Fusion 由主 Agent 在明确适合的任务中主动调用；一次超时后，当前会话
+会打开熔断，后续自动调用直接跳过，只有显式 `retry` 才重新尝试。
+
 ### 让 Commander 分工
 
 可以明确提出：
@@ -243,7 +298,7 @@ $agent-image /path/to/screenshot.png
 | 场景 | 是否建卡 | 说明 |
 |---|---|---|
 | 普通问答、解释、搜索、只读检查 | 不建卡 | 不写文件，也不建立交付审计 |
-| 清晰、局部、低风险的小改 | 默认不出用户卡 | 使用 `light` 工作档，仍记录审计基线 |
+| 清晰、局部、低风险的小改 | 默认不出用户卡 | Hook 自动记录 `light` 工作档和审计基线 |
 | 普通实现需要明确范围和验收 | 可能出卡 | Hook 给出最低工作档，主 Agent 选择具体档位 |
 | 跨文件、共享组件、高风险、参考图驱动 | 出卡 | 通常至少为 `strict` |
 | 用户要求完整审查、全量回归、逐项核对 | 出卡 | 使用 `user_required`，不能自行降档 |
@@ -304,8 +359,9 @@ scripts/approval_policy.py set standard
 
 ### 工作档
 
-工作档由主 Agent 在每次实际写任务开始前选择，Hook 会给出最低档。Agent 可以选更高档，
-不能自行降档。
+`light` 写任务由 Hook 自动记录，普通小改不需要额外命令。需要 `standard`、`strict` 或
+`user_required` 时，由主 Agent 在首次写入前选择；Hook 会给出最低档，Agent 可以选更高档，
+不能自行降档。用户不需要手动选择工作档或运行内部命令。
 
 | 工作档 | 用于什么任务 | 用户是否看到卡 |
 |---|---|---|
@@ -425,6 +481,8 @@ Fusion 默认开启，但不会自己猜 Provider。必须明确选择，例如�
 - `FUSION_DISABLED`：Fusion 已关闭。
 - `COMMANDER_ACTIVE`：Commander 正在运行，Fusion 按设计暂停。
 - `FUSION_PROVIDER_BUSY`：Provider 满载，排队超时。
+- `FUSION_PROVIDER_TIMEOUT`：Provider 在限定时间内没有返回。当前会话暂停自动调用，
+  显式重试时才恢复。
 
 ### Provider 一直排队
 
@@ -496,41 +554,36 @@ Agent 完成。
 ```text
 
   📝 本次修改：
-    修复了登录超时问题，并补充了覆盖该场景的回归测试。
-
-    涉及到的文件：
-      · 登录超时修复：
-        src/login.py
-      · 回归测试：
-        tests/test_login.py
+    修复了登录超时的问题。现在会话过期后会自动回到登录页，并补上了对应的回归测试。
 
   🕘 上次修改：
-    补充了安装说明和常见问题。
-
-    涉及到的文件：
-      · 新手安装文档：
-        README.md
+    补充了安装步骤和常见问题，第一次使用的人可以照着说明完成配置。
 ```
 
-开头会保留一个空行。`📝 本次修改` 和 `🕘 上次修改` 标题缩进两格，正文缩进四格并单独
-换行；正文超过约 68 列显示宽度时会自动折行，中文按双宽计算。两组之间空一行，不使用
-分隔线。没有历史时显示 `🕘 上次修改：` 标题，正文为“暂无记录”。之后最多保留和显示
-两条，不显示“上上次修改”。纯问答、只读搜索、危险命令被拦截或交付审计尚未通过时都
-不会记账，也不会反复刷屏。
+开头保留一个空行。`📝 本次修改` 和 `🕘 上次修改` 是两个清楚的标题，每个标题下面只有
+一段大白话，两段之间空一行。正文超过约 68 列显示宽度时会自动折行，中文按双宽计算，
+续行缩进四格。输出不显示文件清单、测试数量、内部脚本名或技术日志；这些信息仍会保存在
+历史 JSON 中，方便排查，但不会挤在 Hook 提示里。没有上一条记录时显示“暂无记录”，之后
+最多保留和显示两条，不显示“上上次修改”。纯问答、只读搜索、危险命令被拦截或交付审计
+尚未通过时都不会记账，也不会反复刷屏。
 
 真实写文件后，Agent 应在最终回复前主动登记摘要和文件用途分组：
 
 ```bash
 python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" change-summary \
-  --summary "修复了登录超时问题，并补充了回归测试。" \
+  --summary "修复了登录超时问题。现在会话过期会自动回到登录页，并补上了对应测试。" \
   --file-group "登录超时修复=src/login.py" \
   --file-group "回归测试=tests/test_login.py"
 ```
 
-`--summary` 要写本轮实际完成了什么，不能只复述用户请求。`--file-group` 可以重复，格式是
-“修改目的=文件1,文件2”。Hook 只接受本轮真实成功写过的文件；漏掉的文件会归入“其他文件”。
-如果 Agent 没有登记真实摘要，输出会明确显示“未记录具体修改说明”，不会用用户原话冒充结果。
-当前会话可自动识别；需要指定时再加 `--session <session-id>`。
+`--summary` 只写用户能直接看懂的结果：哪里变了、现在有什么不同、是否补了测试。不要复述
+用户请求，也不要写文件路径、测试数量、`JSONL`、`trace`、HTTP 状态码或内部函数名，
+除非这些内容本身就是用户要的结果。推荐用一小段话说明，不要堆技术要点。
+
+`--file-group` 只用于历史追溯，可以重复，格式是“修改目的=文件1,文件2”。Hook 仍会校验
+文件是否属于本轮真实写入，但不会把它打印到控制台。如果 Agent 没有登记真实摘要，输出会
+明确显示“未记录具体修改说明”，不会用用户原话冒充结果。当前会话可自动识别；需要指定时
+再加 `--session <session-id>`。
 
 历史按“工作区 + Agent”隔离，保存在：
 
@@ -575,6 +628,9 @@ AgentRelay 把重流程放在按需读取的 reference 中，由任务复杂度�
 | `skills/agent-relay/` | 主协作规则和按需流程 reference |
 | `skills/agent-fusion/` | Fusion 使用规则 |
 | `skills/agent-image/` | 图片识别中继规则 |
+| `skills/catalog/vuejs-ai/` | 固定 commit、带 MIT 许可和校验指纹的 Vue.js AI Skill 快照 |
+| `skills/catalog/agentrelay/` | AgentRelay 自有的 MIT Browser Automation Skill 包 |
+| `scripts/skill_catalog.py` | 本机 Skill 发现、官方 Skill 下载与内容校验 |
 | `tests/` | 正式自动化测试，不是临时演示垃圾 |
 | `runtime/` | 本地运行数据，默认被 Git 忽略 |
 

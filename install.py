@@ -50,7 +50,13 @@ SKILL_FILES = ("SKILL.md",)
 IMAGE_SKILL_FILES = ("SKILL.md",)
 IMAGE_SCRIPT_FILES = ("agent_image.py",)
 FUSION_SKILL_FILES = ("SKILL.md",)
-FUSION_SCRIPT_FILES = ("agent_fusion.py", "fusion_mode.py", "fusion_runner.py")
+FUSION_SCRIPT_FILES = (
+    "agent_fusion.py",
+    "fusion_mode.py",
+    "fusion_assist.py",
+    "fusion_runner.py",
+    "fusion_trace.py",
+)
 SCRIPT_FILES = (
     "agent_relay.py",
     "agent_relay_login.py",
@@ -89,6 +95,7 @@ SCRIPT_FILES = (
     "verify_page.py",
     "visual_review.py",
     "verification_state.py",
+    "skill_catalog.py",
     "generic_web_adapter.py",
     "diagnose_web_provider.py",
     "agent_relay_archive.py",
@@ -96,6 +103,7 @@ SCRIPT_FILES = (
     "fusion_mode.py",
     "fusion_runner.py",
     "fusion_assist.py",
+    "fusion_trace.py",
 )
 CONFIG_FILES = ("model_registry.json",)
 REFERENCE_FILES = (
@@ -214,15 +222,64 @@ def install_files() -> None:
         )
 
 
+def load_skill_catalog() -> dict:
+    """Load the bundled, checksum-verified Skill catalog."""
+
+    try:
+        from scripts import skill_catalog
+
+        return skill_catalog.load_catalog(PROJECT_ROOT)
+    except (ImportError, ValueError) as exc:
+        raise InstallError(f"无法加载内置 Skill 目录：{exc}") from exc
+
+
+def skill_roots_for_targets(
+    target_ids: list[str] | None = None,
+) -> dict[str, Path]:
+    """Return the Skill root for each selected Agent."""
+
+    from scripts import agent_targets as at
+
+    registry = at.agent_targets()
+    ids = list(target_ids) if target_ids else list(registry)
+    roots: dict[str, Path] = {}
+    for target_id in ids:
+        meta = registry.get(target_id)
+        if meta is None:
+            continue
+        roots[str(meta["label"])] = Path(meta["skill_dir"]).parent
+    return roots
+
+
+def load_install_skill_catalog(target_ids: list[str] | None = None) -> dict:
+    """Load installed Skills plus the bundled Vue catalog fallback."""
+
+    try:
+        from scripts import skill_catalog
+
+        return skill_catalog.catalog_with_installed_skills(
+            PROJECT_ROOT, skill_roots_for_targets(target_ids)
+        )
+    except (ImportError, ValueError, OSError) as exc:
+        raise InstallError(f"无法扫描本机 Skill：{exc}") from exc
+
+
 def validate_publish_tree() -> None:
     """Refuse to package credentials, browser state, or runtime data."""
+    from scripts import skill_catalog
+
+    excluded_skill_ids = {
+        skill_id.lower() for skill_id in skill_catalog.EXCLUDED_SKILL_IDS
+    }
     for path in PROJECT_ROOT.rglob("*"):
         if not path.is_file():
             continue
-        relative_parts = set(path.relative_to(PROJECT_ROOT).parts)
+        relative_parts = {
+            part.lower() for part in path.relative_to(PROJECT_ROOT).parts
+        }
         if relative_parts & PUBLISH_BLOCKLIST or any(
             token in path.name.lower() for token in ("cookie", "session_bindings", "login_state")
-        ):
+        ) or relative_parts & excluded_skill_ids:
             raise InstallError(f"发布目录包含禁止安装的敏感文件：{path}")
 
 
@@ -438,9 +495,14 @@ def check_base_environment() -> None:
         print(f"[{'正常' if detected else '提示'}] {meta['label']}：{mark}")
 
 
-def apply_agent_targets(target_ids: list[str]) -> tuple[dict, dict]:
-    """按用户选择的目标安装 Skill、注册 Hook 并逐项验证。"""
+def _apply_agent_targets_loop(
+    target_ids: list[str],
+    skill_ids: list[str],
+    catalog: dict,
+    archive_source: Path | None = None,
+) -> tuple[dict, dict]:
     from scripts import agent_targets as at
+    from scripts import skill_catalog
 
     registry = at.agent_targets()
     results: dict[str, list[dict]] = {}
@@ -499,13 +561,61 @@ def apply_agent_targets(target_ids: list[str]) -> tuple[dict, dict]:
                     Path(fusion_meta["skill_dir"]) / "scripts" / "agent_fusion.py",
                 )
                 print(f"[{'生成' if changed else '保留'}] {meta['config_path']}")
-            results[target_id] = at.verify_target(
+            checks = at.verify_target(
                 target_id, meta, VENV_PYTHON,
                 TARGET_HOOKS / "agent_relay_hook.py",
                 shim_path,
                 TARGET_HOOKS / "agent_relay_tracker.py",
                 PROJECT_ROOT,
             )
+            for skill_id in skill_ids:
+                destination = at.install_catalog_skill_to(
+                    meta,
+                    PROJECT_ROOT,
+                    skill_id,
+                    catalog=catalog,
+                    archive_source=archive_source,
+                )
+                entry = skill_catalog.catalog_skill_entry(catalog, skill_id)
+                skill_file = destination / "SKILL.md"
+                skill_ok = (
+                    skill_file.is_file()
+                    and not skill_file.is_symlink()
+                )
+                if entry.get("install_method") == skill_catalog.OFFICIAL_DOWNLOAD_METHOD:
+                    license_path = destination / "LICENSE.txt"
+                    skill_ok = (
+                        skill_ok
+                        and license_path.is_file()
+                        and not license_path.is_symlink()
+                    )
+                    check_name = f"官方 Skill：{skill_id}"
+                    reason = (
+                        "需要从 Anthropic 官方固定提交独立下载并安装 "
+                        "SKILL.md 和 Apache-2.0 LICENSE.txt"
+                    )
+                elif entry.get("source_type") == skill_catalog.BUNDLED_SOURCE:
+                    license_path = destination / "LICENSE"
+                    skill_ok = (
+                        skill_ok
+                        and license_path.is_file()
+                        and not license_path.is_symlink()
+                    )
+                    check_name = f"内置 Skill：{skill_id}"
+                    reason = "需要同时安装 SKILL.md 和随包许可证"
+                elif entry.get("source_type") == skill_catalog.INSTALLED_SOURCE:
+                    check_name = f"本机 Skill：{skill_id}"
+                    reason = "需要安全安装 SKILL.md，并保留原 Skill 目录"
+                else:
+                    check_name = f"Skill：{skill_id}"
+                    reason = "需要安装完整的 Skill 目录"
+                checks.append({
+                    "name": check_name,
+                    "ok": skill_ok,
+                    "detail": str(destination),
+                    "reason": reason,
+                })
+            results[target_id] = checks
             failed_checks = [
                 f"{check['name']}：{check['detail']}"
                 for check in results[target_id]
@@ -516,6 +626,57 @@ def apply_agent_targets(target_ids: list[str]) -> tuple[dict, dict]:
         except (at.TargetError, OSError) as exc:
             errors[target_id] = str(exc)
     return results, errors
+
+
+def apply_agent_targets(
+    target_ids: list[str],
+    selected_skills: list[str] | None = None,
+) -> tuple[dict, dict]:
+    """按用户选择的目标安装 Skill、注册 Hook 并逐项验证。"""
+    from scripts import skill_catalog
+
+    catalog = load_install_skill_catalog(target_ids)
+    skill_ids = (
+        skill_catalog.default_skill_ids(catalog)
+        if selected_skills is None
+        else skill_catalog.normalize_skill_ids(catalog, selected_skills)
+    )
+    official_skill_ids = [
+        skill_id
+        for skill_id in skill_ids
+        if skill_catalog.catalog_skill_entry(catalog, skill_id).get(
+            "install_method"
+        )
+        == skill_catalog.OFFICIAL_DOWNLOAD_METHOD
+    ]
+    if not official_skill_ids:
+        return _apply_agent_targets_loop(target_ids, skill_ids, catalog)
+
+    with tempfile.TemporaryDirectory(
+        prefix="agentrelay-official-skills-"
+    ) as directory:
+        try:
+            archive_source = skill_catalog.download_official_archive(
+                Path(directory) / "anthropics-skills.tar.gz"
+            )
+        except skill_catalog.CatalogError as exc:
+            detail = f"官方 Skill 下载失败：{exc}"
+            return {}, {target_id: detail for target_id in target_ids}
+        try:
+            for skill_id in official_skill_ids:
+                with skill_catalog.official_skill_source(
+                    skill_id, archive_source=archive_source
+                ):
+                    pass
+        except skill_catalog.CatalogError as exc:
+            detail = f"官方 Skill 校验失败：{exc}"
+            return {}, {target_id: detail for target_id in target_ids}
+        return _apply_agent_targets_loop(
+            target_ids,
+            skill_ids,
+            catalog,
+            archive_source=archive_source,
+        )
 
 
 def ensure_virtualenv() -> None:
@@ -1004,6 +1165,88 @@ def choose_install_targets() -> tuple[list[str], str]:
                 checked.add(target_id)
 
 
+def choose_install_skills(
+    catalog: dict | None = None,
+    target_ids: list[str] | None = None,
+) -> list[str]:
+    """Use a numbered checklist to select installed and bundled Skills."""
+
+    from scripts import skill_catalog
+
+    catalog = catalog or load_install_skill_catalog(target_ids)
+    entries = list(catalog["skills"])
+    ids = [str(entry["id"]) for entry in entries]
+    checked = set(skill_catalog.default_skill_ids(catalog))
+
+    while True:
+        installed_count = int(catalog.get("installed_count") or 0)
+        print(
+            f"\n开发 Skills（本机已装 {installed_count} 个 + "
+            "Anthropic 官方下载 + AgentRelay/Vue 内置）："
+        )
+        print("  输入编号切换勾选 · 回车 = 确认 · 0/none = 不安装")
+        for index, entry in enumerate(entries, 1):
+            installable = skill_catalog.skill_is_installable(entry)
+            mark = "[x]" if installable and entry["id"] in checked else "[ ]"
+            official = (
+                entry.get("install_method")
+                == skill_catalog.OFFICIAL_DOWNLOAD_METHOD
+            )
+            if official:
+                hosts = "/".join(entry.get("installed_in") or [])
+                origin = (
+                    f"官方下载；本机 {hosts} 已存在，不复制"
+                    if hosts
+                    else "Anthropic 官方下载"
+                )
+            elif entry.get("source_type") == skill_catalog.INSTALLED_SOURCE:
+                hosts = "/".join(entry.get("installed_in") or [])
+                origin = f"本机 {hosts}" if hosts else "本机"
+            else:
+                origin = "内置"
+            version = f" v{entry['version']}" if entry.get("version") else ""
+            unavailable = (
+                f" [不可复制：{entry.get('restriction') or '许可证限制'}]"
+                if not installable
+                else ""
+            )
+            print(
+                f"{mark} {index}. {entry['name']}{version} "
+                f"[{origin}] — {entry['description']}{unavailable}"
+            )
+        raw = input("> ").strip().lower()
+        if raw == "":
+            return [skill_id for skill_id in ids if skill_id in checked]
+        if raw in {"0", "none"}:
+            return []
+        if raw == "all":
+            return [
+                skill_id
+                for skill_id in ids
+                if skill_catalog.skill_is_installable(
+                    skill_catalog.catalog_skill_entry(catalog, skill_id)
+                )
+            ]
+        for token in raw.replace("，", ",").split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                skill_id = ids[int(token) - 1]
+            except (ValueError, IndexError):
+                print(f"忽略无效编号：{token}")
+                continue
+            entry = skill_catalog.catalog_skill_entry(catalog, skill_id)
+            if not skill_catalog.skill_is_installable(entry):
+                restriction = entry.get("restriction") or "许可证限制"
+                print(f"不能安装这个 Skill：{skill_id}（{restriction}）")
+                continue
+            if skill_id in checked:
+                checked.discard(skill_id)
+            else:
+                checked.add(skill_id)
+
+
 def prompt_reinstall_filter(selected: list[str]) -> list[str]:
     """已接入的目标默认重装（覆盖），用户可改为跳过或逐个选择。"""
     from scripts import agent_targets as at
@@ -1042,7 +1285,10 @@ def print_verify_results(results: dict, errors: dict) -> None:
         print(f"\n{target_id} 安装失败：{message}")
 
 
-def initialize_configuration(selected_targets: list[str] | None = None) -> None:
+def initialize_configuration(
+    selected_targets: list[str] | None = None,
+    selected_skills: list[str] | None = None,
+) -> None:
     config, save_config = _load_local_config()
     print("\nAgentRelay 初始化向导")
     print("1. 安装离线基础能力：Hook、Skill、Tracker、确认卡和本地规则。")
@@ -1050,17 +1296,23 @@ def initialize_configuration(selected_targets: list[str] | None = None) -> None:
     if selected_targets is None:
         selected_targets, action = choose_install_targets()
         skip_install = action == "web"
+        if not skip_install:
+            selected_skills = choose_install_skills(target_ids=selected_targets)
+    elif selected_skills is None:
+        selected_skills = choose_install_skills(target_ids=selected_targets)
     selected_targets = list(selected_targets)
     if skip_install:
         print("已跳过安装（你选择了只打开网页配置）。")
     else:
         install_list = prompt_reinstall_filter(selected_targets)
         if install_list:
-            results, errors = apply_agent_targets(install_list)
+            results, errors = apply_agent_targets(install_list, selected_skills)
             print_verify_results(results, errors)
         else:
             print("没有需要安装的目标，跳过安装（已接入的部分保持原样）。")
     config["install_targets"] = selected_targets
+    if not skip_install:
+        config["install_skills"] = selected_skills
     if _yes_no("现在配置默认 DeepSeek 网页模型", True):
         _configure_web(config)
     else:
@@ -1120,7 +1372,10 @@ def print_next_steps() -> None:
     print("     使其重新加载 Hook 配置。")
 
 
-def run_chinese_menu(selected_targets: list[str] | None = None) -> None:
+def run_chinese_menu(
+    selected_targets: list[str] | None = None,
+    selected_skills: list[str] | None = None,
+) -> None:
     """显示中文安装菜单；适合用户直接运行 install.py。"""
     while True:
         print("\n" + "=" * 56)
@@ -1136,7 +1391,7 @@ def run_chinese_menu(selected_targets: list[str] | None = None) -> None:
             print("已退出，配置仍保存在本机。")
             return
         if choice == "1":
-            initialize_configuration(selected_targets)
+            initialize_configuration(selected_targets, selected_skills)
         elif choice == "2":
             config, save_config = _load_local_config()
             configure_commander(config)
@@ -1282,6 +1537,8 @@ def run_web_configurator() -> None:
 
     def public_config() -> dict:
         from scripts import agent_targets as at
+        from scripts import skill_catalog
+
         result = json.loads(json.dumps(config, ensure_ascii=False))
         result["config_path"] = str(TARGET_SKILL / "config" / "agentrelay-config.json.enc")
         registry = at.agent_targets()
@@ -1300,6 +1557,19 @@ def run_web_configurator() -> None:
         }
         result["unsupported_agents"] = list(at.UNSUPPORTED_AGENTS)
         result["install_targets"] = config.get("install_targets") or ["codex"]
+        catalog = load_install_skill_catalog(list(registry))
+        result["skill_catalog"] = skill_catalog.public_catalog(catalog)
+        stored_skills = config.get("install_skills")
+        if stored_skills is None:
+            result["install_skills"] = skill_catalog.default_skill_ids(catalog)
+        else:
+            if isinstance(stored_skills, str):
+                stored_skills = [stored_skills]
+            if not isinstance(stored_skills, list):
+                raise ValueError("install_skills 必须是 Skill ID 数组")
+            result["install_skills"] = skill_catalog.reconcile_skill_ids(
+                catalog, stored_skills
+            )
         for item in result.get("web_providers", []):
             if isinstance(item, dict) and item.get("id"):
                 item["adapter"] = adapter_flag(str(item["id"]))
@@ -1441,6 +1711,7 @@ def run_web_configurator() -> None:
         def do_POST(self):
             try:
                 if self.path == "/api/close": stopped.set();self._send({"ok":True});return
+                data=self._body()
                 if self.path == "/api/environment":
                     configured_path = str((config.get("commander") or {}).get("terminal_path") or "").strip()
                     terminal_ok, terminal_detail = commander_terminal_status(configured_path)
@@ -1475,17 +1746,26 @@ def run_web_configurator() -> None:
                     ids=data.get("targets")
                     if not isinstance(ids,list) or not ids: raise ValueError("请选择至少一个目标 Agent")
                     from scripts import agent_targets as at
+                    from scripts import skill_catalog
                     registry=at.agent_targets()
                     invalid=[x for x in ids if not isinstance(x,str) or x not in registry]
                     if invalid: raise ValueError("未知目标："+", ".join(map(str,invalid)))
                     ids=[str(x) for x in ids]
                     if "codex" not in ids: ids=["codex",*ids]
-                    results,errors=apply_agent_targets(ids)
+                    catalog=load_install_skill_catalog(ids)
+                    raw_skills=data.get("skills", config.get("install_skills"))
+                    if raw_skills is None:
+                        skill_ids=skill_catalog.default_skill_ids(catalog)
+                    else:
+                        if not isinstance(raw_skills,list):
+                            raise ValueError("skills 必须是 Skill ID 数组")
+                        skill_ids=skill_catalog.normalize_skill_ids(catalog,raw_skills)
+                    results,errors=apply_agent_targets(ids,skill_ids)
                     config["install_targets"]=ids
+                    config["install_skills"]=skill_ids
                     save_config(config,CODEX_HOME)
                     self._send({"results":results,"errors":errors,"config":public_config()});return
                 if self.path == "/api/scan-local": self._send({"found":_scan_local_services()});return
-                data=self._body()
                 if self.path == "/api/settings":
                     incoming=data.get("commander",{})
                     if isinstance(incoming,dict):
@@ -1585,6 +1865,17 @@ def main(argv=None) -> int:
         default="",
         help="非交互安装到指定 Agent，逗号分隔，例如 codex,claude,pi,hermes",
     )
+    skill_group = parser.add_mutually_exclusive_group()
+    skill_group.add_argument(
+        "--skills",
+        default="",
+        help="安装指定开发 Skill，逗号分隔；all 表示全部；默认本机已装项加 Vue 兜底",
+    )
+    skill_group.add_argument(
+        "--no-skills",
+        action="store_true",
+        help="不安装额外开发 Skill",
+    )
     parser.add_argument("--install-daemon", action="store_true", help="生成后台服务配置")
     parser.add_argument("--register-daemon", action="store_true", help="注册已生成的后台服务")
     args = parser.parse_args(argv)
@@ -1600,11 +1891,23 @@ def main(argv=None) -> int:
         and sys.stdin.isatty()
     )
     selected_targets: list[str] = []
+    selected_skills: list[str] = []
     target_action = "install"
     if interactive_config:
         # 一打开就先让用户用 [x] 清单选择安装目标，再进入安装流程。
         selected_targets, target_action = choose_install_targets()
+        if target_action == "install":
+            selected_skills = choose_install_skills(target_ids=selected_targets)
     try:
+        from scripts import skill_catalog
+
+        target_ids = [
+            token.strip() for token in args.targets.split(",") if token.strip()
+        ]
+        catalog = load_install_skill_catalog(target_ids or ["codex"])
+        cli_skills = skill_catalog.selection_from_cli(
+            catalog, args.skills, args.no_skills
+        )
         validate_publish_tree()
         check_base_environment()
         ensure_virtualenv()
@@ -1612,9 +1915,6 @@ def main(argv=None) -> int:
         install_and_verify_chromium()
         install_files()
         merge_hooks_json()
-        target_ids = [
-            token.strip() for token in args.targets.split(",") if token.strip()
-        ]
         if target_ids:
             from scripts import agent_targets as at
             unknown = [x for x in target_ids if x not in at.agent_targets()]
@@ -1622,9 +1922,10 @@ def main(argv=None) -> int:
                 raise InstallError(f"未知目标 Agent：{', '.join(unknown)}")
             if "codex" not in target_ids:
                 target_ids.insert(0, "codex")
-            results, errors = apply_agent_targets(target_ids)
+            results, errors = apply_agent_targets(target_ids, cli_skills)
             config, save_config = _load_local_config()
             config["install_targets"] = target_ids
+            config["install_skills"] = cli_skills
             save_config(config, CODEX_HOME)
             print_verify_results(results, errors)
             if errors:
@@ -1633,12 +1934,13 @@ def main(argv=None) -> int:
             # 已接入的目标默认重装；用户可选择跳过或逐个确认
             install_list = prompt_reinstall_filter(selected_targets)
             if install_list:
-                results, errors = apply_agent_targets(install_list)
+                results, errors = apply_agent_targets(install_list, selected_skills)
                 print_verify_results(results, errors)
             else:
                 print("没有需要安装的目标，跳过安装（已接入的部分保持原样）。")
             config, save_config = _load_local_config()
             config["install_targets"] = selected_targets
+            config["install_skills"] = selected_skills
             save_config(config, CODEX_HOME)
         elif interactive_config:
             # 用户输入 web/0 选择只开网页：完全不打扰安装流程
@@ -1653,7 +1955,7 @@ def main(argv=None) -> int:
         if interactive_config:
             # 目标已选定并验证；网页配置中心负责后续的模型登录与 Provider 配置。
             if args.menu:
-                run_chinese_menu(selected_targets)
+                run_chinese_menu(selected_targets, selected_skills)
             else:
                 if selected_targets and target_action == "install":
                     print("\n正在打开配置网页（模型登录等后续配置在页面中完成）。")

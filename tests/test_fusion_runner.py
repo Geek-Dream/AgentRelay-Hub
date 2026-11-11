@@ -20,6 +20,7 @@ import agent_fusion  # noqa: E402
 import config_manager  # noqa: E402
 import fusion_mode  # noqa: E402
 import fusion_runner  # noqa: E402
+import fusion_trace  # noqa: E402
 
 
 def chat_response(content="", tool_calls=None):
@@ -214,6 +215,38 @@ class FusionRunnerTests(unittest.TestCase):
         self.assertEqual(result["tools_used"][0]["tool"], "read_file")
         self.assertTrue(result["tools_used"][0]["ok"])
         self.assertIn("fusion evidence", requests[1]["messages"][-1]["content"])
+
+    def test_trace_records_model_and_tool_stages_without_prompt(self):
+        (self.workspace / "README.md").write_text("trace evidence\n", encoding="utf-8")
+        trace_path = self.root / "logs" / "fusion-trace.jsonl"
+        environ = {
+            fusion_trace.TRACE_PATH_ENV: str(trace_path),
+            fusion_trace.TRACE_ID_ENV: "runner-trace",
+            fusion_trace.TRACE_SESSION_ENV: "session-a",
+        }
+        responses = [
+            chat_response(tool_calls=[tool_call("read_file", {"path": "README.md"})]),
+            chat_response("finished with trace"),
+        ]
+
+        result = self.run_sidekick(
+            lambda _messages, _tools, _timeout: responses.pop(0),
+            environ=environ,
+        )
+
+        self.assertEqual(result["status"], "success")
+        events = fusion_trace.recent_events(trace_path, "runner-trace")
+        stages = [item["stage"] for item in events]
+        self.assertIn("session_lock_wait", stages)
+        self.assertIn("session_lock_acquired", stages)
+        self.assertIn("model_request", stages)
+        self.assertIn("model_response_received", stages)
+        self.assertIn("tool_read_file", stages)
+        self.assertIn("tool_complete", stages)
+        self.assertIn("runner_complete", stages)
+        self.assertIn("runner_finished", stages)
+        stored = trace_path.read_text(encoding="utf-8")
+        self.assertNotIn("delegated task", stored)
 
     def test_step_limit_stops_runaway_tool_loop(self):
         def model(_messages, _tools, _timeout):

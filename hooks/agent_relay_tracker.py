@@ -2581,18 +2581,36 @@ def _fallback_change_file_group(path):
     normalized = str(path or "").replace("\\", "/").lstrip("./")
     lower = normalized.lower()
     if lower.startswith("tests/") or "/__tests__/" in lower:
-        return "测试"
+        return "自动测试"
     if lower.startswith("hooks/"):
-        return "Hook"
+        return "写入逻辑检查"
     if lower.startswith("scripts/"):
-        return "脚本"
+        return "运行脚本"
     if lower.startswith("skills/"):
-        return "Skill 文档"
+        return "Agent 使用说明"
     if lower == "readme.md" or lower.startswith("docs/") or lower.endswith(".md"):
-        return "文档"
+        return "使用说明"
     if lower.startswith("src/") or lower.startswith("app/"):
-        return "源代码"
-    return "其他文件"
+        return "页面代码"
+    return "其他改动"
+
+
+CHANGE_FILE_GROUP_LABELS = {
+    "测试": "自动测试",
+    "Hook": "写入逻辑检查",
+    "脚本": "运行脚本",
+    "Skill 文档": "Agent 使用说明",
+    "文档": "使用说明",
+    "源代码": "页面代码",
+    "其他文件": "其他改动",
+}
+
+
+def _friendly_change_file_group(label):
+    """Translate labels saved by older releases into plain-language names."""
+
+    text = _clip_card_text(label, 80)
+    return CHANGE_FILE_GROUP_LABELS.get(text, text)
 
 
 def default_change_file_groups(files):
@@ -2674,11 +2692,11 @@ def normalize_change_file_groups(file_groups, files, workspace=None, strict=Fals
     remaining = [path for path in allowed_files if path not in grouped_files]
     if remaining and (result or strict):
         existing = next(
-            (item for item in result if item.get("label") == "其他文件"),
+            (item for item in result if item.get("label") == "其他改动"),
             None,
         )
         if existing is None:
-            result.append({"label": "其他文件", "files": remaining})
+            result.append({"label": "其他改动", "files": remaining})
         else:
             existing["files"].extend(remaining)
     return result
@@ -2720,6 +2738,78 @@ def build_change_summary(tracking, assistant_message=None):
     """Return the truthful completion text stored in change history."""
 
     return build_change_entry(tracking, assistant_message)["summary"]
+
+
+def _clean_change_history_summary(value):
+    """Remove formatting debris left by earlier summary implementations."""
+
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+    text = re.sub(r"```[A-Za-z0-9_+.-]*", "\n", text)
+    text = re.sub(r"`{3,}", "\n", text)
+    text = re.sub(
+        r"(?:按用户需求|按需求)[“\"].*?[”\"][ \t]*[:：]?[ \t]*",
+        "\n",
+        text,
+        flags=re.DOTALL,
+    )
+    text = re.sub(
+        r"(?:[📝🕘][ \t]*)?(?:本次|上次|上上次)修改[ \t]*[:：][ \t]*",
+        "\n",
+        text,
+    )
+    text = re.sub(r"[ \t\f\v]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"([，。！？；：、])[ \t]+", r"\1", text)
+    return text.strip(" \n:：")
+
+
+def _change_history_summary_segments(value):
+    """Split legacy summaries at natural sentence and line boundaries."""
+
+    cleaned = _clip_card_text(
+        _clean_change_history_summary(value),
+        limit=220,
+    )
+    if not cleaned:
+        return []
+    segments = []
+    for line in cleaned.splitlines():
+        line = re.sub(r"^(?:[-*+•]\s+|\d+[.)、]\s*)", "", line.strip())
+        if not line:
+            continue
+        for segment in re.split(r"(?<=[。！？!?；;])\s*", line):
+            segment = segment.strip().rstrip("；;").strip()
+            if segment:
+                segments.append(segment)
+    return segments
+
+
+def _change_history_summary_lines(value):
+    """Render one plain-language paragraph instead of a technical change log."""
+
+    segments = _change_history_summary_segments(value)
+    if not segments:
+        return ["    未记录具体修改说明"]
+
+    paragraph = ""
+    for segment in segments:
+        segment = segment.rstrip("；;")
+        if paragraph and not re.search(r"[。！？!?]$", paragraph):
+            paragraph += "；"
+        paragraph += segment
+    if not re.search(r"[。！？!?]$", paragraph):
+        paragraph += "。"
+    body_lines = _wrap_change_history_text(
+        paragraph,
+        width=max(36, CHANGE_HISTORY_TEXT_WIDTH - 4),
+        limit=220,
+    )
+    return [f"    {body_lines[0]}"] + [
+        f"    {line}" for line in body_lines[1:]
+    ]
 
 
 def _wrap_change_history_text(value, width=None, limit=220):
@@ -2766,60 +2856,18 @@ def _wrap_change_history_text(value, width=None, limit=220):
 
 
 def render_change_history(entries):
-    """Render two indented summaries with grouped changed-file details."""
+    """Render the latest two changes as short paragraphs for the user."""
 
     labels = ("📝 本次修改", "🕘 上次修改")
     blocks = []
     for index, label in enumerate(labels):
         entry = entries[index] if index < len(entries) else None
-        summary = (
-            _clip_card_text(entry.get("summary"), 220)
-            if isinstance(entry, dict)
-            else ""
-        )
         lines = [f"  {label}："]
-        lines.extend(
-            f"    {line}"
-            for line in _wrap_change_history_text(summary)
-        )
-        file_groups = (
-            normalize_change_file_groups(
-                entry.get("file_groups") or [],
-                entry.get("changed_files") or [],
-                workspace=entry.get("workspace"),
-            )
-            if isinstance(entry, dict)
-            else []
-        )
-        if not file_groups and isinstance(entry, dict):
-            file_groups = default_change_file_groups(
-                entry.get("changed_files") or []
-            )
-        if file_groups:
-            lines.extend(["", "    涉及到的文件："])
-            for group in file_groups:
-                group_label = _clip_card_text(group.get("label"), 80)
-                group_lines = _wrap_change_history_text(
-                    group_label,
-                    width=CHANGE_HISTORY_TEXT_WIDTH - 10,
-                    limit=80,
-                )
-                lines.append(f"      · {group_lines[0]}：")
-                lines.extend(
-                    f"        {continuation}"
-                    for continuation in group_lines[1:]
-                )
-                for path in group.get("files") or []:
-                    path_lines = _wrap_change_history_text(
-                        path,
-                        width=CHANGE_HISTORY_TEXT_WIDTH - 8,
-                        limit=500,
-                    )
-                    lines.append(f"        {path_lines[0]}")
-                    lines.extend(
-                        f"        {continuation}"
-                        for continuation in path_lines[1:]
-                    )
+        if not isinstance(entry, dict):
+            lines.append("    暂无记录")
+            blocks.append("\n".join(lines))
+            continue
+        lines.extend(_change_history_summary_lines(entry.get("summary")))
         blocks.append("\n".join(lines))
     return "\n" + "\n\n".join(blocks)
 
@@ -3263,6 +3311,39 @@ def _apply_work_profile_selection(gate, requested, reason=""):
     return selected
 
 
+def _auto_record_light_profile(gate, session_id):
+    """Record the light profile for simple writes without showing an Agent command."""
+
+    work_profile = gate.get("work_profile")
+    if not isinstance(work_profile, dict) or not work_profile.get("required"):
+        return None
+    minimum = normalize_text(
+        work_profile.get("minimum") or work_profile.get("profile")
+    ).lower()
+    if minimum != "light" or work_profile.get("selection_source"):
+        return None
+    selected = dict(work_profile)
+    selected.update({
+        "profile": "light",
+        "minimum": "light",
+        "card_required": False,
+        "selection_source": "hook_auto_light",
+        "selected_at": iso_now(),
+        "selection_reason": "任务最低档为 light，Hook 自动记录轻量工作档",
+    })
+    gate["work_profile"] = selected
+    log_event(
+        "work_profile_selected",
+        {
+            "session_id": normalize_session_id(session_id),
+            "minimum": "light",
+            "profile": "light",
+            "selection_source": "hook_auto_light",
+        },
+    )
+    return selected
+
+
 def select_task_work_profile(session_id, requested, reason=""):
     """Persist an explicit profile choice for a clear, non-card write task."""
 
@@ -3295,6 +3376,7 @@ def select_task_work_profile(session_id, requested, reason=""):
             "session_id": session_id,
             "profile": selected.get("profile"),
             "minimum": selected.get("minimum"),
+            "selection_source": "agent",
         },
     )
     return {
@@ -3548,6 +3630,10 @@ def update_task_gate_for_prompt(state, prompt):
         gate["card_shown_sha256"] = None
         work_profile = gate.get("work_profile")
         if isinstance(work_profile, dict) and work_profile.get("required"):
+            if _auto_record_light_profile(
+                gate, str(state.get("session_id") or "")
+            ):
+                return ""
             minimum = work_profile.get("minimum") or work_profile.get("profile") or "light"
             tracker_path = shlex.quote(str(Path(__file__).resolve()))
             python_path = shlex.quote(sys.executable)
@@ -3555,9 +3641,9 @@ def update_task_gate_for_prompt(state, prompt):
             return (
                 "[AgentRelay 工作档]\n"
                 f"本次是实际写任务，最低工作档为 {minimum}，不会显示用户确认卡。"
-                "你必须先显式选择工作档，才能进行首次写入；可选择 light、standard、"
-                "strict、user_required，但不能低于最低档。\n"
-                f"运行：{python_path} {tracker_path} select-work-profile "
+                "请主 Agent 按任务复杂度显式选择工作档，用户无需运行命令。可选择 "
+                "standard、strict、user_required，但不能低于最低档。\n"
+                f"主 Agent 运行：{python_path} {tracker_path} select-work-profile "
                 f"--session {session_value} --profile {shlex.quote(minimum)} "
                 "--reason '主 Agent 已按任务复杂度选择工作档'"
             )
@@ -3732,6 +3818,7 @@ def evaluate_pre_tool_gate(tool_name, tool_input, session_id):
             )
         if tool_writes_files(tool_name, tool_input):
             work_profile = gate.get("work_profile")
+            auto_selected = None
             if not isinstance(work_profile, dict) or not work_profile.get("required"):
                 work_profile = {
                     "required": True,
@@ -3742,10 +3829,15 @@ def evaluate_pre_tool_gate(tool_name, tool_input, session_id):
                 }
                 gate["work_profile"] = work_profile
                 state["task_gate"] = gate
+            selection_source = work_profile.get("selection_source")
+            if selection_source not in {"agent", "hook_auto_light"}:
+                auto_selected = _auto_record_light_profile(gate, session_id)
+                work_profile = gate.get("work_profile") or {}
+                selection_source = work_profile.get("selection_source")
             if (
                 isinstance(work_profile, dict)
                 and work_profile.get("required")
-                and work_profile.get("selection_source") != "agent"
+                and selection_source not in {"agent", "hook_auto_light"}
             ):
                 minimum = (
                     work_profile.get("minimum")
@@ -3759,12 +3851,14 @@ def evaluate_pre_tool_gate(tool_name, tool_input, session_id):
                 return False, (
                     "[AgentRelay 工作档]\n"
                     f"尚未显式选择工作档，首次写入已阻断。任务最低档为 {minimum}，"
-                    "不能降档；请先运行：\n"
-                    f"{python_path} {tracker_path} select-work-profile "
+                    "不能降档。请主 Agent 按任务复杂度选择工作档，用户无需运行命令。\n"
+                    f"主 Agent 运行：{python_path} {tracker_path} select-work-profile "
                     f"--session {session_value} --profile {shlex.quote(str(minimum))} "
                     "--reason '主 Agent 已按任务复杂度选择工作档'\n"
                     "纯问答、只读搜索和只读检查不需要选档。"
                 )
+            if auto_selected:
+                write_state(state, session_id=session_id)
     finally:
         release_lock(lock)
 
@@ -6010,11 +6104,17 @@ def handle_pre_tool_use(
         if not state.get(
             "problem_active"
         ):
+            preflight_state = state
             state = create_new_problem(
                 session_id=session_id,
                 agent_id=state.get("agent_id"),
                 workspace=workspace,
             )
+            # PreToolUse may arrive without a preceding UserPromptSubmit.
+            # Keep the gate decision made immediately before this call instead
+            # of replacing it with create_new_problem() defaults.
+            if isinstance(preflight_state.get("task_gate"), dict):
+                state["task_gate"] = preflight_state["task_gate"]
 
         # UserPromptSubmit 到工具启动之间是 Agent 的主动分析/思考时间。
         accrue_active_time(state, ended_at=started_at)
@@ -7380,36 +7480,6 @@ def extract_last_assistant_message(data):
 # Hook 事件入口
 # ============================================================
 
-def fusion_assist_notice(session_id, prompt, stage):
-    """Suggest a real Fusion attempt; never pretend a reminder was a delegation."""
-    try:
-        state = read_state(session_id=session_id)
-        if state.get("task_gate", {}).get("status") == "awaiting_confirmation":
-            return ""
-        return _shared_script_module("fusion_assist").reminder(
-            CODEX_DIR, session_id, prompt, stage=stage)
-    except (ImportError, OSError, ValueError, TypeError) as exc:
-        log_event("fusion_assist_error", {"error": str(exc)})
-        return ""
-
-
-def fusion_assist_delivery(session_id, message):
-    """Require honest success/failure evidence at delivery, not a fabricated review."""
-    try:
-        module = _shared_script_module("fusion_assist")
-        state = module.read_state(CODEX_DIR, session_id)
-        if not state:
-            prompt = str(read_state(session_id=session_id).get("last_prompt") or "")
-            return module.reminder(CODEX_DIR, session_id, prompt, stage="delivery")
-        if state.get("should_notify") and state.get("notice"):
-            state["should_notify"] = False
-            module.write_state(CODEX_DIR, session_id, state)
-            return "[AgentRelay Fusion 结果]\n" + state["notice"]
-    except (ImportError, OSError, ValueError, TypeError) as exc:
-        log_event("fusion_assist_error", {"error": str(exc)})
-    return ""
-
-
 def _shared_script_module(name: str):
     """Load an installed Skill script without duplicating tracker policy."""
     import importlib
@@ -8050,7 +8120,6 @@ def handle_hook_event(
         audit_state = delivery_audit_status_request(session_id, prompt)
         if audit_state is not None:
             return audit_state
-        fusion_notice = fusion_assist_notice(session_id, prompt, "prompt")
         approval_controls = approval_controls_snapshot(
             read_state(session_id=session_id),
             prompt,
@@ -8074,8 +8143,6 @@ def handle_hook_event(
         )
         if contract_notice:
             notice = contract_notice + ("\n" + notice if notice else "")
-        if fusion_notice:
-            notice = fusion_notice + ("\n" + notice if notice else "")
         system_message = None
         gate = state.get("task_gate")
         if isinstance(gate, dict) and gate.get("status") == "awaiting_confirmation":
@@ -8159,11 +8226,6 @@ def handle_hook_event(
             contract_reason = change_contract_post_tool_block(session_id, tool_name, tool_input)
             if contract_reason:
                 emit_hook_context("PostToolUse", contract_reason)
-            else:
-                progress_notice = fusion_assist_notice(
-                    session_id, str(data.get("prompt") or read_state(session_id=session_id).get("last_prompt") or ""), "progress")
-                if progress_notice:
-                    emit_hook_context("PostToolUse", progress_notice)
         return handle_post_tool_use(
             tool_name=tool_name,
             tool_input=tool_input,
@@ -8185,8 +8247,6 @@ def handle_hook_event(
             reason = visual_review_block_reason(session_id, message)
         if not reason:
             reason = delivery_audit_completion_block(session_id, message)
-        if not reason:
-            reason = fusion_assist_delivery(session_id, message)
         if reason:
             print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False), flush=True)
             return read_state(session_id=session_id)

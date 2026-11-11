@@ -83,22 +83,28 @@ class ChangeHistoryTests(unittest.TestCase):
         self.assertEqual(lines[1], "  📝 本次修改：")
         previous_index = lines.index("  🕘 上次修改：")
         self.assertGreater(previous_index, 2)
-        self.assertTrue(lines[2:previous_index])
-        self.assertTrue(lines[previous_index + 1:])
+        current_lines = lines[2:previous_index]
+        previous_lines = lines[previous_index + 1:]
+        self.assertTrue(current_lines)
+        self.assertTrue(previous_lines)
+        self.assertEqual(current_lines[-1], "")
         self.assertTrue(
             all(
-                not line or line.startswith("    ")
-                for line in lines[2:previous_index]
+                line.startswith("    ")
+                for line in current_lines[:-1]
             )
         )
         self.assertTrue(
             all(
-                not line or line.startswith("    ")
-                for line in lines[previous_index + 1:]
+                line.startswith("    ")
+                for line in previous_lines
             )
         )
         self.assertIn("\n\n  🕘 上次修改：", message)
         self.assertNotIn(self.tracker.HOOK_CARD_DIVIDER, message)
+        self.assertNotIn("•", message)
+        self.assertNotIn("这次改了哪些文件：", message)
+        self.assertNotIn("涉及到的文件：", message)
         self.assertEqual(message.count("本次修改："), 1)
         self.assertEqual(message.count("上次修改："), 1)
         self.assertNotIn("上上次修改", message)
@@ -107,12 +113,12 @@ class ChangeHistoryTests(unittest.TestCase):
         message = self.tracker.render_change_history([
             {
                 "summary": (
-                    "按需求“验证摘要换行”：已完成较长摘要的自动换行处理，"
-                    "包含 hooks/agent_relay_tracker.py、README.md、"
-                    "tests/test_change_history.py 以及跨宿主转发验证。"
+                    "修复了页面状态同步问题。刷新后状态会立即更新，"
+                    "旧数据不会继续显示，按钮和提示文字也会同步恢复，"
+                    "用户不需要再手动关闭并重新打开页面。"
                 )
             },
-            {"summary": "按需求“补充说明”：已更新 README.md"},
+            {"summary": "补充了安装说明和常见问题。"},
         ])
         lines = message.splitlines()
         previous_index = lines.index("  🕘 上次修改：")
@@ -124,10 +130,112 @@ class ChangeHistoryTests(unittest.TestCase):
         self.assertTrue(
             all(
                 self.tracker._card_label_width(line)
-                <= self.tracker.CHANGE_HISTORY_TEXT_WIDTH + 4
+                <= self.tracker.CHANGE_HISTORY_TEXT_WIDTH
                 for line in current_content
             )
         )
+        self.assertNotIn("hooks/", message)
+        self.assertNotIn("README.md", message)
+
+    def test_legacy_summary_is_cleaned_and_split_into_natural_lines(self):
+        fence = "`" * 3
+        legacy_summary = (
+            "按需求“没错这种非常优秀了可以增加emoji，这样就行了”："
+            "已增加 Emoji，并保持你要的缩进、换行和自动折行格式： "
+            f"{fence}text 📝 本次修改： "
+            "按需求“增加修改摘要 Emoji”："
+            "已完成标题图标、缩进和长文本自动换行，"
+            "并同步 Codex、Claude Code、Pi。"
+        )
+
+        message = self.tracker.render_change_history([
+            {"summary": legacy_summary, "changed_files": []},
+            {"summary": "补充了修改历史说明。"},
+        ])
+
+        current_block = message.split("  🕘 上次修改：", 1)[0]
+        summary_lines = [
+            line for line in current_block.splitlines()[2:]
+            if line.strip()
+        ]
+        summary_text = "\n".join(summary_lines)
+        self.assertNotIn("按需求", summary_text)
+        self.assertNotIn(fence, summary_text)
+        self.assertNotIn("本次修改：", summary_text)
+        self.assertIn("已增加 Emoji，", summary_text)
+        self.assertIn("已完成标题图标", summary_text)
+        self.assertGreaterEqual(len(summary_lines), 3)
+
+    def test_legacy_prose_becomes_one_plain_paragraph(self):
+        message = self.tracker.render_change_history([
+            {
+                "summary": (
+                    "修复了 Hook 自动触发 Fusion 的问题：现在 Hook 只做本地门禁、"
+                    "确认卡、交付审计和修改摘要，不再主动提醒、调用 Fusion，"
+                    "也不会因为 Fusion 超时阻塞回复。"
+                    "Fusion 超时会单独识别；"
+                    "同一次会话失败后暂停自动调用，需要显式 retry 才会再次尝试。"
+                    "Codex、Claude Code、Pi 三端入口和安装验证均已适配，"
+                    "并补齐了回归测试和中文说明。"
+                ),
+                "changed_files": [],
+            },
+            {"summary": "补充了上一版修改摘要。"},
+        ])
+
+        current_block = message.split("  🕘 上次修改：", 1)[0].rstrip()
+        self.assertNotIn("•", current_block)
+        self.assertNotIn("\n\n", current_block)
+        self.assertNotIn("。；", current_block)
+        self.assertIn("Codex、Claude Code、Pi", current_block)
+        self.assertNotIn("。 Fusion", current_block)
+
+    def test_file_metadata_is_persisted_but_not_printed(self):
+        message = self.tracker.render_change_history([
+            {
+                "summary": "修复了本次摘要展示。",
+                "changed_files": ["hooks/agent_relay_tracker.py"],
+                "file_groups": [{
+                    "label": "写入逻辑检查",
+                    "files": ["hooks/agent_relay_tracker.py"],
+                }],
+            },
+            {
+                "summary": "补充了旧摘要的回归测试。",
+                "changed_files": ["tests/test_change_history.py"],
+                "file_groups": [{
+                    "label": "测试",
+                    "files": ["tests/test_change_history.py"],
+                }],
+            },
+        ])
+
+        previous_block = message.split("  🕘 上次修改：", 1)[1]
+        self.assertIn("补充了旧摘要的回归测试", previous_block)
+        self.assertNotIn("这次改了哪些文件：", message)
+        self.assertNotIn("自动测试", message)
+        self.assertNotIn("tests/test_change_history.py", message)
+        self.assertNotIn("hooks/agent_relay_tracker.py", message)
+
+    def test_previous_entry_without_files_still_renders_summary(self):
+        message = self.tracker.render_change_history([
+            {
+                "summary": "修复了本次摘要展示。",
+                "changed_files": ["hooks/agent_relay_tracker.py"],
+            },
+            {
+                "summary": "旧记录里的摘要仍然可以显示。",
+                "changed_files": [],
+                "file_groups": [],
+            },
+        ])
+
+        previous_block = message.split("  🕘 上次修改：", 1)[1]
+        self.assertIn("旧记录里的摘要仍然可以显示", previous_block)
+        self.assertNotIn("这次改了哪些文件：", previous_block)
+        self.assertNotIn("旧记录没有保存文件清单。", previous_block)
+        self.assertNotIn("src/", previous_block)
+        self.assertNotIn("tests/", previous_block)
 
     def test_actual_assistant_change_replaces_user_request_as_summary(self):
         state = self.tracker.default_state(session_id="actual-change")
@@ -150,8 +258,10 @@ class ChangeHistoryTests(unittest.TestCase):
 
         self.assertIn("已接入品牌热销地区数据", message)
         self.assertNotIn("我查看了品牌热销地区图", message)
-        self.assertIn("涉及到的文件：", message)
-        self.assertIn("源代码", message)
+        self.assertNotIn("这次改了哪些文件：", message)
+        self.assertNotIn("页面代码", message)
+        self.assertNotIn("distData.js", message)
+        self.assertNotIn("DistMap.vue", message)
 
     def test_assistant_hint_keeps_filename_instead_of_splitting_at_dot(self):
         hint = self.tracker._assistant_change_hint(
@@ -181,8 +291,10 @@ class ChangeHistoryTests(unittest.TestCase):
 
         self.assertIn("未记录具体修改说明", message)
         self.assertNotIn("按需求“刷新品牌分布图", message)
-        self.assertIn("· 测试：", message)
-        self.assertIn("· 源代码：", message)
+        self.assertNotIn("自动测试", message)
+        self.assertNotIn("页面代码", message)
+        self.assertNotIn("distBrandCoverage.test.js", message)
+        self.assertNotIn("DistMap.vue", message)
 
     def test_explicit_groups_are_rendered_and_persisted(self):
         state = self.tracker.default_state(session_id="grouped-change")
@@ -224,10 +336,11 @@ class ChangeHistoryTests(unittest.TestCase):
         message = self.tracker.record_change_history(state, "")
 
         self.assertIn("优化了综合查询-整体情况页面", message)
-        self.assertIn("· 页面综合查询-页面优化：", message)
-        self.assertIn("· 综合查询-数据中心-按钮颜色修改：", message)
-        self.assertIn("· 同喜分析-输入框为绿色：", message)
-        self.assertIn("        src/view/DisMap.vue", message)
+        self.assertIn("调整同喜分析输入框颜色", message)
+        self.assertNotIn("这次改了哪些文件：", message)
+        self.assertNotIn("页面综合查询-页面优化", message)
+        self.assertNotIn("test.vue", message)
+        self.assertNotIn("DisMap.vue", message)
         history = self.tracker.read_change_history(
             str(self.workspace),
             "default",
@@ -310,9 +423,20 @@ class ChangeHistoryTests(unittest.TestCase):
             "",
         )
         self.assertIn("优化了应用页面", message)
-        self.assertIn("· 应用页面优化：", message)
-        self.assertIn("· 回归测试：", message)
-        self.assertIn("        tests/test_app.py", message)
+        self.assertNotIn("应用页面优化：", message)
+        self.assertNotIn("回归测试：", message)
+        self.assertNotIn("tests/test_app.py", message)
+        history = self.tracker.read_change_history(
+            str(self.workspace),
+            "default",
+        )
+        self.assertEqual(
+            history["entries"][0]["file_groups"],
+            [
+                {"label": "应用页面优化", "files": ["src/app.py"]},
+                {"label": "回归测试", "files": ["tests/test_app.py"]},
+            ],
+        )
 
     def test_five_write_turns_show_and_keep_only_latest_two(self):
         first_message = ""
