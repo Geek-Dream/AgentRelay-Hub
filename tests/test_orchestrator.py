@@ -5,6 +5,7 @@ import json
 import subprocess
 import os
 import shlex
+import sys
 from unittest import mock
 from types import SimpleNamespace
 from scripts.task_scheduler import TaskAnalyzer, TaskPlan, TaskScheduler, ModelRegistry as SchedulerRegistry, TaskDecisionEngine
@@ -1129,6 +1130,18 @@ class CrossPlatformHookTests(unittest.TestCase):
             "agent_relay_hook.sh",
             self.installer.hook_files_for_platform("posix"),
         )
+
+    def test_installer_help_survives_non_utf8_windows_streams(self):
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "cp1252"
+        result = subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "install.py"), "--help"],
+            capture_output=True,
+            env=env,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+        self.assertIn("AgentRelay", result.stdout.decode("utf-8"))
 
     def test_installer_upgrades_old_script_hook_and_preserves_user_hooks(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -130,6 +130,19 @@ class InstallError(RuntimeError):
     """安装过程无法安全继续时抛出。"""
 
 
+def configure_utf8_output() -> None:
+    """Keep Chinese installer output writable on redirected Windows streams."""
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 def install_managed_file(source: Path, destination: Path) -> bool:
     """Atomically install managed code and back up a differing old copy."""
 
@@ -2117,6 +2130,7 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    configure_utf8_output()
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
