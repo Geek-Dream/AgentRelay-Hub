@@ -35,6 +35,7 @@ class TargetError(RuntimeError):
 
 
 HOOK_TIMEOUT = 15
+PYTHON_UTF8_ARGS = ("-X", "utf8")
 CLAUDE_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
 HERMES_EVENTS = {
     "pre_llm_call": "UserPromptSubmit",
@@ -202,7 +203,13 @@ def shim_command(
     target: str,
     event: str = "",
 ) -> str:
-    parts = [str(venv_python), str(shim_path), "--target", target]
+    parts = [
+        str(venv_python),
+        *PYTHON_UTF8_ARGS,
+        str(shim_path),
+        "--target",
+        target,
+    ]
     if event:
         parts.extend(["--event", event])
     return build_command(parts)
@@ -579,6 +586,7 @@ def register_hermes(config_path: Path, venv_python: Path, shim_path: Path) -> bo
     result = subprocess.run(
         [
             str(venv_python),
+            *PYTHON_UTF8_ARGS,
             str(Path(__file__).resolve()),
             "register-hermes",
             str(config_path),
@@ -587,6 +595,8 @@ def register_hermes(config_path: Path, venv_python: Path, shim_path: Path) -> bo
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     if result.returncode != 0:
@@ -658,6 +668,7 @@ const PYTHON_CANDIDATES = [
   IS_WIN ? "py" : "python3",
   IS_WIN ? "python" : "python",
 ].filter(Boolean);
+const PYTHON_ARGS = ["-X", "utf8"];
 
 const fusionDelegateSchema = Type.Object({{
   task: Type.String({{
@@ -681,7 +692,7 @@ function pythonCommand() {{
       || candidate.includes(":");
     if (looksLikePath && !existsSync(candidate)) continue;
     try {{
-      const probe = spawnSync(candidate, ["--version"], {{
+      const probe = spawnSync(candidate, [...PYTHON_ARGS, "--version"], {{
         encoding: "utf-8",
         timeout: 2000,
       }});
@@ -702,7 +713,7 @@ function runPython(script, args, options) {{
   const python = pythonCommand();
   if (!python) return null;
   try {{
-    return spawnSync(python, [script, ...args], options);
+    return spawnSync(python, [...PYTHON_ARGS, script, ...args], options);
   }} catch {{
     return null;
   }}
@@ -862,7 +873,7 @@ function runPythonAsync(script, args, options = {{}}) {{
     try {{
       execFile(
         python,
-        [script, ...args],
+        [...PYTHON_ARGS, script, ...args],
         {{
           encoding: "utf-8",
           maxBuffer: 32 * 1024 * 1024,
@@ -1508,7 +1519,20 @@ def _parse_simple_block(lines: list[str]) -> dict[str, str] | None:
         if "=" not in stripped:
             return None
         key, _, value = stripped.partition("=")
-        values[key.strip()] = value.strip().strip('"').strip("'")
+        raw_value = value.strip()
+        if raw_value.startswith('"') and raw_value.endswith('"'):
+            try:
+                parsed = json.loads(raw_value)
+            except json.JSONDecodeError:
+                return None
+            if not isinstance(parsed, str):
+                return None
+            parsed_value = parsed
+        elif raw_value.startswith("'") and raw_value.endswith("'"):
+            parsed_value = raw_value[1:-1]
+        else:
+            parsed_value = raw_value
+        values[key.strip()] = parsed_value
     return values
 
 
@@ -1709,6 +1733,8 @@ def dry_run_hook(
             command,
             input=json.dumps(payload, ensure_ascii=False),
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,
@@ -1803,7 +1829,8 @@ def verify_pi_visible_cards(
     try:
         result = subprocess.run(
             [node, str(driver)], cwd=isolated_home, env=env,
-            capture_output=True, text=True, timeout=30, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=30, check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"Pi 扩展协议验证无法执行：{exc}"
@@ -1884,15 +1911,22 @@ def verify_target(
         "prompt": "AgentRelay 安装验证，无需处理",
     }
     if target_id in {"claude", "pi", "hermes", "kimi"}:
-        command = [str(venv_python), str(shim_path), "--target", target_id,
-                   "--event", "UserPromptSubmit"]
+        command = [
+            str(venv_python),
+            *PYTHON_UTF8_ARGS,
+            str(shim_path),
+            "--target",
+            target_id,
+            "--event",
+            "UserPromptSubmit",
+        ]
         probe_payload = dict(payload)
         if target_id == "hermes":
             # Hermes 真实 payload 不带事件名，验证 shim 的注入路径。
             probe_payload.pop("hook_event_name", None)
         hook_ok, hook_detail, _ = dry_run_hook(command, probe_payload)
     else:
-        command = [str(venv_python), str(main_hook)]
+        command = [str(venv_python), *PYTHON_UTF8_ARGS, str(main_hook)]
         hook_ok, hook_detail, _ = dry_run_hook(command, payload)
     checks.append({
         "name": "Hook 干跑",
@@ -1920,7 +1954,11 @@ def verify_target(
                 cards = []
             else:
                 if target_id == "codex":
-                    card_command = [str(venv_python), str(main_hook)]
+                    card_command = [
+                        str(venv_python),
+                        *PYTHON_UTF8_ARGS,
+                        str(main_hook),
+                    ]
                     # Codex invokes the main Hook directly; isolate HOME while
                     # leaving target-specific environment variables absent.
                     probe_env["HOME"] = str(isolated_home)
@@ -1929,7 +1967,11 @@ def verify_target(
                     probe_env.pop("CODEX_HOME", None)
                 else:
                     card_command = [
-                        str(venv_python), str(shim_path), "--target", target_id,
+                        str(venv_python),
+                        *PYTHON_UTF8_ARGS,
+                        str(shim_path),
+                        "--target",
+                        target_id,
                     ]
                 cards = [
                     {
@@ -1979,10 +2021,17 @@ def verify_target(
 
     try:
         status = subprocess.run(
-            [str(venv_python), str(tracker), "status"],
+            [
+                str(venv_python),
+                *PYTHON_UTF8_ARGS,
+                str(tracker),
+                "status",
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
             check=False,
         )

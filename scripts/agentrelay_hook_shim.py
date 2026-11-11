@@ -23,6 +23,24 @@ import sys
 from pathlib import Path
 
 
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
+def _utf8_environment() -> dict[str, str]:
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
 def main_hook_path() -> Path:
     override = os.environ.get("AGENTRELAY_MAIN_HOOK", "").strip()
     if override:
@@ -124,6 +142,7 @@ def render_for_target(stdout_text: str, target: str) -> tuple[str, str, int]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="AgentRelay Hook shim")
     parser.add_argument("--target", default="", help="目标 Agent，例如 hermes、pi")
     parser.add_argument("--event", default="", help="payload 缺失时注入的事件名")
@@ -136,14 +155,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     payload = normalize_payload(raw, args.target, args.event)
-    env = dict(os.environ)
+    env = _utf8_environment()
     if args.target:
         env["AGENTRELAY_TARGET"] = args.target
     try:
         result = subprocess.run(
-            [sys.executable, str(hook)],
+            [sys.executable, "-X", "utf8", str(hook)],
             input=payload,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=12,

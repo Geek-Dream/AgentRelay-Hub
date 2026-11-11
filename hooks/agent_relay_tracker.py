@@ -66,6 +66,31 @@ SESSIONS_DIR = TRACKER_DIR / "sessions"
 PROBLEMS_DIR = TRACKER_DIR / "problems"
 LOGS_DIR = TRACKER_DIR / "logs"
 
+
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
+def _utf8_environment() -> dict[str, str]:
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
+def _detached_process_options() -> dict[str, object]:
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
 # 权重分级动作：1=继续处理，2=先查本地归档，3=才进入调用支援模型的判断。
 ARCHIVE_REMINDER_WEIGHT = 2
 ARCHIVE_SCRIPT = CODEX_DIR / "skills" / "agent-relay" / "scripts" / "agent_relay_archive.py"
@@ -5107,6 +5132,8 @@ def launch_forced_relay(state):
             process = subprocess.Popen(
                 [
                     find_relay_python(),
+                    "-X",
+                    "utf8",
                     str(script),
                     question,
                 ],
@@ -5114,7 +5141,8 @@ def launch_forced_relay(state):
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
                 cwd=str(script.parent),
-                start_new_session=True,
+                env=_utf8_environment(),
+                **_detached_process_options(),
             )
         pid_file.write_text(
             str(process.pid),
@@ -8393,6 +8421,7 @@ def main():
     Hook 模式从 stdin 读取 JSON。
     """
 
+    _configure_utf8_stdio()
     ensure_dirs()
 
     # --------------------------------------------------------

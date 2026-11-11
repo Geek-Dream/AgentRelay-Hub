@@ -8,6 +8,11 @@ import time
 from typing import Iterable
 from urllib.request import Request, urlopen
 
+try:
+    from .subprocess_compat import process_command
+except ImportError:
+    from subprocess_compat import process_command
+
 @dataclass(frozen=True)
 class ResearchReport:
     query: str
@@ -646,8 +651,16 @@ class CommanderProcess:
             except ImportError:
                 from change_contract import with_child_environment
             child_env = with_child_environment(contract, child_env)
-        process = subprocess.Popen(command, cwd=agent.workspace, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, text=True, env=child_env)
+        process = subprocess.Popen(
+            process_command(command, environ=child_env),
+            cwd=agent.workspace,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=child_env,
+        )
         self.processes[agent.agent_id] = process
         agent.process_id = process.pid; agent.status = "RUNNING"
         try:

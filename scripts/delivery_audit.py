@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -28,6 +29,18 @@ try:
     import msvcrt
 except ImportError:  # pragma: no cover - POSIX
     msvcrt = None
+
+
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
 
 CHECKS = {"requirements", "diff", "behavior", "visual", "self_review", "independent_review"}
 BASE = {"requirements", "diff", "behavior", "self_review"}
@@ -180,8 +193,16 @@ def workspace_fingerprint(workspace: Path, files: Iterable[str]) -> str:
     if result is not None and result.returncode == 0:
         digest = hashlib.sha256(result.stdout)
         try:
-            tree = subprocess.run(["git", "rev-parse", "HEAD"], cwd=workspace,
-                                  capture_output=True, text=True, timeout=5, check=False)
+            tree = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=False,
+            )
             digest.update(tree.stdout.encode("utf-8"))
         except (OSError, subprocess.SubprocessError):
             pass
@@ -705,8 +726,17 @@ def _command_allowed(command: str) -> bool:
 def _execute_behavior(command: str, workspace: str, *, kind: str, timeout: int) -> dict[str, Any]:
     started = time.time()
     try:
-        completed = subprocess.run(command, cwd=workspace, shell=True,
-                                   capture_output=True, text=True, timeout=timeout, check=False)
+        completed = subprocess.run(
+            command,
+            cwd=workspace,
+            shell=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
         exit_code = completed.returncode
         stdout = completed.stdout[-4000:]
         stderr = completed.stderr[-1000:]
@@ -970,6 +1000,7 @@ def _parse_evidence(value: str) -> Any:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_utf8_stdio()
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("begin", "set-requirements", "status", "record", "run-behavior",

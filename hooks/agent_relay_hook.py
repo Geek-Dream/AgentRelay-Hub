@@ -28,6 +28,24 @@ LOG_DIR = CODEX_HOME / "agent_relay_tracker" / "logs"
 ERROR_LOG = LOG_DIR / "error.log"
 
 
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
+def _utf8_environment() -> dict[str, str]:
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
 def commander_child_runtime() -> tuple[Path, str] | None:
     """Return the explicitly assigned Commander child runtime, if any.
 
@@ -166,12 +184,13 @@ def ingest_tracker_snapshot(session_id: str | None = None) -> None:
     if not runtime_dir:
         return
     try:
-        command = [sys.executable, str(TRACKER), "snapshot"]
+        command = [sys.executable, "-X", "utf8", str(TRACKER), "snapshot"]
         if session_id:
             command.extend(["--session", session_id])
         snapshot = subprocess.run(
             command,
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=4, check=False,
         )
         if snapshot.returncode != 0 or not snapshot.stdout.strip():
@@ -251,6 +270,7 @@ def valid_hook_output(value: str, event_name: str | None = None) -> bool:
 
 
 def main() -> int:
+    _configure_utf8_stdio()
     raw_payload = sys.stdin.read()
     if not raw_payload.strip():
         return 0
@@ -274,13 +294,16 @@ def main() -> int:
         ingest_tracker_context(payload)
         task_result = run_orchestrator_task(payload) if isinstance(payload, dict) else None
         result = subprocess.run(
-            [sys.executable, str(TRACKER)],
+            [sys.executable, "-X", "utf8", str(TRACKER)],
             input=raw_payload,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=8,
             check=False,
+            env=_utf8_environment(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         log_error(f"Unable to run Tracker: {exc}")

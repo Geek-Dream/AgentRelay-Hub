@@ -305,6 +305,9 @@ class FusionCommanderMutualExclusionTests(FusionTestBase):
             )
 
         child_env = popen.call_args.kwargs["env"]
+        command = popen.call_args.args[0]
+        self.assertEqual(command[0], sys.executable)
+        self.assertEqual(popen.call_args.kwargs["encoding"], "utf-8")
         self.assertEqual(result["status"], "SUCCESS")
         self.assertEqual(child_env["AGENTRELAY_COMMANDER_CHILD"], "1")
         state = fusion_mode.fusion_state(

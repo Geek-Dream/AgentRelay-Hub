@@ -189,13 +189,26 @@ def _tree_files(root: Path) -> list[Path]:
     if root.is_symlink() or not root.is_dir():
         raise CatalogError(f"Skill tree is not a regular directory: {root}")
     files: list[Path] = []
-    for path in sorted(root.rglob("*")):
-        if path.is_symlink():
-            raise CatalogError(f"Skill tree contains a symbolic link: {path}")
-        if path.is_file():
-            files.append(path)
-        elif not path.is_dir():
-            raise CatalogError(f"Skill tree contains a non-regular entry: {path}")
+    try:
+        entries = sorted(root.rglob("*"))
+    except OSError as exc:
+        raise CatalogError(f"Cannot scan Skill tree {root}: {exc}") from exc
+    for path in entries:
+        try:
+            relative = path.relative_to(root)
+            if (
+                "__pycache__" in relative.parts
+                or path.suffix.casefold() in {".pyc", ".pyo"}
+            ):
+                continue
+            if path.is_symlink():
+                raise CatalogError(f"Skill tree contains a symbolic link: {path}")
+            if path.is_file():
+                files.append(path)
+            elif not path.is_dir():
+                raise CatalogError(f"Skill tree contains a non-regular entry: {path}")
+        except OSError as exc:
+            raise CatalogError(f"Cannot inspect Skill tree entry {path}: {exc}") from exc
     return files
 
 
@@ -834,15 +847,15 @@ def _installed_skill_entry(
     project_root: Path,
 ) -> dict | None:
     skill_id = skill_dir.name
-    if (
-        skill_id in EXCLUDED_SKILL_IDS
-        or not SKILL_ID_PATTERN.fullmatch(skill_id)
-        or skill_dir.is_symlink()
-        or not skill_dir.is_dir()
-    ):
+    if skill_id in EXCLUDED_SKILL_IDS or not SKILL_ID_PATTERN.fullmatch(skill_id):
         return None
-    skill_file = skill_dir / "SKILL.md"
-    if skill_file.is_symlink() or not skill_file.is_file():
+    try:
+        if skill_dir.is_symlink() or not skill_dir.is_dir():
+            return None
+        skill_file = skill_dir / "SKILL.md"
+        if skill_file.is_symlink() or not skill_file.is_file():
+            return None
+    except OSError:
         return None
     if skill_id in OFFICIAL_SKILL_IDS:
         try:
@@ -852,12 +865,29 @@ def _installed_skill_entry(
         return official_skill_entry(skill_id, installed_in=[origin])
     if skill_id in AGENTRELAY_BUNDLED_SKILL_IDS:
         try:
-            return agentrelay_bundled_skill_entry(
+            entry = agentrelay_bundled_skill_entry(
                 project_root,
                 skill_id,
                 installed_in=[origin],
             )
-        except CatalogError:
+            source = _safe_relative_path(
+                agentrelay_bundled_catalog_root(project_root),
+                str(entry["bundled_path"]),
+            )
+            local_files = _tree_files(skill_dir)
+            bundled_files = _tree_files(source)
+            local_count, local_digest = _tree_sha256(skill_dir)
+            bundled_count, bundled_digest = _tree_sha256(source)
+            local_bytes = sum(path.stat().st_size for path in local_files)
+            bundled_bytes = sum(path.stat().st_size for path in bundled_files)
+            if (
+                local_count != bundled_count
+                or local_bytes != bundled_bytes
+                or local_digest != bundled_digest
+            ):
+                return None
+            return entry
+        except (CatalogError, KeyError, OSError):
             return None
     try:
         _tree_files(skill_dir)

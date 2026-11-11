@@ -10,7 +10,7 @@ import shlex
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 try:
@@ -496,6 +496,13 @@ def _active_python() -> str:
     return str(sys.executable or ("py" if os.name == "nt" else "python3"))
 
 
+def _path_name(value: object) -> str:
+    text = str(value)
+    if os.name == "nt":
+        return PureWindowsPath(text).name
+    return Path(text).name
+
+
 def _verify_page_command(codex_home: Path, session_id: str, state: dict[str, Any]) -> str:
     parts = [
         _active_python(),
@@ -504,7 +511,7 @@ def _verify_page_command(codex_home: Path, session_id: str, state: dict[str, Any
         session_id,
     ]
     files = state.get("files") or {}
-    if any(Path(value).name != "config_web.py" for value in files):
+    if any(_path_name(value) != "config_web.py" for value in files):
         parts.extend(["--url", "<本地页面URL>"])
     if state.get("target_expected"):
         parts.extend(["--target-selector", "<目标选择器>", "--after"])
@@ -555,7 +562,7 @@ def verification_preflight(
             phase="browser",
             next_command=_verify_page_command(codex_home, session_id, state),
         )
-    if any(Path(value).name != "config_web.py" for value in files) and not evidence.get("url"):
+    if any(_path_name(value) != "config_web.py" for value in files) and not evidence.get("url"):
         return _verification_detail(
             "browser_url_missing",
             "修改了配置中心以外的页面，必须用 --url 指定实际运行的本地页面重新检查。",

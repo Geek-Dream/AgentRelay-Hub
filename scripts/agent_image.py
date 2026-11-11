@@ -291,7 +291,7 @@ def run_web_provider_attempt(
     if RELAY_SCRIPT is None:
         return False, "", "未找到 agent_relay.py"
     command = [
-        sys.executable, str(RELAY_SCRIPT),
+        sys.executable, "-X", "utf8", str(RELAY_SCRIPT),
         prompt,
         "--provider", provider_id.removesuffix("-web"),
     ]
@@ -305,7 +305,8 @@ def run_web_provider_attempt(
     try:
         result = subprocess.run(
             command, env=env, check=False,
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout,
         )
         output = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
     except subprocess.TimeoutExpired as exc:

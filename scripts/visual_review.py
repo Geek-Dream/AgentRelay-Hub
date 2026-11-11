@@ -681,8 +681,15 @@ def review_with_agent_image(
                 + "\n".join(items) + "\n" + "\n".join(checks)
                 + "\n每项都必须明确回答；不知道就写无法判断，不能编造或只说整体没问题。")
     try:
-        completed = subprocess.run([str(python), str(script), *screenshots, "--question", question],
-                                   capture_output=True, text=True, timeout=120, check=False)
+        completed = subprocess.run(
+            [str(python), "-X", "utf8", str(script), *screenshots, "--question", question],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            check=False,
+        )
         output = completed.stdout.strip()
         failed = completed.returncode != 0 or "【AgentImage 注】" in output or "没有任何支持图片识别的模型可用" in output
         observations = {}

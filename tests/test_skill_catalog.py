@@ -218,7 +218,14 @@ class SkillCatalogTests(unittest.TestCase):
                 "You may not reproduce or copy these materials.",
                 encoding="utf-8",
             )
-            add_skill(codex, "browser-automatic", "browser-automation")
+            shutil.copytree(
+                PROJECT_ROOT
+                / "skills"
+                / "catalog"
+                / "agentrelay"
+                / "browser-automatic",
+                codex / "browser-automatic",
+            )
             add_skill(codex, "unsigned-local", "Unsigned")
             add_skill(codex, "agent-relay", "AgentRelay")
             add_skill(codex, "bitch-skill", "Private")
@@ -259,6 +266,71 @@ class SkillCatalogTests(unittest.TestCase):
         self.assertNotIn("agent-relay", {entry["id"] for entry in installed})
         self.assertNotIn("bitch-skill", {entry["id"] for entry in installed})
         self.assertNotIn("linked", {entry["id"] for entry in installed})
+
+    def test_browser_bundle_ignores_generated_cache_files(self):
+        with tempfile.TemporaryDirectory(prefix="agentrelay-browser-cache-") as directory:
+            root = Path(directory)
+            browser = root / "browser-automatic"
+            shutil.copytree(
+                PROJECT_ROOT
+                / "skills"
+                / "catalog"
+                / "agentrelay"
+                / "browser-automatic",
+                browser,
+            )
+            cache = browser / "__pycache__"
+            cache.mkdir()
+            (cache / "browse.cpython-310.pyc").write_bytes(b"generated")
+
+            installed = catalog_module.discover_installed_skills(
+                {"Codex": root},
+                project_root=PROJECT_ROOT,
+            )
+
+        self.assertEqual([entry["id"] for entry in installed], ["browser-automatic"])
+
+    def test_browser_bundle_rejects_a_mismatched_local_copy(self):
+        with tempfile.TemporaryDirectory(prefix="agentrelay-browser-mismatch-") as directory:
+            root = Path(directory)
+            browser = root / "browser-automatic"
+            browser.mkdir()
+            (browser / "SKILL.md").write_text(
+                "---\nname: browser-automatic\ndescription: fake\n---\n",
+                encoding="utf-8",
+            )
+            (browser / "LICENSE").write_text("MIT License", encoding="utf-8")
+            (browser / "scripts").mkdir()
+            (browser / "scripts" / "browse.py").write_text("fake", encoding="utf-8")
+
+            installed = catalog_module.discover_installed_skills(
+                {"Codex": root},
+                project_root=PROJECT_ROOT,
+            )
+
+        self.assertEqual(installed, [])
+
+    def test_unreadable_local_skill_is_ignored(self):
+        with tempfile.TemporaryDirectory(prefix="agentrelay-unreadable-skill-") as directory:
+            root = Path(directory)
+            skill = root / "unreadable"
+            skill.mkdir()
+            skill_file = skill / "SKILL.md"
+            skill_file.write_text("# unreadable\n", encoding="utf-8")
+            original_is_file = Path.is_file
+
+            def guarded_is_file(path):
+                if path == skill_file:
+                    raise PermissionError(path)
+                return original_is_file(path)
+
+            with patch.object(Path, "is_file", guarded_is_file):
+                installed = catalog_module.discover_installed_skills(
+                    {"Codex": root},
+                    project_root=PROJECT_ROOT,
+                )
+
+        self.assertEqual(installed, [])
 
     def test_merged_catalog_adds_official_downloads_and_vue_fallback(self):
         with tempfile.TemporaryDirectory(prefix="agentrelay-merged-skills-") as directory:

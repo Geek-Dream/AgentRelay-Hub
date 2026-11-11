@@ -854,6 +854,8 @@ class CrossPlatformRuntimeTests(unittest.TestCase):
             ["netstat", "-ano", "-p", "tcp"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
             check=False,
         )
@@ -884,6 +886,8 @@ class CrossPlatformRuntimeTests(unittest.TestCase):
             ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
             check=False,
         )
@@ -970,6 +974,7 @@ class CrossPlatformRuntimeTests(unittest.TestCase):
             self.assertEqual(command.text, str(python))
             self.assertIn(str(skill / "scripts" / "agentrelay_daemon.py"), arguments.text)
             self.assertIn(str(skill / "runtime" / "tasks"), arguments.text)
+            self.assertIn("-X utf8", arguments.text)
 
     def test_windows_daemon_registration_uses_task_scheduler_xml(self):
         installer = load_module(
@@ -1073,13 +1078,14 @@ class CrossPlatformRuntimeTests(unittest.TestCase):
             "<目标选择器>",
             "--after",
         ]
+        codex_home = Path(r"C:\Users\Test User\.codex")
         with mock.patch.object(
             page_verification.sys,
             "executable",
             python_path,
         ), mock.patch.object(page_verification.os, "name", "nt"):
             command = page_verification._verify_page_command(
-                Path(r"C:\Users\Test User\.codex"),
+                codex_home,
                 "session with space",
                 {
                     "files": {"src/App.vue": "ok"},
@@ -1112,6 +1118,7 @@ class CrossPlatformHookTests(unittest.TestCase):
         self.assertIn('"C:\\AgentRelayTest\\Test User', command.replace("/", "\\"))
         self.assertIn("python.exe", command)
         self.assertIn("agent_relay_hook.py", command)
+        self.assertIn("-X utf8", command)
 
     def test_posix_command_quotes_paths_with_spaces(self):
         command = self.installer.build_hook_command(

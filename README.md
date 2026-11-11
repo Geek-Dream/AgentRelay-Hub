@@ -454,6 +454,10 @@ py install.py
 `%USERPROFILE%\.codex\agentrelay-env\Scripts\python.exe`，不会调用 macOS/Linux
 虚拟环境里的 `bin/python`。Hook、Shim 和安装后的下一步提示使用
 `subprocess.list2cmdline` 生成 Windows 参数引用；路径包含空格时会保留完整参数边界。
+Commander 启动 npm 安装的 `codex.cmd` 时会通过 `%COMSPEC% /d /s /c` 执行，
+`.ps1` 会通过 PowerShell `-File` 执行，不会把批处理包装器直接交给
+`CreateProcess`。Hook 和 Pi 扩展中的 Python 都显式使用 `-X utf8`，避免中文
+Prompt 受 Windows 当前代码页影响。
 Windows 安装器只注册 Python Hook，不复制仅供 macOS/Linux 使用的
 `agent_relay_hook.sh`，因此不需要 Git Bash、WSL 或额外 shell。
 
@@ -474,9 +478,11 @@ Windows 安装器只注册 Python Hook，不复制仅供 macOS/Linux 使用的
 当前发布验证仍以 macOS 为主。上述 Windows 分支已通过平台模拟和自动化测试，但还没有
 在真实 Windows 机器上完成安装、Codex/Claude Code/Pi Hook、Playwright 和 Task Scheduler
 的整链路验收。因此这里只声明“Windows 代码路径已覆盖”，不声明“Windows 实机全部通过”。
-GitHub Actions 使用 `windows-latest` 执行 Python 编译、安装器入口检查和 Hook、删除策略、
-Tracker、页面验证及 Agent 目标适配测试；它不代替真实 Windows 桌面上的浏览器登录、宿主
-Hook 可见性和 Task Scheduler 注册验收。欢迎 Windows 用户按上面的入口做真实安装并反馈日志。
+GitHub Actions 使用 `windows-latest` 执行 Python 编译、安装器入口检查、临时目录安装文件
+与 Hook 注册冒烟测试，以及真实 `cmd.exe` 和 PowerShell 包装器的启动测试；同时覆盖
+Hook、删除策略、Tracker、页面验证及 Agent 目标适配。它不代替真实 Windows 桌面上的
+浏览器登录、宿主 Hook 可见性和 Task Scheduler 注册验收。欢迎 Windows 用户按上面的入口
+做真实安装并反馈日志。
 
 ## 常见问题
 

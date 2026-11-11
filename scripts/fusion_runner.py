@@ -743,6 +743,8 @@ def _run_command(workspace: Path, arguments: Mapping[str, Any]) -> dict[str, Any
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             env=child_env,
             check=False,

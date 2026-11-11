@@ -105,6 +105,26 @@ class KimiRegistrationTests(unittest.TestCase):
         self.assertFalse(targets.register_kimi(self.config, venv, shim))
         self.assertEqual(self.config.read_text(encoding="utf-8"), first)
 
+    def test_windows_paths_are_idempotent_after_toml_unescaping(self):
+        venv = Path(r"C:\Users\Test User\.codex\agentrelay-env\Scripts\python.exe")
+        shim = Path(r"C:\Users\Test User\.codex\skills\agent-relay\scripts\agentrelay_hook_shim.py")
+        self.assertTrue(targets.register_kimi(self.config, venv, shim))
+        first = self.config.read_text(encoding="utf-8")
+        self.assertFalse(targets.register_kimi(self.config, venv, shim))
+        self.assertEqual(self.config.read_text(encoding="utf-8"), first)
+        parsed = targets._parse_simple_block(
+            next(
+                block
+                for block in targets._split_toml_hook_blocks(first)[1]
+                if any(
+                    "agentrelay_hook_shim" in line
+                    for line in block
+                )
+            )
+        )
+        self.assertIsNotNone(parsed)
+        self.assertIn(r"\Users\Test User", parsed["command"])
+
     def test_merge_rejects_invalid_toml(self):
         self.config.write_text("[[hooks]\nevent = 'broken'\n", encoding="utf-8")
         if sys.version_info < (3, 11):
@@ -752,6 +772,32 @@ class PiExtensionTests(unittest.TestCase):
 
 
 class RelayPythonTests(unittest.TestCase):
+    def test_dry_run_hook_uses_utf8_pipe_decoding(self):
+        completed = subprocess.CompletedProcess(
+            args=["python", "-X", "utf8", "hook.py"],
+            returncode=0,
+            stdout='{"ok": true}',
+            stderr="",
+        )
+        with patch.object(
+            targets.subprocess,
+            "run",
+            return_value=completed,
+        ) as run:
+            ok, detail, stdout = targets.dry_run_hook(
+                ["python", "-X", "utf8", "hook.py"],
+                {"prompt": "中文 payload"},
+            )
+
+        self.assertTrue(ok, detail)
+        self.assertEqual(stdout, '{"ok": true}')
+        self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
+        self.assertEqual(run.call_args.kwargs["errors"], "replace")
+        self.assertEqual(
+            run.call_args.args[0],
+            ["python", "-X", "utf8", "hook.py"],
+        )
+
     def test_windows_shim_command_uses_native_quoting(self):
         venv = Path(r"C:\Program Files\AgentRelay\python.exe")
         shim_path = Path(r"C:\Users\Test User\.codex\skills\agent-relay\scripts\agentrelay_hook_shim.py")
@@ -762,12 +808,15 @@ class RelayPythonTests(unittest.TestCase):
             command,
             subprocess.list2cmdline([
                 str(venv),
+                "-X",
+                "utf8",
                 str(shim_path),
                 "--target",
                 "claude",
             ]),
         )
         self.assertIn('"C:\\Program Files\\AgentRelay\\python.exe"', command)
+        self.assertIn("-X utf8", command)
 
     def test_windows_virtualenv_python_is_detected(self):
         tmp = Path(tempfile.mkdtemp(prefix="agentrelay-win-python-test-"))

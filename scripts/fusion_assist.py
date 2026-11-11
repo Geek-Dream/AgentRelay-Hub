@@ -17,6 +17,7 @@ except ImportError:
 
 MAX_FAILURE_NOTICES = 1
 SUBPROCESS_TIMEOUT_SECONDS = 120
+PYTHON_UTF8_ARGS = ("-X", "utf8")
 CIRCUIT_OPEN_ERRORS = {
     "FUSION_PROVIDER_BUSY",
     "FUSION_PROVIDER_CALL_FAILED",
@@ -177,7 +178,7 @@ def _invoke(home: Path, session_id: str, prompt: str, *, workspace: str,
     python = Path(os.environ.get("AGENTRELAY_PYTHON", ""))
     if not python.is_file():
         python = home / "agentrelay-env" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    command = [str(python), str(fusion_script), "delegate", prompt,
+    command = [str(python), *PYTHON_UTF8_ARGS, str(fusion_script), "delegate", prompt,
                "--workspace", workspace, "--session-id", session_id]
     if context:
         command.extend(["--context", context])
@@ -201,6 +202,7 @@ def _invoke(home: Path, session_id: str, prompt: str, *, workspace: str,
     try:
         import subprocess
         completed = subprocess.run(command, capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace",
                                    env=child_environ,
                                    timeout=SUBPROCESS_TIMEOUT_SECONDS,
                                    check=False)

@@ -40,6 +40,7 @@ VENV_PYTHON = (
     else VENV_DIR / "bin" / "python"
 )
 REQUIREMENTS = PROJECT_ROOT / "requirements.txt"
+PYTHON_UTF8_ARGS = ("-X", "utf8")
 
 HOOK_FILES = (
     "agent_relay_hook.py",
@@ -58,6 +59,7 @@ FUSION_SCRIPT_FILES = (
     "fusion_trace.py",
 )
 SCRIPT_FILES = (
+    "subprocess_compat.py",
     "agent_relay.py",
     "agent_relay_login.py",
     "agent_relay_runtime.py",
@@ -308,7 +310,10 @@ def build_hook_command(
     hook_path: Path,
     platform_name: str,
 ) -> str:
-    return build_command([python_path, hook_path], platform_name)
+    return build_command(
+        [python_path, *PYTHON_UTF8_ARGS, hook_path],
+        platform_name,
+    )
 
 
 def build_command(
@@ -327,7 +332,12 @@ def windows_daemon_task_xml() -> str:
 
     daemon = TARGET_SKILL / "scripts" / "agentrelay_daemon.py"
     runtime = TARGET_SKILL / "runtime" / "tasks"
-    arguments = subprocess.list2cmdline([str(daemon), "--runtime", str(runtime)])
+    arguments = subprocess.list2cmdline([
+        *PYTHON_UTF8_ARGS,
+        str(daemon),
+        "--runtime",
+        str(runtime),
+    ])
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -782,10 +792,12 @@ def ensure_virtualenv() -> None:
         )
 
     pip_check = subprocess.run(
-        [str(VENV_PYTHON), "-m", "pip", "--version"],
+        [str(VENV_PYTHON), *PYTHON_UTF8_ARGS, "-m", "pip", "--version"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     if pip_check.returncode != 0:
@@ -802,6 +814,7 @@ def install_dependencies() -> None:
     run_checked(
         [
             str(VENV_PYTHON),
+            *PYTHON_UTF8_ARGS,
             "-m",
             "pip",
             "install",
@@ -890,6 +903,8 @@ def _listening_ports() -> list[str]:
             command,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
             check=False,
         )
@@ -1000,7 +1015,13 @@ def _configure_web(config: dict) -> None:
         if not _yes_no(f"现在打开 {label} 登录页面", True):
             continue
         login_script = TARGET_SKILL / "scripts" / "agent_relay_login.py"
-        command = [str(VENV_PYTHON), str(login_script), "--provider", provider_id.removesuffix("-web")]
+        command = [
+            str(VENV_PYTHON),
+            *PYTHON_UTF8_ARGS,
+            str(login_script),
+            "--provider",
+            provider_id.removesuffix("-web"),
+        ]
         if provider_id != "deepseek-web":
             command.extend(["--url", url, "--state-file",
                             str(TARGET_SKILL / "config" / f"{provider_id}.storage-state.json")])
@@ -1456,6 +1477,7 @@ def install_and_verify_chromium() -> None:
     run_checked(
         [
             str(VENV_PYTHON),
+            *PYTHON_UTF8_ARGS,
             "-m",
             "playwright",
             "install",
@@ -1473,10 +1495,12 @@ def install_and_verify_chromium() -> None:
         "raise SystemExit(0 if Path(path).is_file() else 1)"
     )
     result = subprocess.run(
-        [str(VENV_PYTHON), "-c", probe],
+        [str(VENV_PYTHON), *PYTHON_UTF8_ARGS, "-c", probe],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     browser_path = result.stdout.strip().splitlines()
@@ -1491,7 +1515,10 @@ def print_next_steps() -> None:
     print("\n✅ AgentRelay 一键安装完成。")
     print(f"独立 Python 环境：{VENV_DIR}")
     print("接下来请执行：")
-    print(f"  1. {build_command([VENV_PYTHON, login])}")
+    print(
+        "  1. "
+        f"{build_command([VENV_PYTHON, *PYTHON_UTF8_ARGS, login])}"
+    )
     print("     请在浏览器中手动登录，并完成人机验证/CAPTCHA。")
     print("  2. 重启使用了 AgentRelay 的 Agent（Codex / Claude / Pi / Hermes），")
     print("     使其重新加载 Hook 配置。")
@@ -1921,7 +1948,18 @@ def run_web_configurator() -> None:
                     p=data.get("provider") or {};provider_id=str(p.get("id","")).strip().lower();url=str(p.get("base_url") or "").strip()
                     if not _valid_provider_id(provider_id) or not _valid_url(url): raise ValueError("Provider 别名或网址无效")
                     state_target=TARGET_SKILL/"config"/f"{provider_id}.storage-state.json";entry={**p,"id":provider_id,"base_url":url,"url":url,"state_file":str(state_target.with_suffix(state_target.suffix+".enc")),"enabled":True};upsert_provider("web",entry)
-                    command=[str(VENV_PYTHON),str(TARGET_SKILL/"scripts"/"agent_relay_login.py"),"--provider",provider_id.removesuffix("-web"),"--url",url,"--state-file",str(state_target),"--save-on-close"]
+                    command=[
+                        str(VENV_PYTHON),
+                        *PYTHON_UTF8_ARGS,
+                        str(TARGET_SKILL/"scripts"/"agent_relay_login.py"),
+                        "--provider",
+                        provider_id.removesuffix("-web"),
+                        "--url",
+                        url,
+                        "--state-file",
+                        str(state_target),
+                        "--save-on-close",
+                    ]
                     subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     self._send({"config":public_config(),"message":"网页登录窗口已打开；登录完成后关闭对话标签页即可自动保存"});return
                 self._send({"error":"未找到"},404)
@@ -1956,7 +1994,8 @@ def write_daemon_service_config() -> Path | None:
             service_config(
                 "launchd",
                 TARGET_SKILL,
-                [str(VENV_PYTHON), str(TARGET_SKILL / "scripts" / "agentrelay_daemon.py"),
+                [str(VENV_PYTHON), *PYTHON_UTF8_ARGS,
+                 str(TARGET_SKILL / "scripts" / "agentrelay_daemon.py"),
                  "--runtime", str(TARGET_SKILL / "runtime" / "tasks")],
             ),
             encoding="utf-8",
@@ -1968,7 +2007,8 @@ def write_daemon_service_config() -> Path | None:
             service_config(
                 "systemd",
                 TARGET_SKILL,
-                [str(VENV_PYTHON), str(TARGET_SKILL / "scripts" / "agentrelay_daemon.py"),
+                [str(VENV_PYTHON), *PYTHON_UTF8_ARGS,
+                 str(TARGET_SKILL / "scripts" / "agentrelay_daemon.py"),
                  "--runtime", str(TARGET_SKILL / "runtime" / "tasks")],
             ),
             encoding="utf-8",

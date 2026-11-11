@@ -14,6 +14,18 @@ import sys
 from pathlib import Path
 from typing import Any
 
+
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 MODES = {"strict", "standard", "relaxed"}
 MENU_MODES = {"1": "strict", "2": "standard", "3": "relaxed"}
 WORK_PROFILES = ("light", "standard", "strict", "user_required")
@@ -283,6 +295,7 @@ def mark_card_shown(gate: dict[str, Any], request_hash: str) -> bool:
 
 
 def main() -> int:
+    _configure_utf8_stdio()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", nargs="?", help="show、set、菜单，或直接输入 1/2/3")
     parser.add_argument("mode", nargs="?", help="1/2/3 或 strict/standard/relaxed")

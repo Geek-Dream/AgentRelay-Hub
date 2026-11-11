@@ -189,6 +189,7 @@ jobs:
             tests/test_page_verification.py `
             tests/test_provider_scheduler.py `
             tests/test_skill_catalog.py `
+            tests/test_subprocess_compat.py `
             tests/test_visual_review.py
 
       - name: Upload Windows test results
