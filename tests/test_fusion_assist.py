@@ -250,11 +250,7 @@ class FusionAssistTests(unittest.TestCase):
         script = self.home / "skills" / "agent-fusion" / "scripts" / "agent_fusion.py"
         script.parent.mkdir(parents=True)
         script.write_text("print('AGENT_FUSION_RESULT={\"status\":\"success\",\"answer\":\"review\"}')\n", encoding="utf-8")
-        fake_python = self.home / "agentrelay-env" / "bin" / "python"
-        fake_python.parent.mkdir(parents=True)
-        fake_python.write_text("#!/bin/sh\nexec /usr/bin/env python3 \"$@\"\n", encoding="utf-8")
-        fake_python.chmod(0o755)
-        with mock.patch.dict(os.environ, {"AGENTRELAY_PYTHON": str(fake_python)}, clear=False):
+        with mock.patch.dict(os.environ, {"AGENTRELAY_PYTHON": sys.executable}, clear=False):
             result = assist.delegate(self.home, self.session, "复核测试", workspace=str(self.home))
         self.assertEqual(result["status"], "success")
         self.assertEqual(assist.read_state(self.home, self.session)["result"]["answer"], "review")

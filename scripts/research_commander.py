@@ -10,8 +10,10 @@ from urllib.request import Request, urlopen
 
 try:
     from .subprocess_compat import process_command
+    from .orchestrator_store import safe_filename_component, task_filename
 except ImportError:
     from subprocess_compat import process_command
+    from orchestrator_store import safe_filename_component, task_filename
 
 @dataclass(frozen=True)
 class ResearchReport:
@@ -162,7 +164,8 @@ class CommanderRuntime:
         config = dict(model_config or {})
         config.setdefault("runtime_root", str(self.root))
         agent=CommanderAgent(f"{task_id}-{role}-{uuid.uuid4().hex[:6]}", role,
-                             self.root / task_id / role, budget=budget,
+                             self.root / safe_filename_component(task_id)
+                             / safe_filename_component(role), budget=budget,
                              model_config=config)
         agent.workspace.mkdir(parents=True, exist_ok=True); self.agents[agent.agent_id]=agent; return agent
     def run(self, agent: CommanderAgent, fn):
@@ -342,7 +345,7 @@ class CommanderRuntime:
                 from .orchestrator_core import TaskContext
             except ImportError:
                 from orchestrator_core import TaskContext
-            return TaskContext.load(self.child_tasks_directory / f"{task_id}.json")
+            return TaskContext.load(self.child_tasks_directory / task_filename(task_id))
         except (OSError, ValueError, KeyError, TypeError):
             return None
 
@@ -445,12 +448,12 @@ class CommanderRuntime:
 
     def _save_baseline(self, agent: CommanderAgent, source: Path) -> None:
         self.baselines_directory.mkdir(parents=True, exist_ok=True)
-        path = self.baselines_directory / f"{agent.agent_id}.json"
+        path = self.baselines_directory / task_filename(agent.agent_id)
         path.write_text(json.dumps({"source": str(source), "files": self._snapshot_files(source)},
                                    ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _load_baseline(self, agent: CommanderAgent, source: Path) -> dict[str, str]:
-        path = self.baselines_directory / f"{agent.agent_id}.json"
+        path = self.baselines_directory / task_filename(agent.agent_id)
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
             if value.get("source") == str(source) and isinstance(value.get("files"), dict):
@@ -596,11 +599,14 @@ class CommanderRuntime:
         return True
 
     def save(self, agent: CommanderAgent, directory="runtime/agents") -> Path:
-        path=Path(directory); path.mkdir(parents=True, exist_ok=True); target=path / f"agent-{agent.agent_id}.json"
+        path=Path(directory); path.mkdir(parents=True, exist_ok=True)
+        target=path / task_filename(f"agent-{agent.agent_id}")
         target.write_text(json.dumps(asdict(agent), ensure_ascii=False, default=str), encoding="utf-8"); return target
 
     def load(self, agent_id: str, directory="runtime/agents") -> dict:
-        return json.loads((Path(directory) / f"agent-{agent_id}.json").read_text(encoding="utf-8"))
+        return json.loads(
+            (Path(directory) / task_filename(f"agent-{agent_id}")).read_text(encoding="utf-8")
+        )
 
     def merge_results(self, agents) -> dict:
         self._collect_child_notifications()

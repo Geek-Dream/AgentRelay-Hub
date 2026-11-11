@@ -23,14 +23,14 @@ try:
     from .orchestrator_core import (CheckpointStore, ConfirmationCard,
                                     ConfirmationStore, Orchestrator,
                                     TaskContext, WorkflowEngine)
-    from .orchestrator_store import MemoryStore
+    from .orchestrator_store import MemoryStore, task_filename
     from .task_scheduler import TaskAnalyzer
 except ImportError:
     from model_router import ModelRouter, ProviderRouteMemory
     from orchestrator_core import (CheckpointStore, ConfirmationCard,
                                    ConfirmationStore, Orchestrator,
                                    TaskContext, WorkflowEngine)
-    from orchestrator_store import MemoryStore
+    from orchestrator_store import MemoryStore, task_filename
     from task_scheduler import TaskAnalyzer
 
 
@@ -49,7 +49,7 @@ def _root(value: str | None) -> Path:
 
 
 def _context_path(root: Path, task_id: str) -> Path:
-    return root / "runtime" / "tasks" / f"{task_id}.json"
+    return root / "runtime" / "tasks" / task_filename(task_id)
 
 
 def _store(root: Path) -> ConfirmationStore:

@@ -156,6 +156,8 @@ def _process_ancestors(pid: int | None = None) -> list[int]:
                 ["ps", "-o", "ppid=", "-p", str(current)],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=1,
                 check=False,
             )

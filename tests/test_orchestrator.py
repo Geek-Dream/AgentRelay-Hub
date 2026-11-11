@@ -15,7 +15,13 @@ from pathlib import Path
 
 from hooks.agent_relay_tracker import calculate_weight, get_trigger_conditions
 from scripts.orchestrator_runtime import ModelRegistry, route_task
-from scripts.orchestrator_store import CheckpointStore, KnowledgeRecord, MemoryStore
+from scripts.orchestrator_store import (
+    CheckpointStore,
+    KnowledgeRecord,
+    MemoryStore,
+    safe_filename_component,
+    task_filename,
+)
 from scripts.orchestrator_dispatcher import Dispatcher
 from scripts.orchestrator_store import DispatchRequest
 from scripts.orchestrator_core import (Orchestrator, TaskType, classify_task,
@@ -446,12 +452,48 @@ class OrchestratorTests(unittest.TestCase):
             store.cards["r"] = ConfirmationCard("r", "execute", (), (), "failed", request="x", attempts=2)
             with self.assertRaises(ValueError): store.retry_failed("r")
 
+    def test_colon_task_ids_are_persisted_with_portable_filenames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task_id = "process-commander:git-audit"
+            context = TaskContext(task_id, None, "verified task")
+            path = context.save(root / "tasks")
+            self.assertNotIn(":", path.name)
+            self.assertEqual(TaskContext.load(path).task_id, task_id)
+
+            store = ConfirmationStore(root / "cards")
+            store.create(ConfirmationCard(
+                task_id, "execute", (), (), "pending", request="verified task"
+            ))
+            card_path = next((root / "cards").glob("*.json"))
+            self.assertNotIn(":", card_path.name)
+            self.assertEqual(ConfirmationStore(root / "cards").cards[task_id].request, "verified task")
+
+    def test_filename_components_are_portable_to_windows(self):
+        forbidden = set('<>:"/\\|?*')
+        values = [
+            'report<>:"/\\|?*',
+            "CON",
+            "nul.txt",
+            "COM1.json",
+            "release...",
+        ]
+        for value in values:
+            with self.subTest(value=value):
+                encoded = safe_filename_component(value)
+                self.assertFalse(forbidden & set(encoded))
+                self.assertFalse(encoded.endswith((".", " ")))
+        self.assertTrue(safe_filename_component("CON").startswith("_"))
+        self.assertTrue(safe_filename_component("nul.txt").startswith("_"))
+        self.assertLessEqual(len(safe_filename_component("x" * 300)), 180)
+        self.assertTrue(task_filename("release...").endswith("%2E%2E%2E.json"))
+
     def test_cli_subprocess_json_and_missing_task(self):
         with tempfile.TemporaryDirectory() as directory:
-            cmd=["python3","-m","scripts.orchestrator_task","--root",directory,"--json","task","list"]
-            p=subprocess.run(cmd,capture_output=True,text=True,cwd=Path(__file__).parents[1])
+            cmd=[sys.executable,"-m","scripts.orchestrator_task","--root",directory,"--json","task","list"]
+            p=subprocess.run(cmd,capture_output=True,text=True,encoding="utf-8",errors="replace",cwd=Path(__file__).parents[1])
             self.assertEqual(p.returncode,0); self.assertEqual(json.loads(p.stdout),[]); self.assertEqual(p.stderr,"")
-            p=subprocess.run(["python3","-m","scripts.orchestrator_task","--root",directory,"task","show","missing"],capture_output=True,text=True,cwd=Path(__file__).parents[1])
+            p=subprocess.run([sys.executable,"-m","scripts.orchestrator_task","--root",directory,"task","show","missing"],capture_output=True,text=True,encoding="utf-8",errors="replace",cwd=Path(__file__).parents[1])
             self.assertNotEqual(p.returncode,0); self.assertIn("not found",p.stderr)
 
     def test_fallback_and_task_call_budget(self):
@@ -1126,7 +1168,10 @@ class CrossPlatformHookTests(unittest.TestCase):
             Path("/opt/agentrelay-test/test user/.codex/hooks/agent_relay_hook.py"),
             "posix",
         )
-        self.assertIn("'/opt/agentrelay-test/test user/", command)
+        self.assertIn(
+            "'/opt/agentrelay-test/test user/",
+            command.replace("\\", "/"),
+        )
 
     def test_windows_installer_skips_posix_hook_wrapper(self):
         self.assertEqual(

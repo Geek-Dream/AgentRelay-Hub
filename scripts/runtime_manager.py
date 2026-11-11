@@ -7,8 +7,10 @@ import json
 import uuid
 try:
     from .orchestrator_core import TaskContext, TaskExecutionState
+    from .orchestrator_store import task_filename
 except ImportError:
     from orchestrator_core import TaskContext, TaskExecutionState
+    from orchestrator_store import task_filename
 
 
 class RuntimeManager:
@@ -24,7 +26,7 @@ class RuntimeManager:
         return context
 
     def context_path(self, task_id: str) -> Path:
-        return self.directory / f"{task_id}.json"
+        return self.directory / task_filename(task_id)
 
     def load_context(self, task_id: str) -> TaskContext:
         return TaskContext.load(self.context_path(task_id))
@@ -49,7 +51,7 @@ class RuntimeManager:
     def record_event(self, context: TaskContext, event: dict) -> None:
         self.events_directory.mkdir(parents=True, exist_ok=True)
         payload = {"at": datetime.now(timezone.utc).isoformat(), **event}
-        path = self.events_directory / f"{context.task_id}.jsonl"
+        path = self.events_directory / task_filename(context.task_id, ".jsonl")
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 

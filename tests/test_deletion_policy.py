@@ -23,7 +23,8 @@ class DeletionPolicyTests(unittest.TestCase):
         return subprocess.run(
             [sys.executable, str(policy.__file__), "execute", "--home", str(self.home),
              "--cwd", str(self.workspace), "--mode", mode, "--", str(target)],
-            text=True, capture_output=True, check=False,
+            text=True, encoding="utf-8", errors="replace",
+            capture_output=True, check=False,
         )
 
     def test_default_named_temp_evidence_is_quietly_recoverable(self):

@@ -18,9 +18,19 @@ import os
 import shlex
 
 try:
-    from .orchestrator_store import CheckpointStore, KnowledgeRecord, MemoryStore
+    from .orchestrator_store import (
+        CheckpointStore,
+        KnowledgeRecord,
+        MemoryStore,
+        task_filename,
+    )
 except ImportError:
-    from orchestrator_store import CheckpointStore, KnowledgeRecord, MemoryStore
+    from orchestrator_store import (
+        CheckpointStore,
+        KnowledgeRecord,
+        MemoryStore,
+        task_filename,
+    )
 try:
     from .task_scheduler import TaskAnalyzer, TaskScheduler, TaskDecisionEngine
 except ImportError:
@@ -148,7 +158,7 @@ class ConfirmationStore:
 
     def _path(self, task_id: str) -> Path:
         assert self.directory is not None
-        return self.directory / f"{task_id}.json"
+        return self.directory / task_filename(task_id)
 
     def _persist(self, card: ConfirmationCard) -> None:
         if not self.directory:
@@ -360,7 +370,7 @@ class TaskContext:
 
     def save(self, directory: str | Path) -> Path:
         path = Path(directory); path.mkdir(parents=True, exist_ok=True)
-        target = path / f"{self.task_id}.json"
+        target = path / task_filename(self.task_id)
         data = asdict(self); data["status"] = self.status.value
         tmp = target.with_suffix(".tmp"); tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8"); tmp.replace(target)
         return target
@@ -523,7 +533,8 @@ class VerificationRunner:
         started = time.monotonic()
         try:
             completed = subprocess.run(parse_verification_command(command), cwd=str(Path(workspace)), capture_output=True,
-                                       text=True, timeout=timeout_seconds, check=False)
+                                       text=True, encoding="utf-8", errors="replace",
+                                       timeout=timeout_seconds, check=False)
             return VerificationResult(command, "passed" if completed.returncode == 0 else "failed", completed.returncode,
                                       completed.stdout, completed.stderr, (time.monotonic() - started) * 1000)
         except subprocess.TimeoutExpired as exc:
@@ -755,7 +766,15 @@ class Orchestrator:
         files = [str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and ".git" not in p.parts]
         diff = ""
         try:
-            diff = subprocess.run(["git", "diff", "--stat"], cwd=root, capture_output=True, text=True, timeout=10).stdout.strip()
+            diff = subprocess.run(
+                ["git", "diff", "--stat"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+            ).stdout.strip()
         except (OSError, subprocess.SubprocessError):
             pass
         return {"files": files[:200], "file_count": len(files), "git_diff_stat": diff}

@@ -386,7 +386,8 @@ class DeliveryAuditTests(unittest.TestCase):
         self.start("standard")
         result = subprocess.run([sys.executable, str(PROJECT_ROOT / "scripts/delivery_audit.py"),
                                  "status", "--home", str(self.home), "--session", self.session],
-                                text=True, capture_output=True, check=True)
+                                text=True, encoding="utf-8", errors="replace",
+                                capture_output=True, check=True)
         data = json.loads(result.stdout)
         self.assertEqual(data["status"], "pending")
         self.assertIn("behavior", data["pending_checks"])
@@ -499,7 +500,7 @@ class DeliveryAuditTests(unittest.TestCase):
             "run-behavior", "--home", str(self.home), "--session", self.session,
             "--cmd", f'"{sys.executable}" -m unittest discover -s tests',
             "--phase", "red",
-        ], text=True, capture_output=True)
+        ], text=True, encoding="utf-8", errors="replace", capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout)
         self.assertEqual(data["red_behavior"]["phase"], "red")

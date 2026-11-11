@@ -11,6 +11,38 @@ from pathlib import Path
 import tempfile
 import re
 from typing import Any, Iterable
+from urllib.parse import quote
+
+
+_WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
+
+
+def safe_filename_component(value: object, *, fallback: str = "task") -> str:
+    """Return a single portable path component for user-provided identifiers."""
+    text = str(value)
+    encoded = quote(text, safe="-_.")
+    if not encoded or encoded in {".", ".."}:
+        encoded = quote("_" + text, safe="-_.")
+    if not encoded:
+        encoded = fallback
+    stem = encoded.split(".", 1)[0].upper()
+    if stem in _WINDOWS_RESERVED_NAMES:
+        encoded = quote("_" + text, safe="-_.")
+    trailing_dots = len(encoded) - len(encoded.rstrip("."))
+    if trailing_dots:
+        encoded = encoded[:-trailing_dots] + "%2E" * trailing_dots
+    if len(encoded) > 180:
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        encoded = encoded[:160].rstrip(".") + "-" + digest
+    return encoded or fallback
+
+
+def task_filename(task_id: object, suffix: str = ".json") -> str:
+    return safe_filename_component(task_id) + suffix
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -183,7 +215,9 @@ class CheckpointStore:
         existing = sorted(self.directory.glob("*.json"), key=lambda path: path.stat().st_mtime)
         while len(existing) >= self.max_checkpoints:
             existing.pop(0).unlink(missing_ok=True)
-        path = self.directory / f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}-{task_id}.json"
+        path = self.directory / task_filename(
+            f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}-{task_id}"
+        )
         _write_json(path, {"task_id": task_id, "description": description, "created_at": datetime.now(timezone.utc).isoformat(), "files": list(files)})
         return path
 

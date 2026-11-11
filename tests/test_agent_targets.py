@@ -535,6 +535,8 @@ class PiExtensionTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             check=False,
         )
@@ -716,6 +718,8 @@ class PiExtensionTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=20,
             check=False,
         )
@@ -1010,7 +1014,7 @@ class CodexVerifyTests(unittest.TestCase):
 
         def missing_prompt_card(command, *args, **kwargs):
             result = original(command, *args, **kwargs)
-            if command[0].endswith("node"):
+            if Path(command[0]).stem.casefold() == "node":
                 result.stdout = json.dumps({
                     "promptCard": False, "toolCard": True, "blocked": True,
                     "notifications": ["危险操作确认卡"],
@@ -1061,6 +1065,8 @@ class KimiEndToEndTests(unittest.TestCase):
                 [sys.executable, str(shim), "--target", "kimi", "--event", event],
                 input=json.dumps(payload, ensure_ascii=False),
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=60,

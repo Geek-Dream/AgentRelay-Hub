@@ -5,6 +5,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 import json
 
+try:
+    from .orchestrator_store import task_filename
+except ImportError:
+    from orchestrator_store import task_filename
+
 
 @dataclass(frozen=True)
 class PlannedAgent:
@@ -66,10 +71,12 @@ class AgentPersistence:
 
     def save(self, agent) -> Path:
         self.directory.mkdir(parents=True, exist_ok=True)
-        path = self.directory / f"agent-{agent.agent_id}.json"
+        path = self.directory / task_filename(f"agent-{agent.agent_id}")
         data = asdict(agent); data["status"] = agent.status.value
         path.write_text(json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
         return path
 
     def load(self, agent_id: str) -> dict:
-        return json.loads((self.directory / f"agent-{agent_id}.json").read_text(encoding="utf-8"))
+        return json.loads(
+            (self.directory / task_filename(f"agent-{agent_id}")).read_text(encoding="utf-8")
+        )
