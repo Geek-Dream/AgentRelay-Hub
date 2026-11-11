@@ -40,7 +40,17 @@ jobs:
         run: python -m playwright install --with-deps chromium
 
       - name: Run complete test suite
-        run: python -m pytest -q
+        run: |
+          mkdir -p runtime/test-results
+          python -m pytest -q --junitxml=runtime/test-results/static.xml
+
+      - name: Upload test results
+        if: always() && hashFiles('runtime/test-results/static.xml') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-test-results
+          path: runtime/test-results/static.xml
+          if-no-files-found: error
 
       - name: Verify config page in a real browser
         run: python scripts/verify_page.py --output runtime/page-verification
@@ -159,8 +169,10 @@ jobs:
       - name: Run Windows compatibility tests
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force runtime/test-results | Out-Null
           $env:PYTHONPATH = "$PWD\scripts;$PWD"
           python -m pytest -q `
+            --junitxml=runtime/test-results/windows.xml `
             tests/test_agent_image.py `
             tests/test_agent_relay_runtime.py `
             tests/test_agent_targets.py `
@@ -174,3 +186,11 @@ jobs:
             tests/test_provider_scheduler.py `
             tests/test_skill_catalog.py `
             tests/test_visual_review.py
+
+      - name: Upload Windows test results
+        if: always() && hashFiles('runtime/test-results/windows.xml') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-results
+          path: runtime/test-results/windows.xml
+          if-no-files-found: error
