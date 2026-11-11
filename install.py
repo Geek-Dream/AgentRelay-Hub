@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import site
 import tempfile
 import argparse
 import base64
@@ -81,6 +82,7 @@ SCRIPT_FILES = (
     "recovery_manager.py",
     "agent_provider.py",
     "agent_adapter.py",
+    "api_format_router.py",
     "model_router.py",
     "multi_agent.py",
     "research_commander.py",
@@ -824,6 +826,18 @@ def install_dependencies() -> None:
         ],
         "在 AgentRelay 虚拟环境中安装 Python 依赖",
     )
+    site_packages = (
+        VENV_DIR / "Lib" / "site-packages"
+        if os.name == "nt"
+        else VENV_DIR
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    if not site_packages.is_dir():
+        raise InstallError(f"虚拟环境依赖目录不存在：{site_packages}")
+    # 后续配置保存也运行在安装器进程中，需要能导入刚安装的 cryptography。
+    site.addsitedir(str(site_packages))
 
 
 def _ask(prompt: str, default: str = "") -> str:

@@ -70,7 +70,7 @@ def build_official_archive(
     with tarfile.open(path, "w:gz") as archive:
         for relative, content in sorted(files.items()):
             data = content.encode("utf-8") if isinstance(content, str) else content
-            member = tarfile.TarInfo(str(root / relative))
+            member = tarfile.TarInfo((root / relative).as_posix())
             member.size = len(data)
             member.mode = 0o644
             archive.addfile(member, io.BytesIO(data))

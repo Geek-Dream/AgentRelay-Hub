@@ -223,7 +223,9 @@ def shim_command(
     ]
     if event:
         parts.extend(["--event", event])
-    return build_command(parts)
+    # Agent hooks run through a POSIX shell (Git Bash on Windows), so native
+    # list2cmdline quoting would let Bash consume Windows path backslashes.
+    return shlex.join(parts)
 
 
 def command_has_target(command: str, target: str) -> bool:

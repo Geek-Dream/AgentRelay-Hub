@@ -756,6 +756,7 @@ class FusionInstallTests(unittest.TestCase):
         installer = load_module("fusion_install_module", PROJECT_ROOT / "install.py")
         self.assertIn("agent_fusion.py", installer.SCRIPT_FILES)
         self.assertIn("fusion_mode.py", installer.SCRIPT_FILES)
+        self.assertIn("api_format_router.py", installer.SCRIPT_FILES)
         self.assertEqual(
             set(installer.FUSION_SCRIPT_FILES),
             {

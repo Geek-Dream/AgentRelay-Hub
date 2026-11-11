@@ -802,7 +802,7 @@ class RelayPythonTests(unittest.TestCase):
             ["python", "-X", "utf8", "hook.py"],
         )
 
-    def test_windows_shim_command_uses_native_quoting(self):
+    def test_windows_shim_command_preserves_paths_for_bash(self):
         venv = Path(r"C:\Program Files\AgentRelay\python.exe")
         shim_path = Path(r"C:\Users\Test User\.codex\skills\agent-relay\scripts\agentrelay_hook_shim.py")
         with patch.object(targets.os, "name", "nt"):
@@ -810,7 +810,7 @@ class RelayPythonTests(unittest.TestCase):
 
         self.assertEqual(
             command,
-            subprocess.list2cmdline([
+            targets.shlex.join([
                 str(venv),
                 "-X",
                 "utf8",
@@ -819,7 +819,7 @@ class RelayPythonTests(unittest.TestCase):
                 "claude",
             ]),
         )
-        self.assertIn('"C:\\Program Files\\AgentRelay\\python.exe"', command)
+        self.assertIn("'C:\\Program Files\\AgentRelay\\python.exe'", command)
         self.assertIn("-X utf8", command)
 
     def test_windows_virtualenv_python_is_detected(self):
