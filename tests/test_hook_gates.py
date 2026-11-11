@@ -1199,6 +1199,76 @@ class HookGateTests(unittest.TestCase):
         self.assert_hook_ok(action)
         self.assertIn("页面验证门禁", action.stdout)
 
+    def test_pending_page_gate_does_not_suppress_complex_task_card(self):
+        session = "pending-page-complex-task"
+        state_path = (
+            self.codex_home / "agent_relay_tracker" / "page-verification"
+            / f"{session}.json"
+        )
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text(json.dumps({
+            "files": {"index.html": {"sha256": "old-page-version"}},
+        }), encoding="utf-8")
+
+        result = self.run_hook(self.payload(
+            session,
+            "UserPromptSubmit",
+            prompt=(
+                "先修改文档，再修改页面：统计快报默认显示2026年，"
+                "可切换2025年和2024年；另外修复选择其他年份后下拉框丢失年份的问题"
+            ),
+        ))
+
+        self.assert_hook_ok(result)
+        output = json.loads(result.stdout)
+        context = output["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("页面验证门禁", context)
+        self.assertIn("任务门禁", context)
+        self.assertEqual(output["systemMessage"].count("「需求卡」"), 1)
+        self.assertIn("统计快报", output["systemMessage"])
+        state = json.loads(
+            (
+                self.codex_home / "agent_relay_tracker" / "sessions"
+                / f"{session}.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["task_gate"]["status"], "awaiting_confirmation")
+        self.assertEqual(state["task_gate"]["level"], "medium")
+        self.assertEqual(state["task_gate"]["work_profile"]["profile"], "strict")
+        self.assertIsNotNone(state["task_gate"]["card_shown_sha256"])
+
+    def test_pending_page_gate_keeps_simple_task_card_free(self):
+        session = "pending-page-simple-task"
+        state_path = (
+            self.codex_home / "agent_relay_tracker" / "page-verification"
+            / f"{session}.json"
+        )
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text(json.dumps({
+            "files": {"index.html": {"sha256": "old-page-version"}},
+        }), encoding="utf-8")
+
+        result = self.run_hook(self.payload(
+            session, "UserPromptSubmit", prompt="修复 app.py 里的一个拼写错误",
+        ))
+
+        self.assert_hook_ok(result)
+        output = json.loads(result.stdout)
+        self.assertIn(
+            "页面验证门禁",
+            output["hookSpecificOutput"]["additionalContext"],
+        )
+        self.assertNotIn("systemMessage", output)
+        state = json.loads(
+            (
+                self.codex_home / "agent_relay_tracker" / "sessions"
+                / f"{session}.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["task_gate"]["status"], "clear")
+        self.assertFalse(state["task_gate"]["requires_confirmation"])
+        self.assertIsNone(state["task_gate"]["card_shown_sha256"])
+
     def test_visible_card_is_not_requested_twice(self):
         session = "one-card-only"
         first = self.run_hook(self.payload(

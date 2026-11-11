@@ -14,7 +14,7 @@
     "copyright": "Copyright (c) 2025 hyf0, SerKo"
   },
   "content_files": 205,
-  "content_sha256": "fd2b03d0474dad660c8e4ceb039206ec5b7104fc597b61aea4eb9ed13e55b432",
+  "content_sha256": "2d2b64d75dd190c034510ec2af88dd0100ec05d38aafac7a1c7e3469e83e6dd9",
   "defaults": [
     "vue-best-practices"
   ],

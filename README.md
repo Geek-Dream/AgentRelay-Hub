@@ -445,7 +445,8 @@ Fusion 默认开启，但不会自己猜 Provider。必须明确选择，例如�
 ### Windows 支持进度
 
 代码已经使用 Windows 的 `Scripts/python.exe` 路径、`subprocess.list2cmdline` 和 Python
-参数列表，避免依赖 macOS 固定路径或 `/bin/sh`。
+参数列表，避免依赖 macOS 固定路径或 `/bin/sh`；本地模型端口扫描在 Windows 使用系统自带
+的 `netstat`，不要求用户另装 `lsof`。
 
 但当前发布验证仍以 macOS 为主。Windows 用户可以做真实安装测试，但在完成独立 Windows
 端到端验收前，README 不把“代码兼容”写成“Windows 已验证完成”。
@@ -456,7 +457,7 @@ Fusion 默认开启，但不会自己猜 Provider。必须明确选择，例如�
 
 1. 重启对应 Agent。
 2. Codex 中运行 `/hooks`，确认 AgentRelay Hook 已被识别或信任。
-3. 重新运行 `python3 install.py`。
+3. 重新运行安装器：macOS/Linux 用 `python3 install.py`，Windows 用 `py install.py`。
 4. 检查安装输出里对应宿主的验证结果。
 
 ### 看不到确认卡
@@ -585,7 +586,8 @@ python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" change-summar
 明确显示“未记录具体修改说明”，不会用用户原话冒充结果。当前会话可自动识别；需要指定时
 再加 `--session <session-id>`。
 
-历史按“工作区 + Agent”隔离，保存在：
+历史按“工作区 + Agent + Session”隔离，同一项目同时打开多个 Codex、Claude Code 或 Pi
+会话时，各自只读取自己的“本次修改 / 上次修改”。历史保存在：
 
 ```text
 ~/.codex/agent_relay_tracker/history/change-summaries/

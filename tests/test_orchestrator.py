@@ -806,6 +806,112 @@ class CrossPlatformRuntimeTests(unittest.TestCase):
         self.assertEqual(detail, r"C:\Tools\codex.exe")
         which.assert_called_once_with("codex")
 
+    def test_windows_local_service_scan_uses_netstat_without_lsof(self):
+        installer = load_module(
+            "agent_relay_installer_windows_local_scan",
+            PROJECT_ROOT / "install.py",
+        )
+        completed = SimpleNamespace(
+            stdout=(
+                "Proto  Local Address          Foreign Address        State\n"
+                "TCP    127.0.0.1:8088         0.0.0.0:0              LISTENING\n"
+                "TCP    0.0.0.0:9000           0.0.0.0:0              LISTENING\n"
+                "TCP    [::1]:9090             [::]:0                 LISTENING\n"
+                "TCP    192.168.1.5:7000      0.0.0.0:0              LISTENING\n"
+                "TCP    127.0.0.1:50000        127.0.0.1:443          ESTABLISHED\n"
+            ),
+            returncode=0,
+        )
+        with mock.patch.object(
+            installer.os, "name", "nt"
+        ), mock.patch.object(
+            installer.subprocess, "run", return_value=completed
+        ) as run:
+            ports = installer._listening_ports()
+
+        self.assertEqual(ports, ["8088", "9000", "9090"])
+        run.assert_called_once_with(
+            ["netstat", "-ano", "-p", "tcp"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+
+    def test_posix_local_service_scan_keeps_lsof(self):
+        installer = load_module(
+            "agent_relay_installer_posix_local_scan",
+            PROJECT_ROOT / "install.py",
+        )
+        completed = SimpleNamespace(
+            stdout=(
+                "python 123 user 3u IPv4 0x0 0t0 TCP "
+                "127.0.0.1:8088 (LISTEN)\n"
+                "python 123 user 4u IPv4 0x0 0t0 TCP "
+                "*:9000 (LISTEN)\n"
+            ),
+            returncode=0,
+        )
+        with mock.patch.object(
+            installer.os, "name", "posix"
+        ), mock.patch.object(
+            installer.subprocess, "run", return_value=completed
+        ) as run:
+            ports = installer._listening_ports()
+
+        self.assertEqual(ports, ["8088", "9000"])
+        run.assert_called_once_with(
+            ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+
+    def test_windows_local_service_scan_probes_only_loopback(self):
+        installer = load_module(
+            "agent_relay_installer_windows_local_probe",
+            PROJECT_ROOT / "install.py",
+        )
+        with mock.patch.object(
+            installer, "_listening_ports", return_value=["8088", "8088"]
+        ), mock.patch.object(
+            installer,
+            "_probe_models",
+            side_effect=lambda endpoint: (
+                endpoint == "http://127.0.0.1:8088/v1",
+                ["local-model"] if endpoint == "http://127.0.0.1:8088/v1" else [],
+                "ok",
+            ),
+        ) as probe:
+            services = installer._scan_local_services()
+
+        self.assertEqual(
+            services,
+            [{
+                "name": "本机兼容服务",
+                "endpoint": "http://127.0.0.1:8088/v1",
+                "models": ["local-model"],
+                "message": "ok",
+            }],
+        )
+        self.assertTrue(all(
+            call.args[0].startswith("http://127.0.0.1:")
+            for call in probe.call_args_list
+        ))
+        probed_endpoints = [call.args[0] for call in probe.call_args_list]
+        self.assertEqual(probed_endpoints.count("http://127.0.0.1:8088/v1"), 1)
+
+    def test_installer_guidance_uses_platform_python_launcher(self):
+        installer = load_module(
+            "agent_relay_installer_platform_guidance",
+            PROJECT_ROOT / "install.py",
+        )
+        with mock.patch.object(installer.os, "name", "nt"):
+            self.assertEqual(installer.installer_command(), "py install.py")
+        with mock.patch.object(installer.os, "name", "posix"):
+            self.assertEqual(installer.installer_command(), "python3 install.py")
+
     def test_windows_daemon_generation_fails_clearly(self):
         installer = load_module(
             "agent_relay_installer_daemon",

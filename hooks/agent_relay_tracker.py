@@ -2495,27 +2495,33 @@ def written_file_targets(tool_name, tool_input, workspace=None):
     return list(dict.fromkeys(paths))[:50]
 
 
-def change_history_file(workspace=None, agent_id=None):
-    """Return the private history file for one workspace and Agent pair."""
+def change_history_file(workspace=None, agent_id=None, session_id=None):
+    """Return the private history file for one workspace, Agent, and session."""
 
     workspace_key = os.path.normcase(_change_workspace(workspace))
     agent_key = normalize_agent_id(agent_id) or "default"
+    session_key = normalize_session_id(session_id)
+    identity = f"{workspace_key}\0{agent_key}"
+    if session_key:
+        identity = f"{identity}\0{session_key}"
     digest = hashlib.sha256(
-        f"{workspace_key}\0{agent_key}".encode("utf-8")
+        identity.encode("utf-8")
     ).hexdigest()[:24]
     return HISTORY_DIR / "change-summaries" / f"{digest}.json"
 
 
-def read_change_history(workspace=None, agent_id=None):
+def read_change_history(workspace=None, agent_id=None, session_id=None):
     """Read recent summaries; a malformed file is treated as empty history."""
 
     workspace = _change_workspace(workspace)
     agent_id = normalize_agent_id(agent_id)
-    path = change_history_file(workspace, agent_id)
+    session_id = normalize_session_id(session_id)
+    path = change_history_file(workspace, agent_id, session_id)
     empty = {
         "schema_version": 1,
         "workspace": workspace,
         "agent_id": agent_id or "default",
+        "session_id": session_id or "default",
         "entries": [],
     }
     try:
@@ -2532,6 +2538,7 @@ def read_change_history(workspace=None, agent_id=None):
         "schema_version": 1,
         "workspace": workspace,
         "agent_id": agent_id or "default",
+        "session_id": session_id or "default",
         "entries": entries[:CHANGE_HISTORY_LIMIT],
     }
 
@@ -2916,11 +2923,12 @@ def record_change_history(state, assistant_message=None):
     )
     change_entry = build_change_entry(tracking, assistant_message)
     agent_id = normalize_agent_id(state.get("agent_id"))
+    session_id = normalize_session_id(state.get("session_id"))
     entry = {
         "turn_id": tracking.get("turn_id") or hashlib.sha256(
             f"{workspace}|{time.time_ns()}".encode("utf-8")
         ).hexdigest()[:20],
-        "session_id": normalize_session_id(state.get("session_id")),
+        "session_id": session_id,
         "workspace": workspace,
         "created_at": iso_now(),
         "summary": change_entry["summary"],
@@ -2928,7 +2936,7 @@ def record_change_history(state, assistant_message=None):
         "file_groups": change_entry["file_groups"],
         "tools": list(tracking.get("tools") or []),
     }
-    history = read_change_history(workspace, agent_id)
+    history = read_change_history(workspace, agent_id, session_id)
     previous = [
         item for item in history.get("entries", [])
         if item.get("turn_id") != entry["turn_id"]
@@ -2938,7 +2946,7 @@ def record_change_history(state, assistant_message=None):
     history["updated_at"] = iso_now()
     try:
         atomic_write_json(
-            change_history_file(workspace, agent_id),
+            change_history_file(workspace, agent_id, session_id),
             history,
         )
     except (OSError, ValueError, TypeError) as exc:
@@ -8108,12 +8116,12 @@ def handle_hook_event(
                     "[AgentRelay 问答模式]\n当前只是询问或系统通知，不继承旧审计，不自动修改、测试、调用 Fusion 或开始新审计。",
                 )
                 return state
+        pending_page_notice = ""
         pending_page_reason = pending_page_verification_reason(session_id)
         if pending_page_reason and not is_explicit_task_approval(prompt) \
                 and not AUDIT_COMMAND_PATTERN.match(str(prompt or "").strip()) \
                 and not is_informational_prompt(prompt):
-            emit_hook_context("UserPromptSubmit", pending_page_reason)
-            return read_state(session_id=session_id)
+            pending_page_notice = pending_page_reason
         settings_state = approval_settings_request(session_id, prompt)
         if settings_state is not None:
             return settings_state
@@ -8132,6 +8140,8 @@ def handle_hook_event(
         restore_approval_controls(state, approval_controls)
         if approval_controls:
             notice = semantic_approval_notice(session_id, state, prompt)
+            if pending_page_notice:
+                notice = pending_page_notice + "\n" + notice
             write_state(state, session_id=session_id)
             emit_hook_context("UserPromptSubmit", notice)
             return state
@@ -8150,6 +8160,8 @@ def handle_hook_event(
             if show_card:
                 system_message = render_task_gate_card(prompt, gate)
                 notice = delivery_notice
+        if pending_page_notice:
+            notice = pending_page_notice + ("\n" + notice if notice else "")
         write_state(state, session_id=session_id)
         emit_hook_context(
             "UserPromptSubmit",

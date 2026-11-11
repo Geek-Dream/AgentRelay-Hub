@@ -344,6 +344,7 @@ class ChangeHistoryTests(unittest.TestCase):
         history = self.tracker.read_change_history(
             str(self.workspace),
             "default",
+            "grouped-change",
         )
         self.assertEqual(len(history["entries"][0]["file_groups"]), 3)
 
@@ -429,6 +430,7 @@ class ChangeHistoryTests(unittest.TestCase):
         history = self.tracker.read_change_history(
             str(self.workspace),
             "default",
+            session_id,
         )
         self.assertEqual(
             history["entries"][0]["file_groups"],
@@ -457,6 +459,7 @@ class ChangeHistoryTests(unittest.TestCase):
         history = self.tracker.read_change_history(
             str(self.workspace),
             "default",
+            "history-limit",
         )
         self.assertEqual(len(history["entries"]), 2)
         self.assertIn("第4次修改", history["entries"][0]["summary"])
@@ -499,6 +502,7 @@ class ChangeHistoryTests(unittest.TestCase):
         history = self.tracker.read_change_history(
             str(self.workspace),
             "default",
+            "question-only",
         )
         self.assertEqual(history["entries"], [])
 
@@ -527,21 +531,22 @@ class ChangeHistoryTests(unittest.TestCase):
         history = self.tracker.read_change_history(
             str(self.workspace),
             "default",
+            "dedupe",
         )
         self.assertEqual(len(history["entries"]), 1)
 
     def test_workspace_histories_are_isolated(self):
         second_workspace = self.home / "second-workspace"
         second_workspace.mkdir()
-        for workspace, label in (
-            (self.workspace, "第一个工作区"),
-            (second_workspace, "第二个工作区"),
+        for workspace, session_id, label in (
+            (self.workspace, "workspace-one", "第一个工作区"),
+            (second_workspace, "workspace-two", "第二个工作区"),
         ):
-            state = self.tracker.default_state(session_id=label)
+            state = self.tracker.default_state(session_id=session_id)
             state["agent_id"] = "default"
             state["change_tracking"] = self.tracker.new_change_tracking(
                 f"更新{label}的摘要",
-                session_id=label,
+                session_id=session_id,
                 workspace=str(workspace),
             )
             state["change_tracking"]["files"] = ["README.md"]
@@ -554,14 +559,59 @@ class ChangeHistoryTests(unittest.TestCase):
         first = self.tracker.read_change_history(
             str(self.workspace),
             "default",
+            "workspace-one",
         )
         second = self.tracker.read_change_history(
             str(second_workspace),
             "default",
+            "workspace-two",
         )
         self.assertIn("第一个工作区", first["entries"][0]["summary"])
         self.assertNotIn("第二个工作区", first["entries"][0]["summary"])
         self.assertIn("第二个工作区", second["entries"][0]["summary"])
+
+    def test_same_workspace_sessions_have_separate_change_history(self):
+        _, first_output = self.run_write_turn(
+            "parallel-session-a",
+            "修复第一个窗口的问题",
+            "session-a.py",
+            "已修复第一个窗口的问题。",
+        )
+        first_message = json.loads(first_output)["systemMessage"]
+        self.assertIn("第一个窗口的问题", first_message)
+        self.assertIn("🕘 上次修改：\n    暂无记录", first_message)
+
+        _, second_output = self.run_write_turn(
+            "parallel-session-b",
+            "修复第二个窗口的问题",
+            "session-b.py",
+            "已修复第二个窗口的问题。",
+        )
+        second_message = json.loads(second_output)["systemMessage"]
+        self.assertIn("第二个窗口的问题", second_message)
+        self.assertIn("🕘 上次修改：\n    暂无记录", second_message)
+        self.assertNotIn("第一个窗口的问题", second_message)
+
+        first_history = self.tracker.read_change_history(
+            str(self.workspace),
+            "default",
+            "parallel-session-a",
+        )
+        second_history = self.tracker.read_change_history(
+            str(self.workspace),
+            "default",
+            "parallel-session-b",
+        )
+        self.assertEqual(len(first_history["entries"]), 1)
+        self.assertEqual(len(second_history["entries"]), 1)
+        self.assertIn(
+            "第一个窗口的问题",
+            first_history["entries"][0]["summary"],
+        )
+        self.assertIn(
+            "第二个窗口的问题",
+            second_history["entries"][0]["summary"],
+        )
 
     def test_changed_paths_are_relative_and_deduplicated(self):
         absolute = str(self.workspace / "src" / "app.py")

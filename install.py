@@ -268,8 +268,8 @@ def validate_publish_tree() -> None:
     """Refuse to package credentials, browser state, or runtime data."""
     from scripts import skill_catalog
 
-    excluded_skill_ids = {
-        skill_id.lower() for skill_id in skill_catalog.EXCLUDED_SKILL_IDS
+    private_skill_ids = {
+        skill_id.lower() for skill_id in skill_catalog.PRIVATE_SKILL_IDS
     }
     for path in PROJECT_ROOT.rglob("*"):
         if not path.is_file():
@@ -279,7 +279,7 @@ def validate_publish_tree() -> None:
         }
         if relative_parts & PUBLISH_BLOCKLIST or any(
             token in path.name.lower() for token in ("cookie", "session_bindings", "login_state")
-        ) or relative_parts & excluded_skill_ids:
+        ) or relative_parts & private_skill_ids:
             raise InstallError(f"发布目录包含禁止安装的敏感文件：{path}")
 
 
@@ -292,6 +292,12 @@ def build_hook_command(
     if platform_name == "nt":
         return subprocess.list2cmdline(command)
     return shlex.join(command)
+
+
+def installer_command() -> str:
+    """Return the documented installer command for the current platform."""
+
+    return "py install.py" if os.name == "nt" else "python3 install.py"
 
 
 def hook_command() -> str:
@@ -787,6 +793,53 @@ def _probe_chat(endpoint: str, model: str, api_key: str = "") -> tuple[bool, str
         return False, f"聊天测试失败：{type(exc).__name__}"
 
 
+def _listening_ports() -> list[str]:
+    """Return candidate local TCP listening ports without platform extras."""
+
+    if os.name == "nt":
+        command = ["netstat", "-ano", "-p", "tcp"]
+        port_pattern = None
+    else:
+        command = ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"]
+        port_pattern = re.compile(
+            r"(?:127\.0\.0\.1|\*|localhost):(\d+)\s*\(LISTEN\)"
+        )
+
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    if port_pattern is not None:
+        return list(dict.fromkeys(port_pattern.findall(result.stdout)))
+
+    ports = []
+    loopback_hosts = {"0.0.0.0", "127.0.0.1", "[::]", "[::1]", "localhost"}
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 4 or fields[0].upper() != "TCP":
+            continue
+        local_address, foreign_address = fields[1], fields[2]
+        host, separator, port = local_address.rpartition(":")
+        foreign_port = foreign_address.rpartition(":")[2]
+        if (
+            separator
+            and host.lower() in loopback_hosts
+            and foreign_port == "0"
+            and port.isdigit()
+            and 0 < int(port) <= 65535
+            and port not in ports
+        ):
+            ports.append(port)
+    return ports
+
+
 def _scan_local_services() -> list[dict]:
     services = [
         ("Ollama", "http://127.0.0.1:11434/v1"),
@@ -795,21 +848,13 @@ def _scan_local_services() -> list[dict]:
         ("llama.cpp", "http://127.0.0.1:8080/v1"),
         ("llama.cpp", "http://127.0.0.1:8081/v1"),
     ]
-    # llama.cpp 常由用户自定义端口。macOS/Linux 上补查本机正在监听的端口，
-    # 仍只访问 127.0.0.1 的 OpenAI-compatible /v1/models 接口。
-    try:
-        result = subprocess.run(
-            ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
-            capture_output=True, text=True, timeout=3, check=False,
-        )
-        ports = re.findall(r"(?:127\.0\.0\.1|\*|localhost):(\d+)\s*\(LISTEN\)", result.stdout)
-        known = {endpoint.rsplit(":", 1)[-1].split("/")[0] for _, endpoint in services}
-        for port in ports[:30]:
-            if port not in known:
-                services.append(("本机兼容服务", f"http://127.0.0.1:{port}/v1"))
-                known.add(port)
-    except (OSError, subprocess.SubprocessError):
-        pass
+    # llama.cpp 常由用户自定义端口。补查本机监听端口时，仍只访问
+    # 127.0.0.1 的 OpenAI-compatible /v1/models 接口。
+    known = {endpoint.rsplit(":", 1)[-1].split("/")[0] for _, endpoint in services}
+    for port in _listening_ports()[:30]:
+        if port not in known:
+            services.append(("本机兼容服务", f"http://127.0.0.1:{port}/v1"))
+            known.add(port)
     found = []
     for name, endpoint in services:
         ok, models, message = _probe_models(endpoint)
@@ -1948,9 +1993,10 @@ def main(argv=None) -> int:
         elif not args.no_menu and argv is None:
             print("\n[提示] 当前 stdin 不是交互终端，未打开配置网页。")
             print("  选择安装目标 Agent 的方式：")
-            print("    在终端运行：python3 install.py --menu        （终端多选向导）")
-            print("    在终端运行：python3 install.py               （开头即提示选择目标）")
-            print("    脚本/CI：   python3 install.py --targets codex,claude,pi,hermes")
+            command = installer_command()
+            print(f"    在终端运行：{command} --menu        （终端多选向导）")
+            print(f"    在终端运行：{command}               （开头即提示选择目标）")
+            print(f"    脚本/CI：   {command} --targets codex,claude,pi,hermes")
             print("  本次已按默认目标（Codex）完成安装，其余目标随时可补装。")
         if interactive_config:
             # 目标已选定并验证；网页配置中心负责后续的模型登录与 Provider 配置。

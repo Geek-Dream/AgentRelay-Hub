@@ -462,6 +462,19 @@ class SkillCatalogTests(unittest.TestCase):
                 with self.assertRaises(installer.InstallError):
                     installer.validate_publish_tree()
 
+    def test_publish_tree_allows_managed_skill_directories(self):
+        installer = load_module(
+            "skill_catalog_publish_guard_managed", PROJECT_ROOT / "install.py"
+        )
+        with tempfile.TemporaryDirectory(prefix="agentrelay-publish-managed-") as directory:
+            root = Path(directory)
+            for skill_id in ("agent-relay", "agent-fusion", "agent-image"):
+                skill = root / "skills" / skill_id
+                skill.mkdir(parents=True)
+                (skill / "SKILL.md").write_text("managed", encoding="utf-8")
+            with patch.object(installer, "PROJECT_ROOT", root):
+                installer.validate_publish_tree()
+
     def test_official_archive_rejects_unsafe_paths_links_and_duplicates(self):
         root = (
             Path(catalog_module.OFFICIAL_SKILL_ARCHIVE_ROOT)
