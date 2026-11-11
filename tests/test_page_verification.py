@@ -311,6 +311,8 @@ class PageEvidenceTests(unittest.TestCase):
                 "--no-screenshots",
             ],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=False,
             env=env,
@@ -363,6 +365,8 @@ class PageEvidenceTests(unittest.TestCase):
                 "--no-screenshots",
             ],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=False,
             env={**__import__("os").environ, "CODEX_HOME": str(self.home)},
@@ -392,6 +396,8 @@ class PageEvidenceTests(unittest.TestCase):
                 "--no-screenshots",
             ],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=False,
             env={**__import__("os").environ, "CODEX_HOME": str(self.home)},
@@ -479,6 +485,8 @@ class PageEvidenceTests(unittest.TestCase):
                 "--expected", '{"display":"block"}',
             ],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=False,
             env={**os.environ, "CODEX_HOME": str(self.home)},
@@ -535,6 +543,8 @@ class PageEvidenceTests(unittest.TestCase):
                 "--invariant", ".mast",
             ],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=False,
             env={**os.environ, "CODEX_HOME": str(self.home)},
@@ -591,6 +601,8 @@ class PageEvidenceTests(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             for path in pages
         ]
@@ -619,7 +631,8 @@ class HookPageGateTests(unittest.TestCase):
         payload = {"hook_event_name": event, "session_id": self.session,
                    "cwd": str(self.workspace), **values}
         result = subprocess.run([sys.executable, str(PROJECT_ROOT / "hooks" / "agent_relay_hook.py")],
-                                input=json.dumps(payload), text=True, capture_output=True,
+                                input=json.dumps(payload), text=True,
+                                encoding="utf-8", errors="replace", capture_output=True,
                                 env={**__import__("os").environ, "CODEX_HOME": str(self.home),
                                      "AGENTRELAY_TARGET": "claude"}, check=False, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -633,7 +646,10 @@ class HookPageGateTests(unittest.TestCase):
                   "--invariant", "#input"]
         subprocess.run(common, check=True, capture_output=True, env=env)
         self.page.write_text(self.page.read_text(encoding="utf-8").replace("rgb(255, 0, 0)", "rgb(0, 128, 0)").replace("width:100px", "width:300px"), encoding="utf-8")
-        after = subprocess.run(common + ["--after"], capture_output=True, text=True, check=False, env=env)
+        after = subprocess.run(
+            common + ["--after"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", check=False, env=env,
+        )
         self.assertEqual(after.returncode, 1, after.stdout)
         self.assertIn("目标外", after.stdout)
         state = page_verification.read_state(self.home, self.session)
@@ -645,7 +661,8 @@ class HookPageGateTests(unittest.TestCase):
         no_images = subprocess.run([sys.executable, str(PROJECT_ROOT / "scripts/verify_page.py"), "--session", self.session,
                                     "--url", self.page.as_uri(), "--no-screenshots", "--target-selector", "#target",
                                     "--expected", '{"color":"rgb(0, 128, 0)"}', "--after"],
-                                   capture_output=True, text=True, check=False, env=env)
+                                   capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", check=False, env=env)
         self.assertEqual(no_images.returncode, 1, no_images.stdout + no_images.stderr)
         self.assertIn("缺少修改前目标快照", no_images.stdout)
         self.page.write_text(
@@ -657,7 +674,8 @@ class HookPageGateTests(unittest.TestCase):
         before = subprocess.run([sys.executable, str(PROJECT_ROOT / "scripts/verify_page.py"), "--session", self.session,
                                  "--url", self.page.as_uri(), "--no-screenshots", "--target-selector", "#target",
                                  "--expected", '{"color":"rgb(0, 128, 0)"}', "--invariant", "#input"],
-                                capture_output=True, text=True, check=False, env=env)
+                                capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", check=False, env=env)
         self.assertEqual(before.returncode, 0, before.stdout + before.stderr)
         self.page.write_text(
             self.page.read_text(encoding="utf-8")
@@ -668,14 +686,16 @@ class HookPageGateTests(unittest.TestCase):
         no_images = subprocess.run([sys.executable, str(PROJECT_ROOT / "scripts/verify_page.py"), "--session", self.session,
                                     "--url", self.page.as_uri(), "--no-screenshots", "--target-selector", "#target",
                                     "--expected", '{"color":"rgb(0, 128, 0)"}', "--after"],
-                                   capture_output=True, text=True, check=False, env=env)
+                                   capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", check=False, env=env)
         self.assertEqual(no_images.returncode, 1, no_images.stdout + no_images.stderr)
         self.assertIn("目标外", no_images.stdout)
         self.page.write_text(self.page.read_text(encoding="utf-8").replace("width:300px", "width:100px"), encoding="utf-8")
         no_images = subprocess.run([sys.executable, str(PROJECT_ROOT / "scripts/verify_page.py"), "--session", self.session,
                                     "--url", self.page.as_uri(), "--no-screenshots", "--target-selector", "#target",
                                     "--expected", '{"color":"rgb(0, 128, 0)"}', "--after"],
-                                   capture_output=True, text=True, check=False, env=env)
+                                   capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", check=False, env=env)
         self.assertEqual(no_images.returncode, 0, no_images.stdout + no_images.stderr)
         result = json.loads(no_images.stdout)
         self.assertEqual(result["screenshots"], [])
@@ -702,7 +722,8 @@ class HookPageGateTests(unittest.TestCase):
                 "--expected", '{"color":"rgb(0, 128, 0)"}',
                 "--invariant", "#input",
             ],
-            capture_output=True, text=True, check=False, env=env,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", check=False, env=env,
         )
         self.assertEqual(before.returncode, 0, before.stdout + before.stderr)
 
@@ -712,7 +733,8 @@ class HookPageGateTests(unittest.TestCase):
                 "--expected", '{"color":"rgb(0, 0, 0)"}',
                 "--invariant", "#input", "--after",
             ],
-            capture_output=True, text=True, check=False, env=env,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", check=False, env=env,
         )
         self.assertEqual(changed_expected.returncode, 2, changed_expected.stdout + changed_expected.stderr)
         self.assertIn("--expected 必须与修改前逐项一致", changed_expected.stderr)
@@ -723,7 +745,8 @@ class HookPageGateTests(unittest.TestCase):
                 "--expected", '{"color":"rgb(0, 128, 0)"}',
                 "--invariant", "#input", "--after",
             ],
-            capture_output=True, text=True, check=False, env=env,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", check=False, env=env,
         )
         self.assertEqual(changed_selector.returncode, 2, changed_selector.stdout + changed_selector.stderr)
         self.assertIn("--target-selector 必须与修改前一致", changed_selector.stderr)

@@ -51,9 +51,13 @@ if [ -z "$PYTHON" ] || [ ! -x "$PYTHON" ]; then
     exit 0
 fi
 
+PYTHONUTF8=1
+PYTHONIOENCODING=utf-8
+export PYTHONUTF8 PYTHONIOENCODING
+
 EVENT_TYPE=$(
     printf '%s' "$PAYLOAD" |
-        "$PYTHON" -c 'import json, sys; data=json.load(sys.stdin); print(data.get("event") or data.get("event_name") or data.get("eventName") or data.get("hook_event_name") or data.get("hookEventName") or "unknown")' \
+        "$PYTHON" -X utf8 -c 'import json, sys; data=json.load(sys.stdin); print(data.get("event") or data.get("event_name") or data.get("eventName") or data.get("hook_event_name") or data.get("hookEventName") or "unknown")' \
         2>>"$ERROR_LOG"
 )
 EVENT_STATUS=$?
@@ -66,7 +70,7 @@ log_debug "event=$EVENT_TYPE CODEX_SESSION_ID=${CODEX_SESSION_ID:-} preparing_tr
 
 TRACKER_OUTPUT=$(
     printf '%s' "$PAYLOAD" |
-        "$PYTHON" "$TRACKER" 2>>"$ERROR_LOG"
+        "$PYTHON" -X utf8 "$TRACKER" 2>>"$ERROR_LOG"
 )
 TRACKER_EXIT_CODE=$?
 
@@ -86,7 +90,7 @@ fi
 # deciding whether an online Provider is worth calling.
 if [ -n "$TRACKER_OUTPUT" ] &&
     printf '%s' "$TRACKER_OUTPUT" |
-        EVENT_TYPE="$EVENT_TYPE" "$PYTHON" -c 'import json, os, sys
+        EVENT_TYPE="$EVENT_TYPE" "$PYTHON" -X utf8 -c 'import json, os, sys
 data = json.load(sys.stdin)
 event = os.environ.get("EVENT_TYPE")
 if "systemMessage" in data and not isinstance(data.get("systemMessage"), str):

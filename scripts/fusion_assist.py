@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -14,6 +15,18 @@ try:
     from . import fusion_trace
 except ImportError:
     import fusion_trace  # type: ignore
+
+
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
 
 MAX_FAILURE_NOTICES = 1
 SUBPROCESS_TIMEOUT_SECONDS = 120
@@ -335,6 +348,7 @@ def delegate(home: Path, session_id: str, prompt: str, *, workspace: str,
 
 
 def main() -> int:
+    _configure_utf8_stdio()
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("remind", "delegate", "status", "retry"):

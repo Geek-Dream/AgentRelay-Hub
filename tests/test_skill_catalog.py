@@ -183,6 +183,50 @@ class SkillCatalogTests(unittest.TestCase):
             with self.assertRaises(catalog_module.CatalogError):
                 catalog_module.load_catalog(project)
 
+    def test_windows_crlf_checkout_preserves_bundled_checksums(self):
+        with tempfile.TemporaryDirectory(prefix="agentrelay-catalog-crlf-") as directory:
+            project = Path(directory)
+            catalog_target = project / "skills" / "catalog" / "vuejs-ai"
+            bundled_target = project / "skills" / "catalog" / "agentrelay"
+            shutil.copytree(
+                PROJECT_ROOT / "skills" / "catalog" / "vuejs-ai",
+                catalog_target,
+            )
+            shutil.copytree(
+                PROJECT_ROOT / "skills" / "catalog" / "agentrelay",
+                bundled_target,
+            )
+            for path in [*catalog_target.rglob("*"), *bundled_target.rglob("*")]:
+                if not path.is_file():
+                    continue
+                content = path.read_bytes()
+                normalized = content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+                path.write_bytes(normalized.replace(b"\n", b"\r\n"))
+
+            catalog = catalog_module.load_catalog(project)
+            self.assertEqual(catalog["content_files"], 205)
+            browser = catalog_module.agentrelay_bundled_skill_entry(
+                project,
+                "browser-automatic",
+            )
+            self.assertEqual(browser["id"], "browser-automatic")
+
+            install_root = project / "codex"
+            installed_browser = install_root / "browser-automatic"
+            shutil.copytree(bundled_target / "browser-automatic", installed_browser)
+            for path in installed_browser.rglob("*"):
+                if path.is_file():
+                    content = path.read_bytes()
+                    path.write_bytes(content.replace(b"\r\n", b"\n"))
+            installed = catalog_module.discover_installed_skills(
+                {"Codex": install_root},
+                project_root=project,
+            )
+            self.assertEqual(
+                [entry["id"] for entry in installed],
+                ["browser-automatic"],
+            )
+
     def test_installed_skills_are_discovered_deduplicated_and_safe(self):
         with tempfile.TemporaryDirectory(prefix="agentrelay-local-skills-") as directory:
             root = Path(directory)

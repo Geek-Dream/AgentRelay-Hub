@@ -23,6 +23,17 @@ else:
     from scripts import page_verification
 
 
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 def _sample_config() -> dict[str, Any]:
     from scripts import skill_catalog
 
@@ -239,6 +250,7 @@ def _config_page() -> str:
 
 
 def main() -> int:
+    _configure_utf8_stdio()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session", help="bind evidence to this Hook session (auto-detected when omitted)")
     parser.add_argument("--url", help="existing local page; default renders current config_web.py")

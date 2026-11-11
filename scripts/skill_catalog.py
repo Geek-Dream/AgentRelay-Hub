@@ -212,14 +212,27 @@ def _tree_files(root: Path) -> list[Path]:
     return files
 
 
-def _tree_sha256(root: Path) -> tuple[int, str]:
+def _integrity_bytes(path: Path, *, normalize_newlines: bool = False) -> bytes:
+    data = path.read_bytes()
+    if normalize_newlines:
+        data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return data
+
+
+def _tree_sha256(
+    root: Path,
+    *,
+    normalize_newlines: bool = False,
+) -> tuple[int, str]:
     digest = hashlib.sha256()
     files = _tree_files(root)
     for path in files:
         relative = path.relative_to(root).as_posix()
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        digest.update(
+            _integrity_bytes(path, normalize_newlines=normalize_newlines)
+        )
         digest.update(b"\0")
     return len(files), digest.hexdigest()
 
@@ -293,7 +306,9 @@ def load_catalog(project_root: Path) -> dict:
     license_path = _safe_relative_path(root, license_info.get("path"))
     if license_path.is_symlink() or not license_path.is_file():
         raise CatalogError(f"Skill catalog license is missing: {license_path}")
-    license_digest = hashlib.sha256(license_path.read_bytes()).hexdigest()
+    license_digest = hashlib.sha256(
+        _integrity_bytes(license_path, normalize_newlines=True)
+    ).hexdigest()
     if license_digest != license_info.get("sha256"):
         raise CatalogError("Skill catalog license checksum does not match")
     if not str(license_info.get("copyright") or "").strip():
@@ -313,7 +328,10 @@ def load_catalog(project_root: Path) -> dict:
     manifest["defaults"] = defaults
 
     skills_root = root / "skills"
-    content_files, content_digest = _tree_sha256(skills_root)
+    content_files, content_digest = _tree_sha256(
+        skills_root,
+        normalize_newlines=True,
+    )
     if content_files != manifest.get("content_files"):
         raise CatalogError(
             f"Skill catalog file count changed: {content_files} "
@@ -369,8 +387,11 @@ def agentrelay_bundled_skill_entry(
         raise CatalogError(
             f"AgentRelay bundled Skill {skill_id} is missing its MIT license"
         )
-    file_count, digest = _tree_sha256(source)
-    byte_count = sum(path.stat().st_size for path in files)
+    file_count, digest = _tree_sha256(source, normalize_newlines=True)
+    byte_count = sum(
+        len(_integrity_bytes(path, normalize_newlines=True))
+        for path in files
+    )
     expected_files = metadata.get("files")
     expected_bytes = metadata.get("bytes")
     expected_digest = metadata.get("sha256")
@@ -876,10 +897,22 @@ def _installed_skill_entry(
             )
             local_files = _tree_files(skill_dir)
             bundled_files = _tree_files(source)
-            local_count, local_digest = _tree_sha256(skill_dir)
-            bundled_count, bundled_digest = _tree_sha256(source)
-            local_bytes = sum(path.stat().st_size for path in local_files)
-            bundled_bytes = sum(path.stat().st_size for path in bundled_files)
+            local_count, local_digest = _tree_sha256(
+                skill_dir,
+                normalize_newlines=True,
+            )
+            bundled_count, bundled_digest = _tree_sha256(
+                source,
+                normalize_newlines=True,
+            )
+            local_bytes = sum(
+                len(_integrity_bytes(path, normalize_newlines=True))
+                for path in local_files
+            )
+            bundled_bytes = sum(
+                len(_integrity_bytes(path, normalize_newlines=True))
+                for path in bundled_files
+            )
             if (
                 local_count != bundled_count
                 or local_bytes != bundled_bytes

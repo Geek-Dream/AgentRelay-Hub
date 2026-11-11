@@ -34,6 +34,17 @@ class TargetError(RuntimeError):
     """某个目标的注册或验证无法安全继续时抛出。"""
 
 
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 HOOK_TIMEOUT = 15
 PYTHON_UTF8_ARGS = ("-X", "utf8")
 CLAUDE_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
@@ -2069,6 +2080,7 @@ def verify_target(
 
 def cli_main(argv: list[str]) -> int:
     """供 install.py 通过虚拟环境 Python 调用的子命令入口。"""
+    _configure_utf8_stdio()
     if len(argv) >= 3 and argv[0] == "register-hermes":
         config_path = Path(argv[1])
         entries = json.loads(argv[2])

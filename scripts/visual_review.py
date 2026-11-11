@@ -19,6 +19,18 @@ try:
 except ImportError:
     import verification_state as _verification_state
 
+
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 VALID_MODES = {"native", "agent-image", "unavailable"}
 UNKNOWN_OBSERVATION = re.compile(r"无法判断|不确定|没有检查|未检查")
 GENERIC_OBSERVATION = re.compile(
@@ -734,10 +746,20 @@ def verify_invariants(before: Iterable[dict[str, Any]], after: Iterable[dict[str
         if not current:
             results.append({"check": selector, "passed": False, "actual": "目标外元素不存在或不可见"})
             continue
-        expected_rect = item["before"]["rect"]
-        actual_rect = current["before"]["rect"]
-        expected_styles = item["before"].get("styles") or {}
-        actual_styles = current["before"].get("styles") or {}
+        expected_snapshot = item["before"]
+        actual_snapshot = current["before"]
+        expected_document_rect = expected_snapshot.get("document_rect")
+        actual_document_rect = actual_snapshot.get("document_rect")
+        if isinstance(expected_document_rect, dict) and isinstance(
+            actual_document_rect, dict
+        ):
+            expected_rect = expected_document_rect
+            actual_rect = actual_document_rect
+        else:
+            expected_rect = expected_snapshot["rect"]
+            actual_rect = actual_snapshot["rect"]
+        expected_styles = expected_snapshot.get("styles") or {}
+        actual_styles = actual_snapshot.get("styles") or {}
         passed = expected_rect == actual_rect and expected_styles == actual_styles
         results.append({"check": selector, "passed": passed,
                         "actual": f"before_rect={expected_rect}, after_rect={actual_rect}, before_styles={expected_styles}, after_styles={actual_styles}"})
@@ -763,9 +785,20 @@ def capture_target(page, selector: str, properties: Iterable[str]) -> dict[str, 
     locator.wait_for(state="visible")
     styles = locator.evaluate("""(element, properties) => Object.fromEntries(properties.map(
         property => [property, getComputedStyle(element)[property]]))""", list(properties))
-    box = locator.bounding_box() or {}
-    return {"selector": selector, "styles": styles,
-            "rect": {key: box.get(key, 0) for key in ("x", "y", "width", "height")}}
+    geometry = locator.evaluate("""element => {
+        const rect = element.getBoundingClientRect();
+        return {
+            rect: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
+            document_rect: {
+                x: rect.x + window.scrollX,
+                y: rect.y + window.scrollY,
+                width: rect.width,
+                height: rect.height,
+            },
+            scroll: {x: window.scrollX, y: window.scrollY},
+        };
+    }""")
+    return {"selector": selector, "styles": styles, **geometry}
 
 
 def target_changes(before: dict[str, Any], after: dict[str, Any],
@@ -999,6 +1032,7 @@ def _print_cli_error(exc: Exception) -> int:
 
 
 def main() -> int:
+    _configure_utf8_stdio()
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("record", "nonvisual", "agent-image", "status", "cleanup"):

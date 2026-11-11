@@ -171,6 +171,8 @@ class VisualReviewTests(unittest.TestCase):
                 "--screenshot", str(target_screenshot),
             ],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=False,
         )
@@ -207,6 +209,8 @@ class VisualReviewTests(unittest.TestCase):
                 "--passed",
             ],
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=False,
         )
@@ -222,6 +226,31 @@ class VisualReviewTests(unittest.TestCase):
         same = [{"selector": "#other", "before": {"rect": {"x": 200, "y": 20, "width": 80, "height": 30}}}]
         self.assertTrue(review.verify_invariants(before, same)[0]["passed"])
         moved = [{"selector": "#other", "before": {"rect": {"x": 40, "y": 20, "width": 80, "height": 30}}}]
+        self.assertFalse(review.verify_invariants(before, moved)[0]["passed"])
+
+    def test_invariants_ignore_viewport_scroll_but_not_document_movement(self):
+        before = [{
+            "selector": "#other",
+            "before": {
+                "rect": {"x": 200, "y": 20, "width": 80, "height": 30},
+                "document_rect": {"x": 200, "y": 120, "width": 80, "height": 30},
+            },
+        }]
+        scrolled = [{
+            "selector": "#other",
+            "before": {
+                "rect": {"x": 200, "y": 60, "width": 80, "height": 30},
+                "document_rect": {"x": 200, "y": 120, "width": 80, "height": 30},
+            },
+        }]
+        moved = [{
+            "selector": "#other",
+            "before": {
+                "rect": {"x": 200, "y": 100, "width": 80, "height": 30},
+                "document_rect": {"x": 200, "y": 160, "width": 80, "height": 30},
+            },
+        }]
+        self.assertTrue(review.verify_invariants(before, scrolled)[0]["passed"])
         self.assertFalse(review.verify_invariants(before, moved)[0]["passed"])
 
     def test_target_verification_requires_expected_style_change(self):

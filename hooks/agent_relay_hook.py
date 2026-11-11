@@ -29,7 +29,7 @@ ERROR_LOG = LOG_DIR / "error.log"
 
 
 def _configure_utf8_stdio() -> None:
-    for stream in (sys.stdout, sys.stderr):
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
             continue
