@@ -52,6 +52,10 @@ jobs:
           path: runtime/test-results/static.xml
           if-no-files-found: error
 
+      - name: Annotate test failures
+        if: always() && hashFiles('runtime/test-results/static.xml') != ''
+        run: python scripts/junit_annotations.py runtime/test-results/static.xml
+
       - name: Verify config page in a real browser
         run: python scripts/verify_page.py --output runtime/page-verification
 
@@ -194,3 +198,8 @@ jobs:
           name: windows-test-results
           path: runtime/test-results/windows.xml
           if-no-files-found: error
+
+      - name: Annotate Windows test failures
+        if: always() && hashFiles('runtime/test-results/windows.xml') != ''
+        shell: pwsh
+        run: python scripts/junit_annotations.py runtime/test-results/windows.xml
