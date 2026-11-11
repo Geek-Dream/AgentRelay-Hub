@@ -1,4 +1,4 @@
-name: Static checks
+name: Cross-platform checks
 
 on:
   push:
@@ -134,3 +134,43 @@ jobs:
                   + "\n".join(failures)
               )
           PY
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Compile Python
+        shell: pwsh
+        run: python -m compileall -q hooks scripts tests install.py
+
+      - name: Install test dependencies
+        shell: pwsh
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Verify Windows installer entry point
+        shell: pwsh
+        run: python install.py --help
+
+      - name: Run Windows compatibility tests
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "$PWD\scripts;$PWD"
+          python -m pytest -q `
+            tests/test_agent_image.py `
+            tests/test_agent_relay_runtime.py `
+            tests/test_agent_targets.py `
+            tests/test_delivery_audit.py `
+            tests/test_deletion_policy.py `
+            tests/test_fusion.py `
+            tests/test_fusion_assist.py `
+            tests/test_fusion_runner.py `
+            tests/test_orchestrator.py `
+            tests/test_page_verification.py `
+            tests/test_provider_scheduler.py `
+            tests/test_skill_catalog.py `
+            tests/test_visual_review.py

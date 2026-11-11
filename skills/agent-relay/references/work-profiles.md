@@ -29,12 +29,26 @@ The selected profile controls evidence depth, not permission to write. The
 normal task gate, dangerous-command gate, change contract, and user approval
 remain independent.
 
+Use the installed AgentRelay interpreter. On macOS/Linux:
+
+```bash
+CODEX_ROOT="${CODEX_HOME:-$HOME/.codex}"
+PYTHON="$CODEX_ROOT/agentrelay-env/bin/python"
+```
+
+On Windows PowerShell:
+
+```powershell
+$CODEX_ROOT = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
+$PYTHON = Join-Path $CODEX_ROOT "agentrelay-env\Scripts\python.exe"
+```
+
 For a simple `light` task, no command is needed; the Hook records it
 automatically. If the Agent intentionally upgrades a task to a non-light profile
 before the first write, record that choice explicitly:
 
 ```bash
-python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" \
+"$PYTHON" "$CODEX_ROOT/hooks/agent_relay_tracker.py" \
   select-work-profile --session "<当前真实 session_id>" --profile standard \
   --reason "主 Agent 判断需要标准证据链"
 ```
@@ -42,7 +56,7 @@ python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" \
 For a card task, pass the same decision with the semantic approval:
 
 ```bash
-python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" \
+"$PYTHON" "$CODEX_ROOT/hooks/agent_relay_tracker.py" \
   resolve-intent --session "<当前真实 session_id>" --decision approve \
   --source-sha256 "<当前消息摘要>" --work-profile standard \
   --reason "用户明确批准当前范围"

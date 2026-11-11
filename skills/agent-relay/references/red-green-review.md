@@ -21,18 +21,23 @@ changes may skip RED, but still need their matching target/boundary checks.
 The CLI exposes the phase directly:
 
 ```bash
-AUDIT="${CODEX_HOME:-$HOME/.codex}/skills/agent-relay/scripts/delivery_audit.py"
+CODEX_ROOT="${CODEX_HOME:-$HOME/.codex}"
+PYTHON="$CODEX_ROOT/agentrelay-env/bin/python"
+AUDIT="$CODEX_ROOT/skills/agent-relay/scripts/delivery_audit.py"
 
-python3 "$AUDIT" run-behavior --home "${CODEX_HOME:-$HOME/.codex}" \
+"$PYTHON" "$AUDIT" run-behavior --home "$CODEX_ROOT" \
   --session "<session_id>" --phase red --kind test \
-  --cmd "python -m unittest tests.test_the_failing_behavior"
+  --cmd "$PYTHON -m unittest tests.test_the_failing_behavior"
 
 # Make the minimal implementation change here.
 
-python3 "$AUDIT" run-behavior --home "${CODEX_HOME:-$HOME/.codex}" \
+"$PYTHON" "$AUDIT" run-behavior --home "$CODEX_ROOT" \
   --session "<session_id>" --phase green --kind test \
-  --cmd "python -m unittest tests.test_the_failing_behavior"
+  --cmd "$PYTHON -m unittest tests.test_the_failing_behavior"
 ```
+
+On Windows PowerShell, set `$CODEX_ROOT` and `$PYTHON` as shown in the main
+`SKILL.md`, then invoke the interpreter with `& $PYTHON`.
 
 Never invent RED after the code was already changed. If the original baseline is
 gone, report the missing RED as a verification gap instead of fabricating it.

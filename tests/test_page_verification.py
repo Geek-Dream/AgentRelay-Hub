@@ -734,10 +734,9 @@ class HookPageGateTests(unittest.TestCase):
         denied = self.run_hook("Stop", last_assistant_message="页面已完成，验证通过。")
         self.assertEqual(denied["decision"], "block")
         self.assertIn("页面验证门禁", denied["reason"])
-        self.assertIn(
-            "下一步：python3 scripts/verify_page.py --session hook-page",
-            denied["reason"],
-        )
+        self.assertIn("下一步：", denied["reason"])
+        self.assertIn("scripts/verify_page.py --session hook-page", denied["reason"])
+        self.assertIn(sys.executable, denied["reason"])
         self.assertNotIn("控制台、主要导航、主题和桌面/移动截图", denied["reason"])
         PageEvidenceTests.pass_evidence(self)
         allowed = self.run_hook("Stop", last_assistant_message="页面已完成，验证通过。")

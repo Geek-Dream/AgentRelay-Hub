@@ -444,12 +444,39 @@ Fusion 默认开启，但不会自己猜 Provider。必须明确选择，例如�
 
 ### Windows 支持进度
 
-代码已经使用 Windows 的 `Scripts/python.exe` 路径、`subprocess.list2cmdline` 和 Python
-参数列表，避免依赖 macOS 固定路径或 `/bin/sh`；本地模型端口扫描在 Windows 使用系统自带
-的 `netstat`，不要求用户另装 `lsof`。
+Windows 安装入口是：
 
-但当前发布验证仍以 macOS 为主。Windows 用户可以做真实安装测试，但在完成独立 Windows
-端到端验收前，README 不把“代码兼容”写成“Windows 已验证完成”。
+```powershell
+py install.py
+```
+
+如果系统没有 `py`，改用 `python install.py`。安装器会使用
+`%USERPROFILE%\.codex\agentrelay-env\Scripts\python.exe`，不会调用 macOS/Linux
+虚拟环境里的 `bin/python`。Hook、Shim 和安装后的下一步提示使用
+`subprocess.list2cmdline` 生成 Windows 参数引用；路径包含空格时会保留完整参数边界。
+Windows 安装器只注册 Python Hook，不复制仅供 macOS/Linux 使用的
+`agent_relay_hook.sh`，因此不需要 Git Bash、WSL 或额外 shell。
+
+运行时的 Windows 兼容路径包括：
+
+- Hook 识别 `cmd`、PowerShell、`pwsh`，以及 `Remove-Item`、`Set-Content`、
+  `Copy-Item`、`Move-Item`、`taskkill`、`Stop-Process`、`schtasks /Delete`
+  等原生命令。
+- 页面验证、视觉审查、交付审计和工作档提示使用当前 Python 解释器，不再硬编码
+  `python3` 或 POSIX 单引号。
+- Tracker、Provider 租约和验证状态在 Windows 使用 `msvcrt` 文件锁；进程存活检查
+  使用 Win32 进程句柄，不依赖 `os.kill(pid, 0)`。
+- 本地模型端口扫描使用系统自带的 `netstat`，不要求安装 `lsof`。
+- 显式安装 daemon 时生成
+  `%USERPROFILE%\.codex\windows\agentrelay-daemon-task.xml`，注册命令为
+  `schtasks /Create /TN "AgentRelay Daemon" /XML <文件> /F`。普通安装不会自动注册。
+
+当前发布验证仍以 macOS 为主。上述 Windows 分支已通过平台模拟和自动化测试，但还没有
+在真实 Windows 机器上完成安装、Codex/Claude Code/Pi Hook、Playwright 和 Task Scheduler
+的整链路验收。因此这里只声明“Windows 代码路径已覆盖”，不声明“Windows 实机全部通过”。
+GitHub Actions 使用 `windows-latest` 执行 Python 编译、安装器入口检查和 Hook、删除策略、
+Tracker、页面验证及 Agent 目标适配测试；它不代替真实 Windows 桌面上的浏览器登录、宿主
+Hook 可见性和 Task Scheduler 注册验收。欢迎 Windows 用户按上面的入口做真实安装并反馈日志。
 
 ## 常见问题
 
@@ -653,6 +680,13 @@ python3 -m venv .venv
 
 Windows 下把 `.venv/bin/python` 换成 `.venv\Scripts\python.exe`。
 
+PowerShell 完整测试命令：
+
+```powershell
+$env:PYTHONPATH = "$PWD\scripts;$PWD"
+.venv\Scripts\python.exe -m pytest -q
+```
+
 检查 Python 语法：
 
 ```bash
@@ -673,11 +707,10 @@ python scripts/verify_page.py --output runtime/page-verification
 
 CI 会执行：
 
-1. Python 编译检查。
-2. Shell 语法和示例 JSON 检查。
-3. 完整单元测试。
-4. 真实 Chromium 页面验证。
-5. 私密运行文件、个人路径和内嵌凭据扫描。
+1. Ubuntu 上的 Python 编译、Shell 语法和示例 JSON 检查。
+2. Ubuntu 上的完整单元测试和真实 Chromium 页面验证。
+3. `windows-latest` 上的 Python 编译、安装器入口检查及跨平台兼容测试。
+4. 私密运行文件、个人路径和内嵌凭据扫描。
 
 `runtime/`、缓存、日志、Cookie、登录状态和本地备份不应提交到 Git。正式 `tests/` 应保留，
 它们是发布质量门，不是测试残留。

@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -480,30 +481,45 @@ def _verification_detail(
     }
 
 
+def _display_command(
+    parts: list[object],
+    *,
+    platform_name: str | None = None,
+) -> str:
+    values = [str(part) for part in parts]
+    if (platform_name or os.name) == "nt":
+        return subprocess.list2cmdline(values)
+    return shlex.join(values)
+
+
+def _active_python() -> str:
+    return str(sys.executable or ("py" if os.name == "nt" else "python3"))
+
+
 def _verify_page_command(codex_home: Path, session_id: str, state: dict[str, Any]) -> str:
     parts = [
-        "python3",
+        _active_python(),
         "scripts/verify_page.py",
         "--session",
-        shlex.quote(session_id),
+        session_id,
     ]
     files = state.get("files") or {}
     if any(Path(value).name != "config_web.py" for value in files):
         parts.extend(["--url", "<本地页面URL>"])
     if state.get("target_expected"):
         parts.extend(["--target-selector", "<目标选择器>", "--after"])
-    return " ".join(parts)
+    return _display_command(parts)
 
 
 def _visual_command(codex_home: Path, session_id: str, command: str) -> str:
-    return " ".join([
-        "python3",
+    return _display_command([
+        _active_python(),
         "scripts/visual_review.py",
         command,
         "--session",
-        shlex.quote(session_id),
+        session_id,
         "--home",
-        shlex.quote(str(codex_home.expanduser().resolve())),
+        str(codex_home.expanduser().resolve()),
     ])
 
 

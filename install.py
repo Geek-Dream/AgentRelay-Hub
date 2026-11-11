@@ -165,8 +165,15 @@ def install_managed_file(source: Path, destination: Path) -> bool:
     return True
 
 
+def hook_files_for_platform(platform_name: str | None = None) -> tuple[str, ...]:
+    """Do not install the POSIX Hook wrapper on native Windows."""
+    if (platform_name or os.name) == "nt":
+        return tuple(name for name in HOOK_FILES if not name.endswith(".sh"))
+    return HOOK_FILES
+
+
 def install_files() -> None:
-    for filename in HOOK_FILES:
+    for filename in hook_files_for_platform():
         source = PROJECT_ROOT / "hooks" / filename
         destination = TARGET_HOOKS / filename
         install_managed_file(source, destination)
@@ -288,10 +295,70 @@ def build_hook_command(
     hook_path: Path,
     platform_name: str,
 ) -> str:
-    command = [str(python_path), str(hook_path)]
-    if platform_name == "nt":
+    return build_command([python_path, hook_path], platform_name)
+
+
+def build_command(
+    parts: list[object],
+    platform_name: str | None = None,
+) -> str:
+    command = [str(part) for part in parts]
+    if (platform_name or os.name) == "nt":
         return subprocess.list2cmdline(command)
     return shlex.join(command)
+
+
+def windows_daemon_task_xml() -> str:
+    """Build a Unicode-safe Task Scheduler descriptor for the optional daemon."""
+    from xml.sax.saxutils import escape
+
+    daemon = TARGET_SKILL / "scripts" / "agentrelay_daemon.py"
+    runtime = TARGET_SKILL / "runtime" / "tasks"
+    arguments = subprocess.list2cmdline([str(daemon), "--runtime", str(runtime)])
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>AgentRelay optional monitor daemon</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{escape(str(VENV_PYTHON))}</Command>
+      <Arguments>{escape(arguments)}</Arguments>
+      <WorkingDirectory>{escape(str(TARGET_SKILL))}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
 
 
 def installer_command() -> str:
@@ -1411,7 +1478,7 @@ def print_next_steps() -> None:
     print("\n✅ AgentRelay 一键安装完成。")
     print(f"独立 Python 环境：{VENV_DIR}")
     print("接下来请执行：")
-    print(f"  1. {VENV_PYTHON} {login}")
+    print(f"  1. {build_command([VENV_PYTHON, login])}")
     print("     请在浏览器中手动登录，并完成人机验证/CAPTCHA。")
     print("  2. 重启使用了 AgentRelay 的 Agent（Codex / Claude / Pi / Hermes），")
     print("     使其重新加载 Hook 配置。")
@@ -1869,21 +1936,36 @@ def write_daemon_service_config() -> Path | None:
     """Install a service descriptor only when explicitly requested."""
     if os.environ.get("AGENTRELAY_INSTALL_DAEMON") != "1":
         return None
-    daemon = TARGET_SKILL / "scripts" / "agentrelay_daemon.py"
-    command = [str(VENV_PYTHON), str(daemon), "--runtime", str(TARGET_SKILL / "runtime" / "tasks")]
     if sys.platform == "darwin":
         from scripts.research_commander import service_config
         target = CODEX_HOME / "launchagents" / "com.agentrelay.daemon.plist"
-        target.parent.mkdir(parents=True, exist_ok=True); target.write_text(service_config("launchd", TARGET_SKILL, command), encoding="utf-8")
+        target.parent.mkdir(parents=True, exist_ok=True); target.write_text(
+            service_config(
+                "launchd",
+                TARGET_SKILL,
+                [str(VENV_PYTHON), str(TARGET_SKILL / "scripts" / "agentrelay_daemon.py"),
+                 "--runtime", str(TARGET_SKILL / "runtime" / "tasks")],
+            ),
+            encoding="utf-8",
+        )
     elif sys.platform.startswith("linux"):
         from scripts.research_commander import service_config
         target = CODEX_HOME / "systemd" / "agentrelay.service"
-        target.parent.mkdir(parents=True, exist_ok=True); target.write_text(service_config("systemd", TARGET_SKILL, command), encoding="utf-8")
-    else:
-        raise InstallError(
-            "当前平台不支持自动生成 daemon 服务配置；"
-            "Windows 可直接运行 agentrelay_daemon.py。"
+        target.parent.mkdir(parents=True, exist_ok=True); target.write_text(
+            service_config(
+                "systemd",
+                TARGET_SKILL,
+                [str(VENV_PYTHON), str(TARGET_SKILL / "scripts" / "agentrelay_daemon.py"),
+                 "--runtime", str(TARGET_SKILL / "runtime" / "tasks")],
+            ),
+            encoding="utf-8",
         )
+    elif sys.platform == "win32":
+        target = CODEX_HOME / "windows" / "agentrelay-daemon-task.xml"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(windows_daemon_task_xml(), encoding="utf-16")
+    else:
+        raise InstallError("当前平台不支持自动生成 daemon 服务配置")
     print(f"[生成] daemon 服务配置：{target}")
     return target
 
@@ -1897,6 +1979,20 @@ def register_daemon_service(target: Path) -> None:
     elif sys.platform.startswith("linux"):
         subprocess.run(["systemctl", "--user", "enable", "--now", str(target)], check=True)
         print(f"[注册] systemd：{target}")
+    elif sys.platform == "win32":
+        subprocess.run(
+            [
+                "schtasks",
+                "/Create",
+                "/TN",
+                "AgentRelay Daemon",
+                "/XML",
+                str(target),
+                "/F",
+            ],
+            check=True,
+        )
+        print(f"[注册] Task Scheduler：{target}")
     else:
         raise InstallError("当前平台不支持自动注册 daemon 服务")
 

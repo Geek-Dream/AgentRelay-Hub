@@ -152,6 +152,59 @@ class DeletionPolicyTests(unittest.TestCase):
         command = "rm -rf /tmp/example && git clone https://example.invalid/repo /tmp/example"
         self.assertIsNone(policy.parse_simple_delete(command))
 
+    def test_windows_delete_commands_use_the_managed_recycler(self):
+        evidence = (
+            self.root
+            / "Agent Relay Evidence"
+            / "agentrelay-review-before.png"
+        )
+        evidence.parent.mkdir()
+        evidence.write_bytes(b"image")
+        command = f'Remove-Item -LiteralPath "{evidence}" -Force'
+
+        self.assertEqual(
+            policy.parse_simple_delete(command, platform_name="nt"),
+            [{"command": "remove-item", "target": str(evidence)}],
+        )
+        replacement = policy.safe_delete_command(
+            command,
+            home=self.home,
+            cwd=self.workspace,
+            mode="standard",
+            platform_name="nt",
+        )
+        self.assertIsNotNone(replacement)
+        self.assertIn('"', replacement)
+        self.assertNotIn("Remove-Item", replacement)
+        self.assertTrue(policy.is_safe_delete_command(
+            replacement,
+            home=self.home,
+            mode="standard",
+            platform_name="nt",
+        ))
+
+    def test_windows_cmd_delete_parsing_rejects_chains(self):
+        self.assertEqual(
+            policy.parse_simple_delete(
+                r'del /q "C:\Temp\agentrelay-review-before.png"',
+                platform_name="nt",
+            ),
+            [{
+                "command": "del",
+                "target": r"C:\Temp\agentrelay-review-before.png",
+            }],
+        )
+        self.assertIsNone(policy.parse_simple_delete(
+            r'Remove-Item "C:\Temp\agentrelay-review-before.png"; '
+            r'Remove-Item "C:\Temp\other.png"',
+            platform_name="nt",
+        ))
+        self.assertIsNone(policy.parse_simple_delete(
+            r'Remove-Item -Path "C:\Temp\agentrelay-review-before.png",'
+            r'"C:\Temp\agentrelay-review-after.png"',
+            platform_name="nt",
+        ))
+
     def test_symlink_is_not_followed(self):
         source = self.workspace / "actual.txt"
         source.write_text("keep")

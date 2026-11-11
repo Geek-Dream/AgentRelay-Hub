@@ -16,31 +16,42 @@ Do not use it for simple API calls or static HTML that `curl` can handle.
 Use the AgentRelay Python environment so Playwright and Chromium are available:
 
 ```bash
-"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" scripts/browse.py --help
+CODEX_ROOT="${CODEX_HOME:-$HOME/.codex}"
+PYTHON="$CODEX_ROOT/agentrelay-env/bin/python"
+BROWSER="$CODEX_ROOT/skills/browser-automatic/scripts/browse.py"
+"$PYTHON" "$BROWSER" --help
 ```
 
-On Windows, use
-`"%CODEX_HOME%\agentrelay-env\Scripts\python.exe" scripts/browse.py`.
-Resolve `scripts/browse.py` relative to this Skill directory.
+On Windows PowerShell:
+
+```powershell
+$CODEX_ROOT = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
+$PYTHON = Join-Path $CODEX_ROOT "agentrelay-env\Scripts\python.exe"
+$BROWSER = Join-Path $CODEX_ROOT "skills\browser-automatic\scripts\browse.py"
+& $PYTHON $BROWSER --help
+```
+
+Resolve `browse.py` relative to this Skill directory if the host installs it
+under a different Skill root.
 
 ## Common Commands
 
 Capture a page:
 
 ```bash
-python scripts/browse.py screenshot https://example.com -o page.png --full-page
+"$PYTHON" "$BROWSER" screenshot https://example.com -o page.png --full-page
 ```
 
 Extract visible content:
 
 ```bash
-python scripts/browse.py scrape https://example.com --selector "main"
+"$PYTHON" "$BROWSER" scrape https://example.com --selector "main"
 ```
 
 Run a reviewable JSON workflow:
 
 ```bash
-python scripts/browse.py run steps.json
+"$PYTHON" "$BROWSER" run steps.json
 ```
 
 Example `steps.json`:

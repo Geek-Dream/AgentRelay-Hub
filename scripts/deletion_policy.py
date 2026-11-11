@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import re
 import shlex
@@ -67,24 +68,112 @@ def classify_target(value: str, *, home: Path, cwd: Path) -> dict[str, Any]:
     }
 
 
-def parse_simple_delete(command: str) -> list[dict[str, Any]] | None:
-    """Parse only a single rm/rmdir/unlink invocation; never rewrite a chain."""
+def _strip_command_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _windows_command_has_control_operator(command: str) -> bool:
+    """Reject command chains and PowerShell comma lists before token parsing."""
+    quote = ""
+    escaped = False
+    for char in command:
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "`":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char in {"&", "|", ";", "<", ">", ","} or char in {"\r", "\n"}:
+            return True
+    return False
+
+
+def _command_words(
+    command: str,
+    *,
+    platform_name: str | None = None,
+) -> list[str] | None:
+    if (platform_name or os.name) == "nt":
+        if _windows_command_has_control_operator(command):
+            return None
+        try:
+            words = shlex.split(command, posix=False)
+        except ValueError:
+            return None
+        return [_strip_command_quotes(word) for word in words]
     try:
-        words = shlex.split(command, posix=True)
+        return shlex.split(command, posix=True)
     except ValueError:
         return None
+
+
+def _command_name(value: str) -> str:
+    return (
+        ntpath.basename(value)
+        or os.path.basename(value)
+        or value
+    ).lower()
+
+
+def _simple_delete_targets(
+    words: list[str],
+    *,
+    platform_name: str | None = None,
+) -> list[dict[str, Any]] | None:
     if not words or any(word in {"&&", "||", ";", "|", "|&", "&", ">", ">>", "<"} for word in words):
         return None
-    if Path(words[0]).name.lower() not in {"rm", "rmdir", "unlink"}:
+    command_name = _command_name(words[0])
+    windows = (platform_name or os.name) == "nt"
+    if windows:
+        supported = {
+            "del", "erase", "rd", "remove-item", "rm", "rmdir",
+        }
+    else:
+        supported = {"rm", "rmdir", "unlink"}
+    if command_name not in supported:
         return None
-    command_name = Path(words[0]).name.lower()
+
     targets = []
     options_done = False
+    expect_path = False
     for word in words[1:]:
+        if expect_path:
+            targets.append(word)
+            expect_path = False
+            continue
         if not options_done and word == "--":
             options_done = True
             continue
-        if not options_done and word.startswith("-"):
+        if windows and command_name in {"remove-item", "rm"} and not options_done:
+            option = word.lstrip("-").lower()
+            if word.startswith("-") and option in {"path", "literalpath"}:
+                if expect_path:
+                    return None
+                expect_path = True
+                continue
+            if word.startswith("-") and option in {
+                "confirm", "force", "recurse", "verbose",
+            }:
+                continue
+            if word.startswith("-"):
+                return None
+        elif windows and not options_done and word.startswith("/"):
+            option = word.lower()
+            allowed = (
+                {"/a", "/f", "/p", "/q", "/s"}
+                if command_name in {"del", "erase"}
+                else {"/p", "/q", "/s"}
+            )
+            if option in allowed:
+                continue
+            return None
+        elif not options_done and word.startswith("-"):
             if command_name == "unlink":
                 return None
             if word.startswith("--"):
@@ -94,9 +183,23 @@ def parse_simple_delete(command: str) -> list[dict[str, Any]] | None:
                 return None
             continue
         targets.append(word)
+    if expect_path:
+        return None
     if not targets or any(any(char in word for char in "*?[]{}") for word in targets):
         return None
     return [{"command": command_name, "target": word} for word in targets]
+
+
+def parse_simple_delete(
+    command: str,
+    *,
+    platform_name: str | None = None,
+) -> list[dict[str, Any]] | None:
+    """Parse only a single native delete invocation; never rewrite a chain."""
+    words = _command_words(command, platform_name=platform_name)
+    if words is None:
+        return None
+    return _simple_delete_targets(words, platform_name=platform_name)
 
 
 def _unique_destination(root: Path, source: Path) -> Path:
@@ -154,9 +257,27 @@ def move_to_trash(targets: Iterable[str], *, home: Path, cwd: Path) -> dict[str,
     return {"status": "moved_to_trash", "manifest": str(manifest), "items": completed}
 
 
-def safe_delete_command(command: str, *, home: Path, cwd: Path, mode: str) -> str | None:
+def _format_command(
+    parts: Iterable[object],
+    *,
+    platform_name: str | None = None,
+) -> str:
+    values = [str(part) for part in parts]
+    if (platform_name or os.name) == "nt":
+        return subprocess.list2cmdline(values)
+    return shlex.join(values)
+
+
+def safe_delete_command(
+    command: str,
+    *,
+    home: Path,
+    cwd: Path,
+    mode: str,
+    platform_name: str | None = None,
+) -> str | None:
     """Return one auditable replacement command, never a rewritten shell chain."""
-    entries = parse_simple_delete(command)
+    entries = parse_simple_delete(command, platform_name=platform_name)
     if entries is None or mode == "relaxed":
         return None
     targets = [entry["target"] for entry in entries]
@@ -166,22 +287,27 @@ def safe_delete_command(command: str, *, home: Path, cwd: Path, mode: str) -> st
     if mode == "standard" and any(not item["quiet"] for item in results):
         return None
     script = Path(__file__).resolve()
-    return shlex.join([
+    return _format_command([
         os.environ.get("AGENTRELAY_PYTHON") or __import__("sys").executable,
         str(script), "execute", "--home", str(home), "--cwd", str(cwd),
         "--mode", mode, "--", *targets,
-    ])
+    ], platform_name=platform_name)
 
 
-def is_safe_delete_command(command: str, *, home: Path, mode: str) -> bool:
+def is_safe_delete_command(
+    command: str,
+    *,
+    home: Path,
+    mode: str,
+    platform_name: str | None = None,
+) -> bool:
     """Recognize only the exact managed recycler emitted for this home/mode."""
     if mode not in {"standard", "strict"}:
         return False
-    try:
-        words = shlex.split(command, posix=True)
-    except ValueError:
+    words = _command_words(command, platform_name=platform_name)
+    if words is None:
         return False
-    if len(words) < 11 or Path(words[1]).resolve() != Path(__file__).resolve():
+    if len(words) < 11 or Path(words[1]).expanduser().resolve() != Path(__file__).resolve():
         return False
     if words[2:4] != ["execute", "--home"] or Path(words[4]).expanduser().resolve() != home.expanduser().resolve():
         return False

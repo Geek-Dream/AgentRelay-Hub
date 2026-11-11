@@ -379,7 +379,8 @@ def print_failure_report(failures: list[tuple[str, str]]) -> None:
     for name, reason in failures:
         print(f"  - {name}：{reason}")
     print("本次没有图片被成功识别。")
-    print("建议：重新运行 python3 install.py 写入 DeepSeek 的 Cookie，"
+    installer = "py install.py" if os.name == "nt" else "python3 install.py"
+    print(f"建议：重新运行 {installer} 写入 DeepSeek 的 Cookie，"
           "或在配置中心检查 Provider 状态后重试。")
 
 

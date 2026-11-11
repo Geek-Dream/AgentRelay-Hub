@@ -7,6 +7,24 @@ description: "AgentRelay 外援协作、工作流与本地归档。当 Agent 长
 
 AgentRelay 是 AI Agent 与外部专家模型之间的中继层，调用当前已配置的在线模型 Provider。
 
+## 命令环境
+
+本文命令默认使用 macOS/Linux shell。先设置一次运行环境：
+
+```bash
+CODEX_ROOT="${CODEX_HOME:-$HOME/.codex}"
+PYTHON="$CODEX_ROOT/agentrelay-env/bin/python"
+```
+
+Windows PowerShell 使用：
+
+```powershell
+$CODEX_ROOT = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
+$PYTHON = Join-Path $CODEX_ROOT "agentrelay-env\Scripts\python.exe"
+```
+
+Windows 下把 POSIX 示例开头的 `"$PYTHON"` 改成 `& $PYTHON`，其余参数相同。
+
 ## 按需读取的流程 reference
 
 - 选择工作档：`references/work-profiles.md`
@@ -53,8 +71,8 @@ gstack 式重流程复制到每个普通任务。
 4. 真实运行与改动匹配的项目测试或行为探针，不能只复制一个“测试通过”结论：
 
 ```bash
-python3 "${CODEX_HOME:-$HOME/.codex}/skills/agent-relay/scripts/delivery_audit.py" \
-  run-behavior --home "${CODEX_HOME:-$HOME/.codex}" --session "<当前真实 session_id>" \
+"$PYTHON" "$CODEX_ROOT/skills/agent-relay/scripts/delivery_audit.py" \
+  run-behavior --home "$CODEX_ROOT" --session "<当前真实 session_id>" \
   --phase green --cmd "<项目已有测试或本地行为检查命令>" --kind test
 ```
 
@@ -66,12 +84,12 @@ python3 "${CODEX_HOME:-$HOME/.codex}/skills/agent-relay/scripts/delivery_audit.p
 5. 逐项登记真实证据（`requirements`、`diff`、`self_review`、`visual`、`independent_review`）：
 
 ```bash
-AUDIT="${CODEX_HOME:-$HOME/.codex}/skills/agent-relay/scripts/delivery_audit.py"
-python3 "$AUDIT" record --home "${CODEX_HOME:-$HOME/.codex}" --session "<当前真实 session_id>" \
+AUDIT="$CODEX_ROOT/skills/agent-relay/scripts/delivery_audit.py"
+"$PYTHON" "$AUDIT" record --home "$CODEX_ROOT" --session "<当前真实 session_id>" \
   --check requirements --passed --evidence '[{"requirement_id":"R1","item":"原始需求","status":"DONE","evidence":"文件:行/真实行为"}]'
-python3 "$AUDIT" record --home "${CODEX_HOME:-$HOME/.codex}" --session "<当前真实 session_id>" \
+"$PYTHON" "$AUDIT" record --home "$CODEX_ROOT" --session "<当前真实 session_id>" \
   --check diff --passed --evidence '已读取完整 diff；修改仅限允许文件，未发现未声明行为'
-python3 "$AUDIT" record --home "${CODEX_HOME:-$HOME/.codex}" --session "<当前真实 session_id>" \
+"$PYTHON" "$AUDIT" record --home "$CODEX_ROOT" --session "<当前真实 session_id>" \
   --check self_review --passed --evidence '已检查异常路径、相邻调用、目标外影响和覆盖缺口；未发现问题'
 ```
 
@@ -144,15 +162,16 @@ Hook 可以保守预筛选直接行动句式（如“现在调用 DeepSeek”“
   DOM/布局、控制台、文件哈希、按钮点击/输入和目标外检查，随后 `visual_review.py nonvisual`
   登记结构化结果。最终只能 `user_review_required`，明确请用户看页面，不得声称视觉通过。
 - **截图必须清理**：验收完成后先运行
-  `visual_review.py cleanup --session <当前 session_id> --home "$HOME/.codex"`，删除本轮登记的
+  `visual_review.py cleanup --session <当前 session_id> --home "$CODEX_ROOT"`，删除本轮登记的
   全部截图，仅保留文字证据和清理状态。若截图未登记在状态中，对每个绝对路径重复传
   `--screenshot <绝对路径>` 再运行 cleanup，不能使用通配符。若宿主拒绝 `rm -f`，不要重复
-  相同命令或再次弹同类确认；立即改为一次一个文件执行 `unlink -- <绝对路径>`，全部执行后
-  用 `test ! -e <绝对路径>` 回查。仅允许系统临时目录或 AgentRelay 验收证据目录内、明确
+  相同命令或再次弹同类确认；POSIX 改为一次一个文件执行 `unlink -- <绝对路径>`，Windows
+  改为 `Remove-Item -LiteralPath <绝对路径>`，全部执行后用 `test ! -e` 或
+  `Test-Path -LiteralPath` 回查。仅允许系统临时目录或 AgentRelay 验收证据目录内、明确
   逐个列出的截图；禁止目录、项目文件、用户输入图片、符号链接、`-r/-R`、通配符或与其他
   路径混合删除。
 - **完成文案前必须预检**：在写“已完成”“刷新即可”“验证通过”或其他完成结论前，先运行
-  `python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" finish-check --session <当前 session_id>`。
+  `"$PYTHON" "$CODEX_ROOT/hooks/agent_relay_tracker.py" finish-check --session <当前 session_id>`。
   只有返回 `ok: true` 才能写完成文案；`ok: false` 时只执行 `items[0]` 给出的当前阶段和
   `next_command`，完成后再次预检。不要因为它返回 `visual` 或 `cleanup` 阶段就重跑已经通过的
   Chromium 检查，也不要一次打印整套待办。该命令只读，不会替 Agent 关闭审计或伪造通过。
@@ -279,8 +298,8 @@ Skill 根目录：当前文件所在目录，以下命令从 Skill 根目录执�
 调用前确认 `scripts/agent_relay.py` 存在；缺失则停止，不要猜其他路径。
 
 脚本必须使用安装器创建的 AgentRelay 独立 Python：
-macOS/Linux 用 `${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python`；
-Windows 用 `%CODEX_HOME%\agentrelay-env\Scripts\python.exe`。禁止用系统 `pip` 装依赖。
+macOS/Linux 用 `$CODEX_ROOT/agentrelay-env/bin/python`；
+Windows 用 `$CODEX_ROOT\agentrelay-env\Scripts\python.exe`。禁止用系统 `pip` 装依赖。
 
 ---
 
@@ -328,15 +347,15 @@ retry_count=0` 开始。Tracker 在本地归档保守命中同一问题时，只
 状态查看（无需手查 Session ID）：
 
 ```bash
-python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" status
-python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" sessions
-python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" problems
+"$PYTHON" "$CODEX_ROOT/hooks/agent_relay_tracker.py" status
+"$PYTHON" "$CODEX_ROOT/hooks/agent_relay_tracker.py" sessions
+"$PYTHON" "$CODEX_ROOT/hooks/agent_relay_tracker.py" problems
 ```
 
 真实写文件并且准备宣称完成时，必须在最终回复前运行一次：
 
 ```bash
-python3 "${CODEX_HOME:-$HOME/.codex}/hooks/agent_relay_tracker.py" change-summary \
+"$PYTHON" "$CODEX_ROOT/hooks/agent_relay_tracker.py" change-summary \
   --summary "修复了刚才的问题。现在用户看到的结果是……，并补上了对应验证。" \
   --file-group "修改目的=路径1,路径2" \
   --file-group "另一修改目的=路径3"
@@ -372,8 +391,8 @@ Git。
 时每个问题发一次“本地归档提醒”：
 
 ```bash
-python3 "${CODEX_HOME:-$HOME/.codex}/skills/agent-relay/scripts/agent_relay_archive.py" search "关键词"
-python3 "${CODEX_HOME:-$HOME/.codex}/skills/agent-relay/scripts/agent_relay_archive.py" projects
+"$PYTHON" "$CODEX_ROOT/skills/agent-relay/scripts/agent_relay_archive.py" search "关键词"
+"$PYTHON" "$CODEX_ROOT/skills/agent-relay/scripts/agent_relay_archive.py" projects
 ```
 
 归档提醒不是调用命令；预匹配只是候选命中，Agent 仍要运行 `search` 核对旧结论是否适用
@@ -442,8 +461,8 @@ retry=0、用户未要求 → 不触发在线模型。首次外援审核的条�
 - 该网站只配置了混合模式 → 按混合模式调用，不要传 `-m 2`。
 
 ```bash
-"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" scripts/agent_relay.py "问题内容" -m 1
-"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" scripts/agent_relay.py "问题内容" -m 2
+"$PYTHON" scripts/agent_relay.py "问题内容" -m 1
+"$PYTHON" scripts/agent_relay.py "问题内容" -m 2
 ```
 
 极速模式支持文本、图片、文件，适用普通问题、截图、UI、报错图片、日志、代码与配置文件；
@@ -455,7 +474,7 @@ retry=0、用户未要求 → 不触发在线模型。首次外援审核的条�
 真实可读取的本地路径：
 
 ```bash
-"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" scripts/agent_relay.py \
+"$PYTHON" scripts/agent_relay.py \
   "用户的原问题" -m 1 --image "/path/to/image.png"
 ```
 
@@ -512,7 +531,7 @@ retry=0、用户未要求 → 不触发在线模型。首次外援审核的条�
 涉及危险操作或本地确实无法取得必要条件时，才向用户提问或请求操作。
 
 修改代码或配置后必须执行适合项目的验证（项目已有的构建/测试/启动/CI 命令），未经
-实际验证不得宣称问题已解决：Python 用 `python3 -m py_compile` / `pytest`；Maven 用
+实际验证不得宣称问题已解决：Python 用当前解释器执行 `-m py_compile` / `pytest`；Maven 用
 `mvn compile` / `mvn test`；Node 用 `npm run build` / `npm test`；Go 用
 `go build ./...` / `go test ./...`。
 
@@ -551,7 +570,7 @@ Hook 也会阻断；必须先形成当前会话可核对的浏览器证据和视
 出现未登录、Cookie 失效、Session expired、Unauthorized 等，停止自动查询，提示用户：
 
 ```bash
-"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" scripts/agent_relay_login.py
+"$PYTHON" scripts/agent_relay_login.py
 ```
 
 禁止无限登录、无限重复尝试、绕过登录或验证码。
@@ -590,7 +609,7 @@ workspace 被用户修改、角色之间内容冲突、路径越界或验证失�
 总结。运行时事件可通过以下命令查看和驱动：
 
 ```bash
-python3 scripts/agentrelay_console.py commander-merge TASK_ID \
+"$PYTHON" scripts/agentrelay_console.py commander-merge TASK_ID \
   --workspace /path/to/project --runtime-root .agentrelay/commander
 ```
 
@@ -627,14 +646,14 @@ Cookie、密钥、登录状态或原始对话。
 “这个存起来” → 按用户要求回写并标记“用户要求归档”。
 
 ```bash
-python3 scripts/agent_relay_archive.py add \
+"$PYTHON" scripts/agent_relay_archive.py add \
   --title "MQ 换 Kafka" --project de \
   --summary "生产者消费者切到 Kafka，测试通过" \
   --file src/MqSender.java --verification "pytest 通过"
-python3 scripts/agent_relay_archive.py list --project de
-python3 scripts/agent_relay_archive.py search Kafka --project de
-python3 scripts/agent_relay_archive.py projects
-python3 scripts/agent_relay_archive.py path
+"$PYTHON" scripts/agent_relay_archive.py list --project de
+"$PYTHON" scripts/agent_relay_archive.py search Kafka --project de
+"$PYTHON" scripts/agent_relay_archive.py projects
+"$PYTHON" scripts/agent_relay_archive.py path
 ```
 
 规则：新问题开始时 Tracker 只读检查当前项目归档，保守命中则从 weight 2 起算、先查

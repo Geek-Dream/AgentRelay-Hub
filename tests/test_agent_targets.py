@@ -752,6 +752,23 @@ class PiExtensionTests(unittest.TestCase):
 
 
 class RelayPythonTests(unittest.TestCase):
+    def test_windows_shim_command_uses_native_quoting(self):
+        venv = Path(r"C:\Program Files\AgentRelay\python.exe")
+        shim_path = Path(r"C:\Users\Test User\.codex\skills\agent-relay\scripts\agentrelay_hook_shim.py")
+        with patch.object(targets.os, "name", "nt"):
+            command = targets.shim_command(venv, shim_path, "claude")
+
+        self.assertEqual(
+            command,
+            subprocess.list2cmdline([
+                str(venv),
+                str(shim_path),
+                "--target",
+                "claude",
+            ]),
+        )
+        self.assertIn('"C:\\Program Files\\AgentRelay\\python.exe"', command)
+
     def test_windows_virtualenv_python_is_detected(self):
         tmp = Path(tempfile.mkdtemp(prefix="agentrelay-win-python-test-"))
         self.addCleanup(shutil.rmtree, tmp, True)

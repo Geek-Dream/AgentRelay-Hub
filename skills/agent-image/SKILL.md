@@ -47,10 +47,23 @@ AgentImage 是 AgentRelay 的图片识别中继：把本地图片发给已配置
      原路转述给用户**，用户自然知道当前模型不支持识图。
 2. **调用脚本**（必须用 agentrelay 独立环境的 Python）：
 
+   macOS/Linux：
+
    ```bash
-   "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" \
-     "${CODEX_HOME:-$HOME/.codex}/skills/agent-image/scripts/agent_image.py" \
+   CODEX_ROOT="${CODEX_HOME:-$HOME/.codex}"
+   PYTHON="$CODEX_ROOT/agentrelay-env/bin/python"
+   IMAGE_AGENT="$CODEX_ROOT/skills/agent-image/scripts/agent_image.py"
+   "$PYTHON" "$IMAGE_AGENT" \
      /path/to/image1.png /path/to/image2.jpg
+   ```
+
+   Windows PowerShell：
+
+   ```powershell
+   $CODEX_ROOT = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
+   $PYTHON = Join-Path $CODEX_ROOT "agentrelay-env\Scripts\python.exe"
+   $IMAGE_AGENT = Join-Path $CODEX_ROOT "skills\agent-image\scripts\agent_image.py"
+   & $PYTHON $IMAGE_AGENT C:\path\to\image1.png C:\path\to\image2.jpg
    ```
 
    - 可选 `--provider <id>` 优先使用某个网页 Provider；失败后脚本会自动切换

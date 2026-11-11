@@ -750,6 +750,25 @@ class CrossPlatformRuntimeTests(unittest.TestCase):
                 "py -m compileall -q scripts",
             )
 
+    def test_windows_verification_command_parsing_preserves_paths(self):
+        command = (
+            r'"C:\Program Files\AgentRelay\python.exe" '
+            r'-m compileall -q "src with spaces"'
+        )
+        self.assertEqual(
+            orchestrator_core.parse_verification_command(
+                command,
+                platform_name="nt",
+            ),
+            [
+                r"C:\Program Files\AgentRelay\python.exe",
+                "-m",
+                "compileall",
+                "-q",
+                "src with spaces",
+            ],
+        )
+
     def test_python_launcher_compile_and_unittest_are_allowed(self):
         completed = SimpleNamespace(returncode=0, stdout="", stderr="")
         runner = VerificationRunner()
@@ -912,16 +931,163 @@ class CrossPlatformRuntimeTests(unittest.TestCase):
         with mock.patch.object(installer.os, "name", "posix"):
             self.assertEqual(installer.installer_command(), "python3 install.py")
 
-    def test_windows_daemon_generation_fails_clearly(self):
+    def test_windows_daemon_generation_writes_task_scheduler_xml(self):
+        from xml.etree import ElementTree
+
         installer = load_module(
             "agent_relay_installer_daemon",
             PROJECT_ROOT / "install.py",
         )
-        with mock.patch.dict(
-            os.environ, {"AGENTRELAY_INSTALL_DAEMON": "1"}
-        ), mock.patch.object(installer.sys, "platform", "win32"):
-            with self.assertRaisesRegex(installer.InstallError, "Windows"):
-                installer.write_daemon_service_config()
+        with tempfile.TemporaryDirectory() as directory:
+            codex_home = Path(directory) / "Codex Home"
+            skill = codex_home / "skills" / "agent-relay"
+            python = codex_home / "agentrelay-env" / "Scripts" / "python.exe"
+            with mock.patch.dict(
+                os.environ, {"AGENTRELAY_INSTALL_DAEMON": "1"}
+            ), mock.patch.object(
+                installer.sys, "platform", "win32"
+            ), mock.patch.object(
+                installer, "CODEX_HOME", codex_home
+            ), mock.patch.object(
+                installer, "TARGET_SKILL", skill
+            ), mock.patch.object(
+                installer, "VENV_PYTHON", python
+            ):
+                target = installer.write_daemon_service_config()
+
+            self.assertEqual(
+                target,
+                codex_home / "windows" / "agentrelay-daemon-task.xml",
+            )
+            text = target.read_text(encoding="utf-16")
+            root = ElementTree.fromstring(text)
+            namespace = {
+                "task": "http://schemas.microsoft.com/windows/2004/02/mit/task"
+            }
+            command = root.find(".//task:Exec/task:Command", namespace)
+            arguments = root.find(".//task:Exec/task:Arguments", namespace)
+            self.assertEqual(command.text, str(python))
+            self.assertIn(str(skill / "scripts" / "agentrelay_daemon.py"), arguments.text)
+            self.assertIn(str(skill / "runtime" / "tasks"), arguments.text)
+
+    def test_windows_daemon_registration_uses_task_scheduler_xml(self):
+        installer = load_module(
+            "agent_relay_installer_daemon_registration",
+            PROJECT_ROOT / "install.py",
+        )
+        target = Path(r"C:\Users\Test User\.codex\windows\agentrelay-daemon-task.xml")
+        with mock.patch.object(
+            installer.sys, "platform", "win32"
+        ), mock.patch.object(
+            installer.subprocess,
+            "run",
+        ) as run:
+            installer.register_daemon_service(target)
+
+        run.assert_called_once_with(
+            [
+                "schtasks",
+                "/Create",
+                "/TN",
+                "AgentRelay Daemon",
+                "/XML",
+                str(target),
+                "/F",
+            ],
+            check=True,
+        )
+
+    def test_windows_hook_detects_native_command_syntax(self):
+        tracker = load_module(
+            "agent_relay_tracker_windows_commands",
+            PROJECT_ROOT / "hooks" / "agent_relay_tracker.py",
+        )
+        with mock.patch.object(tracker.os, "name", "nt"):
+            dangerous = {
+                "taskkill /F /PID 123": "权限或系统级操作",
+                "Stop-Process -Id 123 -Force": "权限或系统级操作",
+                r"Remove-Item -Recurse C:\temp\cache": "删除文件或目录",
+                r'cmd /c "del C:\temp\cache.txt"': "删除文件或目录",
+                (
+                    r'powershell -NoProfile -Command '
+                    r'"taskkill /F /PID 123"'
+                ): "权限或系统级操作",
+            }
+            for command, reason in dangerous.items():
+                with self.subTest(command=command):
+                    self.assertEqual(
+                        tracker.dangerous_command_reason(
+                            "exec_command",
+                            {"cmd": command},
+                        ),
+                        reason,
+                    )
+            self.assertTrue(tracker.tool_writes_files(
+                "exec_command",
+                {"cmd": r"Set-Content C:\temp\result.txt ok"},
+            ))
+            self.assertTrue(tracker.tool_writes_files(
+                "exec_command",
+                {"cmd": r"echo ok > C:\temp\result.txt"},
+            ))
+
+    def test_windows_hook_command_format_uses_native_quoting(self):
+        tracker = load_module(
+            "agent_relay_tracker_windows_formatting",
+            PROJECT_ROOT / "hooks" / "agent_relay_tracker.py",
+        )
+        values = [
+            r"C:\Program Files\AgentRelay\python.exe",
+            r"C:\Users\Test User\.codex\hooks\agent_relay_tracker.py",
+            "select-work-profile",
+            "--profile",
+            "strict",
+        ]
+        with mock.patch.object(tracker.os, "name", "nt"):
+            command = tracker.format_command(values)
+            argv_command = tracker.shell_command_text(
+                "exec_command",
+                {"argv": values},
+            )
+
+        self.assertEqual(command, subprocess.list2cmdline(values))
+        self.assertEqual(argv_command, command)
+        self.assertIn('"C:\\Program Files\\AgentRelay\\python.exe"', command)
+        self.assertNotIn("'", command)
+
+    def test_windows_page_verification_uses_active_python(self):
+        page_verification = load_module(
+            "agent_relay_page_verification_windows",
+            PROJECT_ROOT / "scripts" / "page_verification.py",
+        )
+        python_path = r"C:\Program Files\AgentRelay\python.exe"
+        values = [
+            python_path,
+            "scripts/verify_page.py",
+            "--session",
+            "session with space",
+            "--url",
+            "<本地页面URL>",
+            "--target-selector",
+            "<目标选择器>",
+            "--after",
+        ]
+        with mock.patch.object(
+            page_verification.sys,
+            "executable",
+            python_path,
+        ), mock.patch.object(page_verification.os, "name", "nt"):
+            command = page_verification._verify_page_command(
+                Path(r"C:\Users\Test User\.codex"),
+                "session with space",
+                {
+                    "files": {"src/App.vue": "ok"},
+                    "target_expected": True,
+                },
+            )
+
+        self.assertEqual(command, subprocess.list2cmdline(values))
+        self.assertIn("--session \"session with space\"", command)
 
 
 class CrossPlatformHookTests(unittest.TestCase):
@@ -953,6 +1119,16 @@ class CrossPlatformHookTests(unittest.TestCase):
             "posix",
         )
         self.assertIn("'/opt/agentrelay-test/test user/", command)
+
+    def test_windows_installer_skips_posix_hook_wrapper(self):
+        self.assertEqual(
+            self.installer.hook_files_for_platform("nt"),
+            ("agent_relay_hook.py", "agent_relay_tracker.py"),
+        )
+        self.assertIn(
+            "agent_relay_hook.sh",
+            self.installer.hook_files_for_platform("posix"),
+        )
 
     def test_installer_upgrades_old_script_hook_and_preserves_user_hooks(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -228,11 +228,31 @@ AI 生成过程中：
 
 一、第一次使用
 
+以下命令在 agent-relay Skill 的 scripts 目录执行，并先设置安装器创建的独立
+Python 环境。
+
+macOS/Linux：
+
+    CODEX_ROOT="${CODEX_HOME:-$HOME/.codex}"
+    PYTHON="$CODEX_ROOT/agentrelay-env/bin/python"
+
+Windows PowerShell：
+
+    $CODEX_ROOT = if ($env:CODEX_HOME) {
+        $env:CODEX_HOME
+    } else {
+        Join-Path $env:USERPROFILE ".codex"
+    }
+    $PYTHON = Join-Path $CODEX_ROOT "agentrelay-env\\Scripts\\python.exe"
+
+下面的 "$PYTHON" 是 macOS/Linux 写法；Windows 把命令开头的 "$PYTHON"
+改成 & $PYTHON，其余参数相同。
+
 首先确保已经完成 DeepSeek 登录。
 
 运行登录脚本：
 
-    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay_login.py
+    "$PYTHON" agent_relay_login.py
 
 登录成功以后，会生成：
 
@@ -256,11 +276,11 @@ AI 生成过程中：
 
 运行：
 
-    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay.py "你的问题" -m 1
+    "$PYTHON" agent_relay.py "你的问题" -m 1
 
 例如：
 
-    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay.py "帮我分析一下这个 Java 项目" -m 1
+    "$PYTHON" agent_relay.py "帮我分析一下这个 Java 项目" -m 1
 
 含义：
 
@@ -278,11 +298,11 @@ DeepSeek 当前将极速、图片和专家能力统一在同一个会话中；�
 
 运行：
 
-    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay.py "你的问题" -m 2
+    "$PYTHON" agent_relay.py "你的问题" -m 2
 
 例如：
 
-    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay.py "请深入分析这个系统架构的问题" -m 2
+    "$PYTHON" agent_relay.py "请深入分析这个系统架构的问题" -m 2
 
 含义：
 
@@ -300,7 +320,7 @@ DeepSeek 当前将极速、图片和专家能力统一在同一个会话中；�
 
 如果不传问题：
 
-    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay.py
+    "$PYTHON" agent_relay.py
 
 程序会提示：
 
@@ -333,7 +353,7 @@ DeepSeek 当前将极速、图片和专家能力统一在同一个会话中；�
 
 问题：
 
-    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay.py "你的问题"
+    "$PYTHON" agent_relay.py "你的问题"
 
 模式：
 
@@ -353,7 +373,7 @@ DeepSeek 当前将极速、图片和专家能力统一在同一个会话中；�
 
 例如：
 
-    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay.py \
+    "$PYTHON" agent_relay.py \
         "帮我优化这个 Java 代码" \
         --mode 2
 
@@ -363,11 +383,11 @@ DeepSeek 当前将极速、图片和专家能力统一在同一个会话中；�
 
 第一次登录：
 
-    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay_login.py
+    "$PYTHON" agent_relay_login.py
 
 然后：
 
-    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay.py \
+    "$PYTHON" agent_relay.py \
         "帮我分析 Spring Boot 项目的性能问题" \
         -m 2
 
@@ -437,7 +457,7 @@ DeepSeek 当前将极速、图片和专家能力统一在同一个会话中；�
 
 首先重新运行：
 
-    "${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" agent_relay_login.py
+    "$PYTHON" agent_relay_login.py
 
 不要第一时间修改主脚本。
 

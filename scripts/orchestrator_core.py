@@ -522,7 +522,7 @@ class VerificationRunner:
             return VerificationResult(command, "rejected", None, "", "命令不在允许列表", 0, error="COMMAND_NOT_ALLOWED")
         started = time.monotonic()
         try:
-            completed = subprocess.run(command.split(), cwd=str(Path(workspace)), capture_output=True,
+            completed = subprocess.run(parse_verification_command(command), cwd=str(Path(workspace)), capture_output=True,
                                        text=True, timeout=timeout_seconds, check=False)
             return VerificationResult(command, "passed" if completed.returncode == 0 else "failed", completed.returncode,
                                       completed.stdout, completed.stderr, (time.monotonic() - started) * 1000)
@@ -539,6 +539,23 @@ class VerificationRunner:
 def default_compileall_command() -> str:
     """Return a compile check command available on the current platform."""
     return "py -m compileall -q scripts" if os.name == "nt" else "python3 -m compileall -q scripts"
+
+
+def parse_verification_command(
+    command: str,
+    *,
+    platform_name: str | None = None,
+) -> list[str]:
+    """Parse quoted verification commands without breaking Windows paths."""
+    if (platform_name or os.name) != "nt":
+        return shlex.split(command)
+    values = shlex.split(command, posix=False)
+    return [
+        value[1:-1]
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}
+        else value
+        for value in values
+    ]
 
 
 class Orchestrator:

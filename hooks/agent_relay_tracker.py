@@ -23,6 +23,7 @@ AgentRelay 候选求援状态追踪器
 import difflib
 import hashlib
 import json
+import ntpath
 import os
 import re
 import shlex
@@ -91,6 +92,23 @@ RELAY_MAX_SIGNALS = 3
 HOOK_CARD_DIVIDER = "--------------------------------"
 CHANGE_HISTORY_LIMIT = 2
 CHANGE_HISTORY_TEXT_WIDTH = 68
+
+
+def format_command(
+    parts,
+    *,
+    platform_name=None,
+):
+    """Render a display/CLI command with syntax native to the current host."""
+
+    values = [str(part) for part in parts]
+    if (platform_name or os.name) == "nt":
+        return subprocess.list2cmdline(values)
+    return shlex.join(values)
+
+
+def active_python_command():
+    return str(sys.executable or ("py" if os.name == "nt" else "python3"))
 
 
 def normalize_agent_id(agent_id):
@@ -465,20 +483,45 @@ SHELL_INTERPRETERS = {
     "zsh",
     "dash",
     "ksh",
+    "cmd",
+    "cmd.exe",
+    "powershell",
+    "powershell.exe",
+    "pwsh",
+    "pwsh.exe",
 }
 
 SHELL_WRITE_COMMANDS = {
+    "add-content",
+    "clear-content",
+    "copy",
+    "copy-item",
     "cp",
+    "del",
+    "erase",
     "install",
+    "md",
     "mkdir",
+    "move",
+    "move-item",
     "mv",
+    "new-item",
+    "out-file",
     "patch",
+    "ren",
+    "rename",
+    "rename-item",
+    "remove-item",
+    "rd",
     "rm",
     "rmdir",
+    "robocopy",
+    "set-content",
     "tee",
     "touch",
     "truncate",
     "unlink",
+    "xcopy",
 }
 
 SHELL_CONTROL_OPERATORS = {
@@ -1463,10 +1506,7 @@ def shell_command_text(tool_name, tool_input):
         return str(tool_input).replace("\r\n", "\n").strip()
 
     if isinstance(tool_input, (list, tuple)):
-        try:
-            return shlex.join(str(item) for item in tool_input)
-        except (TypeError, ValueError):
-            return " ".join(str(item) for item in tool_input).strip()
+        return format_command(tool_input)
 
     if not isinstance(tool_input, dict):
         return ""
@@ -1484,10 +1524,7 @@ def shell_command_text(tool_name, tool_input):
 
     argv = tool_input.get("argv")
     if isinstance(argv, (list, tuple)):
-        try:
-            return shlex.join(str(item) for item in argv)
-        except (TypeError, ValueError):
-            return " ".join(str(item) for item in argv).strip()
+        return format_command(argv)
 
     return ""
 
@@ -1563,7 +1600,7 @@ def _shell_tokens(command):
             if char.isspace() or char in ";&|<>()":
                 break
 
-            if char == "\\":
+            if char == "\\" and os.name != "nt":
                 word_started = True
                 quoted = True
                 index += 1
@@ -1579,7 +1616,7 @@ def _shell_tokens(command):
                 quoted = True
                 index += 1
                 while index < length and text[index] != quote:
-                    if quote == '"' and text[index] == "\\":
+                    if quote == '"' and text[index] == "\\" and os.name != "nt":
                         index += 1
                         if index < length:
                             value.append(text[index])
@@ -1651,7 +1688,12 @@ def _segment_words(segment):
 
 
 def _command_name(value):
-    return os.path.basename(str(value or "")).lower()
+    text = str(value or "")
+    return (
+        ntpath.basename(text)
+        or os.path.basename(text)
+        or text
+    ).lower()
 
 
 def _skip_options(words, options_with_values=()):
@@ -1732,11 +1774,14 @@ def _shell_wrapper_script(words):
     """返回 shell -c 后面的脚本；没有 -c 时返回 None。"""
 
     for index, option in enumerate(words[1:], start=1):
-        if option == "--command":
+        normalized = option.lower()
+        if normalized in {"--command", "-command", "/command"}:
             return words[index + 1] if index + 1 < len(words) else None
-        if option.startswith("--command="):
+        if normalized.startswith(("--command=", "-command=")):
             return option.split("=", 1)[1]
-        if option.startswith("-") and not option.startswith("--") and "c" in option[1:]:
+        if normalized in {"/c", "/k"}:
+            return words[index + 1] if index + 1 < len(words) else None
+        if normalized.startswith("-") and not normalized.startswith("--") and "c" in normalized[1:]:
             return words[index + 1] if index + 1 < len(words) else None
     return None
 
@@ -1967,7 +2012,7 @@ def _segment_dangerous_reason(words, depth=0):
     if command == "eval":
         return _dangerous_shell_text(" ".join(arguments), depth + 1)
 
-    if command in {"rm", "rmdir", "unlink"}:
+    if command in {"del", "erase", "rd", "remove-item", "rm", "rmdir", "unlink"}:
         return "删除文件或目录"
     if command == "find" and any(
         argument == "-delete"
@@ -1983,24 +2028,40 @@ def _segment_dangerous_reason(words, depth=0):
     if command == "git" and _git_dangerous(arguments):
         return "Git 破坏性操作"
 
-    if (
-        command in {"chmod", "chown"} and "-R" in arguments
-        or command in {"systemctl", "launchctl"}
-        and arguments
-        and arguments[0] in {"restart", "stop", "unload", "bootout"}
-        or command == "kill" and "-9" in arguments
-        or command == "pkill"
-    ):
+    if command in {"chmod", "chown"} and "-R" in arguments:
+        return "权限或系统级操作"
+    if command in {
+        "restart-computer",
+        "shutdown",
+        "stop-computer",
+        "stop-process",
+        "stop-service",
+        "taskkill",
+    }:
+        return "权限或系统级操作"
+    if command in {"launchctl", "sc", "schtasks", "systemctl"} and arguments:
+        if arguments[0].lower() in {
+            "/delete",
+            "/end",
+            "delete",
+            "restart",
+            "stop",
+            "unload",
+            "bootout",
+        }:
+            return "权限或系统级操作"
+    if command == "kill" and "-9" in arguments or command == "pkill":
         return "权限或系统级操作"
 
     if (
         command in {"pip", "pip3"}
         and arguments[:1] == ["install"]
-        or command in {"python", "python3"}
+        or command in {"py", "python", "python.exe", "python3", "python3.exe"}
         and arguments[:3] == ["-m", "pip", "install"]
         or command in {"uv"}
         and arguments[:2] == ["pip", "install"]
         or command == "conda" and arguments[:1] == ["install"]
+        or command in {"choco", "scoop", "winget"} and arguments[:1] == ["install"]
         or command in {"npm", "pnpm", "yarn"}
         and arguments[:1] in (["install"], ["add"])
         or command in {"brew", "apt", "apt-get", "dnf", "yum"}
@@ -3155,9 +3216,9 @@ def semantic_approval_notice(session_id, state, prompt):
         "scope": scope,
         "created_at": iso_now(),
     }
-    tracker_path = shlex.quote(str(Path(__file__).resolve()))
-    python_path = shlex.quote(sys.executable)
-    session_value = shlex.quote(str(session_id))
+    tracker_path = str(Path(__file__).resolve())
+    python_path = active_python_command()
+    session_value = str(session_id)
     gate = state.get("task_gate")
     work_profile = gate.get("work_profile") if isinstance(gate, dict) else None
     minimum_profile = (
@@ -3173,20 +3234,34 @@ def semantic_approval_notice(session_id, state, prompt):
                 or pending_profile.get("profile")
                 or ""
             )
-    profile_argument = (
-        f" --work-profile {shlex.quote(minimum_profile)}"
-        if minimum_profile else ""
-    )
-    approve_command = (
-        f"{python_path} {tracker_path} resolve-intent --session {session_value} "
-        f"--decision approve --source-sha256 {source_hash}{profile_argument} "
-        "--reason '用户明确批准当前待确认范围'"
-    )
-    reject_command = (
-        f"{python_path} {tracker_path} resolve-intent --session {session_value} "
-        f"--decision reject --source-sha256 {source_hash} "
-        "--reason '用户明确拒绝当前待确认范围'"
-    )
+    approve_parts = [
+        python_path,
+        tracker_path,
+        "resolve-intent",
+        "--session",
+        session_value,
+        "--decision",
+        "approve",
+        "--source-sha256",
+        source_hash,
+    ]
+    if minimum_profile:
+        approve_parts.extend(["--work-profile", minimum_profile])
+    approve_parts.extend(["--reason", "用户明确批准当前待确认范围"])
+    approve_command = format_command(approve_parts)
+    reject_command = format_command([
+        python_path,
+        tracker_path,
+        "resolve-intent",
+        "--session",
+        session_value,
+        "--decision",
+        "reject",
+        "--source-sha256",
+        source_hash,
+        "--reason",
+        "用户明确拒绝当前待确认范围",
+    ])
     return (
         "[AgentRelay 语义审批桥]\n"
         "Hook 只识别到这是一条待审批回复，不会根据关键词替用户授权。\n"
@@ -3643,17 +3718,26 @@ def update_task_gate_for_prompt(state, prompt):
             ):
                 return ""
             minimum = work_profile.get("minimum") or work_profile.get("profile") or "light"
-            tracker_path = shlex.quote(str(Path(__file__).resolve()))
-            python_path = shlex.quote(sys.executable)
-            session_value = shlex.quote(str(state.get("session_id") or ""))
+            tracker_path = str(Path(__file__).resolve())
+            python_path = active_python_command()
+            session_value = str(state.get("session_id") or "")
             return (
                 "[AgentRelay 工作档]\n"
                 f"本次是实际写任务，最低工作档为 {minimum}，不会显示用户确认卡。"
                 "请主 Agent 按任务复杂度显式选择工作档，用户无需运行命令。可选择 "
                 "standard、strict、user_required，但不能低于最低档。\n"
-                f"主 Agent 运行：{python_path} {tracker_path} select-work-profile "
-                f"--session {session_value} --profile {shlex.quote(minimum)} "
-                "--reason '主 Agent 已按任务复杂度选择工作档'"
+                "主 Agent 运行："
+                + format_command([
+                    python_path,
+                    tracker_path,
+                    "select-work-profile",
+                    "--session",
+                    session_value,
+                    "--profile",
+                    minimum,
+                    "--reason",
+                    "主 Agent 已按任务复杂度选择工作档",
+                ])
             )
         return ""
 
@@ -3852,17 +3936,27 @@ def evaluate_pre_tool_gate(tool_name, tool_input, session_id):
                     or work_profile.get("profile")
                     or "light"
                 )
-                session_value = shlex.quote(str(session_id))
-                tracker_path = shlex.quote(str(Path(__file__).resolve()))
-                python_path = shlex.quote(sys.executable)
+                session_value = str(session_id)
+                tracker_path = str(Path(__file__).resolve())
+                python_path = active_python_command()
                 write_state(state, session_id=session_id)
                 return False, (
                     "[AgentRelay 工作档]\n"
                     f"尚未显式选择工作档，首次写入已阻断。任务最低档为 {minimum}，"
                     "不能降档。请主 Agent 按任务复杂度选择工作档，用户无需运行命令。\n"
-                    f"主 Agent 运行：{python_path} {tracker_path} select-work-profile "
-                    f"--session {session_value} --profile {shlex.quote(str(minimum))} "
-                    "--reason '主 Agent 已按任务复杂度选择工作档'\n"
+                    "主 Agent 运行："
+                    + format_command([
+                        python_path,
+                        tracker_path,
+                        "select-work-profile",
+                        "--session",
+                        session_value,
+                        "--profile",
+                        str(minimum),
+                        "--reason",
+                        "主 Agent 已按任务复杂度选择工作档",
+                    ])
+                    + "\n"
                     "纯问答、只读搜索和只读检查不需要选档。"
                 )
             if auto_selected:
@@ -7971,11 +8065,15 @@ def completion_preflight(session_id, message=""):
                 "target" if code == "target_review_missing" else "invariants",
                 code,
                 page_reason,
-                (
-                    "python3 scripts/verify_page.py --target-selector <目标选择器> --after"
-                    if code == "target_review_missing"
-                    else "python3 scripts/verify_page.py --after"
-                ),
+                format_command([
+                    active_python_command(),
+                    "scripts/verify_page.py",
+                    *(
+                        ["--target-selector", "<目标选择器>", "--after"]
+                        if code == "target_review_missing"
+                        else ["--after"]
+                    ),
+                ]),
             )
         return {"ok": False, "session_id": session_id, "items": [item]}
 
@@ -7988,14 +8086,14 @@ def completion_preflight(session_id, message=""):
                 "visual",
                 "visual_review_missing",
                 visual_reason,
-                " ".join([
-                    "python3",
-                    shlex.quote(_shared_script_path("visual_review")),
+                format_command([
+                    active_python_command(),
+                    _shared_script_path("visual_review"),
                     "record",
                     "--session",
-                    shlex.quote(str(session_id)),
+                    str(session_id),
                     "--home",
-                    shlex.quote(str(CODEX_DIR)),
+                    str(CODEX_DIR),
                 ]),
             )],
         }
@@ -8013,14 +8111,14 @@ def completion_preflight(session_id, message=""):
                 "delivery_audit",
                 "delivery_audit_pending",
                 audit_reason,
-                " ".join([
-                    "python3",
-                    shlex.quote(_shared_script_path("delivery_audit")),
+                format_command([
+                    active_python_command(),
+                    _shared_script_path("delivery_audit"),
                     "status",
                     "--session",
-                    shlex.quote(str(session_id)),
+                    str(session_id),
                     "--home",
-                    shlex.quote(str(CODEX_DIR)),
+                    str(CODEX_DIR),
                 ]),
             )],
         }
@@ -8282,15 +8380,15 @@ def main():
 
     CLI：
 
-        python3 agent_relay_tracker.py status
-        python3 agent_relay_tracker.py retry
-        python3 agent_relay_tracker.py branch
-        python3 agent_relay_tracker.py resolve
-        python3 agent_relay_tracker.py mark-relay xxx
+        <当前 Python> agent_relay_tracker.py status
+        <当前 Python> agent_relay_tracker.py retry
+        <当前 Python> agent_relay_tracker.py branch
+        <当前 Python> agent_relay_tracker.py resolve
+        <当前 Python> agent_relay_tracker.py mark-relay xxx
 
     Hook：
 
-        python3 agent_relay_tracker.py
+        <当前 Python> agent_relay_tracker.py
 
     Hook 模式从 stdin 读取 JSON。
     """

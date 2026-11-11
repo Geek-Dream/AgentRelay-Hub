@@ -59,16 +59,29 @@ Fusion 永不启动另一个 Fusion，也永不启动 Commander。Commander 拥�
 
 必须使用 AgentRelay 独立 Python：
 
-- macOS/Linux：`${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python`
-- Windows：`%CODEX_HOME%\agentrelay-env\Scripts\python.exe`
+- macOS/Linux：`$CODEX_ROOT/agentrelay-env/bin/python`
+- Windows：`$CODEX_ROOT\agentrelay-env\Scripts\python.exe`
 
-下面的命令以 macOS/Linux shell 为例；Windows PowerShell 使用对应的
-`Scripts\python.exe` 路径，并把命令开头的 `"$PYTHON"` 改为 `& $Python`。
+先设置平台路径。macOS/Linux：
 
 ```bash
-"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" \
-  "${CODEX_HOME:-$HOME/.codex}/skills/agent-fusion/scripts/agent_fusion.py" \
-  status --json
+CODEX_ROOT="${CODEX_HOME:-$HOME/.codex}"
+PYTHON="$CODEX_ROOT/agentrelay-env/bin/python"
+FUSION="$CODEX_ROOT/skills/agent-fusion/scripts/agent_fusion.py"
+```
+
+Windows PowerShell：
+
+```powershell
+$CODEX_ROOT = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
+$PYTHON = Join-Path $CODEX_ROOT "agentrelay-env\Scripts\python.exe"
+$FUSION = Join-Path $CODEX_ROOT "skills\agent-fusion\scripts\agent_fusion.py"
+```
+
+Windows 下把命令开头的 `"$PYTHON"` 改为 `& $PYTHON`。状态检查：
+
+```bash
+"$PYTHON" "$FUSION" status --json
 ```
 
 输出以 `AGENT_FUSION_RESULT=` 开头。读取 `state`：
@@ -95,9 +108,6 @@ Pi 中直接输入 `/agent-fusion` 会显示中文选择菜单，每个选项都
 脚本化和精确操作：
 
 ```bash
-PYTHON="${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python"
-FUSION="${CODEX_HOME:-$HOME/.codex}/skills/agent-fusion/scripts/agent_fusion.py"
-
 "$PYTHON" "$FUSION" on
 "$PYTHON" "$FUSION" off
 "$PYTHON" "$FUSION" status --json
@@ -167,8 +177,7 @@ coding 模式可以直接修改文件并执行命令，必须由用户明确确�
 状态允许后，使用明确的 workspace 和 session ID 保持会话隔离：
 
 ```bash
-"${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python" \
-  "${CODEX_HOME:-$HOME/.codex}/skills/agent-fusion/scripts/agent_fusion.py" \
+"$PYTHON" "$FUSION" \
   delegate "具体可执行任务" \
   --workspace "/path/to/project" \
   --session-id "main-session" \
@@ -190,7 +199,13 @@ coding 模式可以直接修改文件并执行命令，必须由用户明确确�
 Fusion 调用会写入有界 JSONL 诊断日志：
 
 ```bash
-tail -n 100 "${CODEX_HOME:-$HOME/.codex}/agent_relay_tracker/logs/fusion-trace.jsonl"
+tail -n 100 "$CODEX_ROOT/agent_relay_tracker/logs/fusion-trace.jsonl"
+```
+
+Windows PowerShell 使用：
+
+```powershell
+Get-Content (Join-Path $CODEX_ROOT "agent_relay_tracker\logs\fusion-trace.jsonl") -Tail 100
 ```
 
 日志只记录 trace ID、会话 ID、阶段、耗时、Provider 类型、模型、错误类型和少量状态，
