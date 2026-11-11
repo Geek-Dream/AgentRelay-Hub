@@ -190,7 +190,12 @@ def _tree_files(root: Path) -> list[Path]:
         raise CatalogError(f"Skill tree is not a regular directory: {root}")
     files: list[Path] = []
     try:
-        entries = sorted(root.rglob("*"))
+        # Path ordering is case-insensitive on Windows. Sort relative POSIX
+        # paths explicitly so integrity hashes match on every platform.
+        entries = sorted(
+            root.rglob("*"),
+            key=lambda path: path.relative_to(root).as_posix(),
+        )
     except OSError as exc:
         raise CatalogError(f"Cannot scan Skill tree {root}: {exc}") from exc
     for path in entries:

@@ -166,6 +166,10 @@ jobs:
         shell: pwsh
         run: python -m pip install -r requirements-dev.txt
 
+      - name: Install Chromium for page tests
+        shell: pwsh
+        run: python -m playwright install chromium
+
       - name: Verify Windows installer entry point
         shell: pwsh
         run: python install.py --help
