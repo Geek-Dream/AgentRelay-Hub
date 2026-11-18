@@ -11,6 +11,11 @@ import os
 import re
 import subprocess
 from pathlib import Path
+
+try:
+    from .stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+except ImportError:
+    from stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
 from typing import Any, Iterable
 
 ENV_CONTRACT = "AGENTRELAY_CHANGE_CONTRACT_JSON"
@@ -503,4 +508,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    _configure_utf8_stdio()
     raise SystemExit(main())

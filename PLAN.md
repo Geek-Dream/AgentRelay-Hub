@@ -1,3 +1,256 @@
+# PLAN — 安装/卸载、宿主命令、应用许可与 Stop 大白话总结（2026-11-18）
+
+> 状态：**代码修复已完成；最终验证结果见本节末尾。** 用户于 2026-11-18 明确批准执行全部计划。
+> 本轮只修改仓库，未执行真实安装、未提交或推送。
+
+## 用户已明确批准的范围
+仅登记以下四项计划。具体修复需后续单独批准。
+
+### 1. 取消勾选必须能真正取消 AgentRelay 接入
+
+**已确认的现状**
+- 终端取消勾选后回车仍是“按当前勾选安装”；`0/web` 只是跳过安装、打开网页配置，
+  不是卸载（`install.py:1278-1325`）。
+- 网页保存后仍调用 `apply_agent_targets()` 安装；Codex 还会被自动补回选择列表
+  （`install.py:1915-1936`、`scripts/config_web.py` 的 `applyTargets()`）。
+- 安装器没有卸载路径，因此 Windows 与 macOS 都有同样问题：取消勾选只会“不再安装”，
+  不会移除以前安装的 Skill、Hook 或扩展。
+
+**后期方案**
+- 明确区分“安装/更新”和“停用并卸载 AgentRelay”，不能混用同一个勾选动作。
+- 卸载只移除 AgentRelay 自己管理的 Skill、Hook、扩展和命令；保留用户自己的 Skill、
+  其他 Hook、Provider 配置及运行数据，操作前备份。
+- Codex 的公共运行时与 Codex 接入分开处理；不得在用户取消后悄悄重新勾选。
+- 卸载后逐项验证目标 Skill 与 Hook 已移除，其他宿主配置未被误删。
+
+### 2. Skill 存在不代表 `/agent...` 命令存在
+
+**已确认的现状**
+- Skill 文件、Hook、斜杠命令是三种不同接入物，不是安装 `SKILL.md` 就会自动出现命令。
+- 当前只有 Pi 明确注册 `/agent-approval`、`/设置`、`/agent-fusion`
+  （`scripts/agent_targets.py:1401-1417`）。
+- Codex 文档声称可输入这些命令，但安装器没有对应命令注册代码；本机检查也未发现
+  Codex、Claude、OpenCode 的 AgentRelay commands/prompts 文件。
+- OpenCode 当前明确标为 `skill-only`，不能与 Codex/Pi 的完整能力混写。
+- 宿主升级后“Skill 还在、命令消失”的具体文件变化尚无证据，不能断言是某次升级删除。
+
+**后期方案**
+- 按各宿主真实能力实现命令入口：Codex、Claude、Pi、OpenCode 分别验证，不支持则明确标为
+  不可用，不再只在文档里假设 `/agent-approval`、`/agent-audit` 存在。
+- 安装器增加“命令是否注册、是否能被宿主发现”的检查，而非只检查 Skill 与 Hook 文件。
+- 提供统一、可发现的备用入口，并说明升级后如何重新注册。
+
+### 3. 允许用户记住“可以关闭这个 App”，不再每次拦截
+
+**已确认的现状**
+- `taskkill`、`Stop-Process` 等一律被归为系统级危险操作。
+- 批准后，`evaluate_pre_tool_gate()` 会从 `approved_keys` 删除该命令指纹
+  （`hooks/agent_relay_tracker.py:3865`），所以完全相同的命令也只能执行一次。
+- “先关闭 App，再启动 App”流程中的第二次关闭会再次拦截。
+- `tests/test_hook_gates.py:1568` 明确测试当前的一次性批准行为。
+
+**后期方案**
+- 首次仍展示确认卡，显示真实进程名、PID、可执行文件路径和影响。
+- 用户明确选择“以后允许关闭这个 App”后，保存规范化的应用标识；只放宽该 App 的关闭操作。
+- 不能仅凭进程名或 PID 永久放行，尽量绑定可执行文件路径；系统关键进程、通配符、
+  身份无法确认时继续每次确认。
+- “允许关闭”不能扩展成“允许执行该 App 的所有命令”，启动命令仍独立判断。
+- 支持通过权限设置查看、撤销应用许可；`strict` 保留每次确认，`standard` 可选择记住应用。
+- 其他危险命令仍维持一次批准，不能扩大到 Git、部署、删库等操作。
+
+### 4. 删除“本次/上次修改”，最终 Stop 只显示大白话对话
+
+**已确认的现状**
+- `hooks/agent_relay_tracker.py` 的 `render_change_history()` 固定输出
+  `📝 本次修改` 和 `🕘 上次修改`，README、SKILL 与测试也写死了该格式。
+- 相关历史记录用于排查，但当前界面把历史任务一起显示，用户难以阅读。
+
+**用户指定的最终形式**
+```text
+用户说：修改页面右上角按钮
+我完成：修改了右上角按钮
+```
+
+**后期方案与边界**
+- 删除“本次修改 / 上次修改 / 暂无记录”的界面输出，不再显示历史任务、文件清单、
+  技术要点或内部路径。
+- `用户说` 使用本轮真实原始需求；`我完成` 只写实际完成的大白话结果。
+- 纯问答、只读检查、未完成任务不伪造完成总结；无真实写入时不得为了套格式生成“我完成”。
+- 内部历史可继续保留供排查，但不在 Stop 界面展示。
+- 同步修改 README、SKILL 和 `tests/test_change_history.py` 等现有格式断言，避免只改显示
+  却留下相互矛盾的规则。
+
+## 状态
+- [x] 四项计划已登记（2026-11-18）
+- [x] 取消勾选同步卸载，保留其他配置；终端 `none` 全部取消
+- [x] Codex/Claude/OpenCode 命令文件注册，Pi 保留原生命令
+- [x] 受限、可撤销的应用关闭许可；`strict` 仍逐次确认
+- [x] Stop 只显示 `用户说` / `我完成`，不再显示旧任务
+- [x] 最终完整回归：630 passed、3 skipped、44 subtests（2026-11-19）
+- [x] `compileall`、`sh -n`、示例 JSON、`git diff --check` 通过
+- 未验证：真实 Windows、真实各宿主斜杠命令发现、真实安装/卸载
+
+---
+
+# PLAN — Windows 兼容修复：审计门禁、编码、shell 命令与 PowerShell 别名（2026-11-15）
+
+> 状态：**代码修复已完成；验证结果见本节末尾。** 原始排查证据保留如下。
+
+## 用户已明确批准的范围
+仅登记计划。代码修复、SKILL 修改、测试改动均**未开始**，需后续单独批准。
+
+## 已确认的修复方向（用户已选）
+- P1 审计门禁失效：修复。
+- Windows 编码：抽公共模块，全部脚本接入（不保留重复实现）。
+- Windows shell 命令：修改 SKILL，双份示例，按当前系统选择对应命令。
+- PowerShell 别名漏检：一起修。
+
+## 已复现的真实证据（2026-11-15 只读排查所得）
+
+### 1. P1 — 审计危险命令门禁在脚本式调用下失效
+`scripts/delivery_audit.py:710-723`：
+`from hooks import agent_relay_tracker` 必然 ImportError（`hooks/` 无 `__init__.py`，
+脚本式启动时 `sys.path[0]` 是 `scripts/`）；fallback 的 `parents[2]` 在仓库下解析为
+`~/Desktop`、在安装布局 `~/.codex/skills/agent-relay/scripts/` 下解析为 `~/.codex/skills`，
+两处都没有 `hooks/`，于是永久落到弱正则分支。
+
+实测矩阵（脚本式 = `skills/agent-relay/SKILL.md` 教 Agent 用的方式）：
+
+| 命令 | 脚本式调用 | 模块式调用 |
+|---|---|---|
+| `rm -f /tmp/x` | allowed | BLOCKED |
+| `npm publish` | allowed | BLOCKED |
+| `kubectl delete pod x` | allowed | BLOCKED |
+| `git push --force origin main` | BLOCKED | BLOCKED |
+
+直接后果：用安装后的真实路径（`~/.codex/skills/agent-relay/scripts/delivery_audit.py`）
+跑 `run-behavior`，工作区之外的一个测试文件被 `rm -f` 删除，命令返回 exit=0。
+
+测试盲区：`tests/test_delivery_audit.py:298` 只覆盖模块式导入路径，因此 624 项全绿也测不出来。
+
+### 2. Windows 断码（GBK 控制台直接抛异常退出）
+用 `PYTHONIOENCODING=cp936` 模拟中文 Windows 控制台：
+
+```
+scripts/agent_image.py:416   print(f"⚠️ {problem}")
+→ UnicodeEncodeError: 'gbk' codec can't encode character '\u26a0'   exit=1
+
+scripts/agent_relay.py:1067  print(f"✅ 对话已保存到 ...")
+→ UnicodeEncodeError: 'gbk' codec can't encode character '\u2705'   exit=1
+```
+
+不是显示成问号，是抛异常终止进程。
+
+逐字符结论：
+
+| 字符 | GBK |
+|---|---|
+| `⚠` `️`(U+FE0F) `✅` `❌` `💬` `📷` `🔍` `🗑` `📋` `⏳` `❓` `•` `✓` `↔` | 崩溃 |
+| `│` `↑` `→` `■` `…` `—` | 正常 |
+
+现状是修了一半：
+- 已有 `_configure_utf8_stdio()`：`hooks/`×2、`install.py`、`scripts/` 中 9 个。
+- 缺失的 15 个入口脚本：`agent_relay.py`、`agent_image.py`、`agentrelay_console.py`、
+  `agent_relay_archive.py`、`change_contract.py`、`deletion_policy.py`、`orchestrator_task.py`、
+  `commander_provider_call.py`、`api_format_router.py`、`diagnose_web_provider.py`、
+  `agent_relay_login.py`、`agent_fusion.py`、`agentrelay_daemon.py`、`junit_annotations.py`、
+  `orchestrator_dispatch.py`。
+- 已有的实现被重复了 9 遍（代码完全相同）。
+
+补充：`hooks/` 注册命令已带 `-X utf8`，所以 Hook 本身不会崩；崩溃发生在 Agent 手动执行的脚本。
+
+### 3. Windows shell 命令写错
+`skills/agent-relay/SKILL.md` 共 11 个 bash 代码块，其中 6 个使用 `\` 续行 + POSIX 变量：
+
+```bash
+"$PYTHON" "$CODEX_ROOT/skills/agent-relay/scripts/delivery_audit.py" \
+  run-behavior --home "$CODEX_ROOT" --session "<session>" \
+  --phase green --cmd "python -m pytest -q" --kind test
+```
+
+- cmd.exe：`\` 不是续行符，会裂成 3 条独立命令；`$PYTHON` 不展开（应为 `%PYTHON%`）。
+- PowerShell：`$PYTHON` 需为 `$env:PYTHON`，且 `&` 调用运算符不能省。
+- 现有说明只有第 26 行一句「Windows 下把 POSIX 示例开头的 `"$PYTHON"` 改成 `& $PYTHON`」，
+  内嵌引用 `--home "$CODEX_ROOT"` 完全没提。
+- `skills/agent-fusion/SKILL.md:202` 用 `tail -n 100` 读日志，Windows 原生没有 `tail`。
+
+### 4. PowerShell 别名绕过 Hook 门禁
+Windows 上写/删操作大量使用 PowerShell 别名，门禁完全不认：
+
+| 别名 | 完整 cmdlet | 危险判定 | 写文件判定 |
+|---|---|---|---|
+| `ri` | Remove-Item | None ❌ | False ❌ |
+| `ni` | New-Item | None ❌ | False ❌ |
+| `sc` | Set-Content | None ❌ | False ❌ |
+| `ac` | Add-Content | None ❌ | False ❌ |
+| `clc` | Clear-Content | None ❌ | False ❌ |
+| `cpi` | Copy-Item | None ❌ | False ❌ |
+| `mi` | Move-Item | None ❌ | False ❌ |
+| `rni` | Rename-Item | None ❌ | False ❌ |
+
+对照：完整 cmdlet 名 `Remove-Item` 判定为「删除文件或目录」且 writes=True；
+`Set-Content`/`Add-Content`/`New-Item` 均 writes=True。即：同一个操作换个别名就绕过门禁。
+
+实测样例：
+- `ri -Recurse -Force C:\proj` → danger=None, writes=False（删除目录，两道门禁全漏）
+- `gci . | ri -Force` → danger=None, writes=False
+
+## 设计约束（执行时必须遵守）
+- **`sc` 有歧义**：cmd.exe 下是服务控制（`sc delete <service>`，现有代码已判定为系统级操作），
+  PowerShell 下是 `Set-Content` 别名。倾向**保持现有服务语义、不做别名映射**，
+  因为 `Set-Content` 完整名已被覆盖，而误判服务命令的代价更高。执行前需再次确认。
+- **公共模块位置**：放 `scripts/`。理由：`hooks/agent_relay_hook.py:19` 已
+  `sys.path.insert(0, PROJECT_ROOT)`，且 `hooks/agent_relay_tracker.py:7613` 的
+  `_shared_script_module()` 已支持 `scripts.*` 与安装布局双路径解析。
+- **只读别名不能误拦**：`cat`/`gc`/`gci`/`gi`/`sls`/`type`/`dir`/`ls` 必须保持非写入判定。
+  实测当前这些均 writes=False，改动后须保持。
+
+## 执行步骤与验证条件（后期执行时按此走）
+
+1. **新建 `scripts/stdio_encoding.py`**（单一实现）
+   - `configure_utf8_stdio()`：reconfigure stdin/stdout/stderr。
+   - `utf8_environment()`：`PYTHONUTF8` + `PYTHONIOENCODING`。
+   - 验证：新增单元测试断言 cp936 下打印 `⚠️`/`✅` 不再抛异常。
+
+2. **15 个入口脚本接入 + 删除 9 处重复实现**
+   - 验证：`PYTHONIOENCODING=cp936` 下逐个跑 `--help`，全部 exit=0 且无 UnicodeEncodeError；
+     全量 pytest 通过。
+
+3. **修 P1 门禁**
+   - `_command_allowed` 改为按候选根目录解析 tracker（复用 `_shared_script_module` 的路径逻辑）。
+   - 找不到时**失败关闭**（返回 False），不再落到弱正则。
+   - 新增回归测试：**脚本式调用**下 `rm -f`/`npm publish`/`kubectl delete` 必须被拒。
+   - 验证：复跑上面的矩阵，脚本式与模块式结果一致。
+
+4. **PowerShell 别名补检**
+   - 在 `_command_name()` 之后加别名归一化，覆盖 `ri/ni/ac/clc/cpi/mi/rni`。
+   - `sc` 按上面的约束处理。
+   - 只读别名保持非写入。
+   - 验证：7 个别名与完整 cmdlet 判定一致；只读别名无回归。
+
+5. **SKILL 双份示例**
+   - `skills/agent-relay/SKILL.md`：每个 bash 块配 PowerShell 等价块，去掉 `\` 续行改单行。
+   - `skills/agent-fusion/SKILL.md:202`：`tail` 改跨平台写法或明确 PowerShell 分支。
+   - 开头加「按当前系统选择命令」的判定说明。
+   - 验证：脚本扫描确认每个 bash 块有对应 powershell 块；无裸 `tail`/`head`。
+
+6. **收尾验证**
+   - `pytest -q` 全绿（2026-11-15 基线：624 passed / 3 skipped / 44 subtests，耗时约 212s）。
+   - `compileall` + `sh -n` + `json.tool` + `git diff --check`。
+   - `PYTHONIOENCODING=cp936` 冒烟全部 CLI。
+
+## 状态
+- [x] 计划已登记（2026-11-15）
+- [x] 公共 UTF-8 模块与所有入口脚本接入，GBK 冒烟无编码异常
+- [x] 脚本式审计门禁复用完整 tracker，缺失时失败关闭
+- [x] PowerShell 写入/删除别名补检，只读命令不误拦
+- [x] SKILL 按系统提供无续行的 bash/PowerShell 双份示例
+- [x] 最终完整回归：630 passed、3 skipped、44 subtests（2026-11-19）
+- [x] `compileall`、`sh -n`、示例 JSON、`git diff --check` 通过
+- 未验证：真实 Windows 控制台、真实安装环境
+
+---
+
 # PLAN — 工作档、五栏确认与证据闭环升级（2026-11-09）
 
 ## 用户已明确批准

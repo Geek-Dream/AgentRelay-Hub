@@ -61,6 +61,7 @@ FUSION_SCRIPT_FILES = (
 )
 SCRIPT_FILES = (
     "subprocess_compat.py",
+    "stdio_encoding.py",
     "agent_relay.py",
     "agent_relay_login.py",
     "agent_relay_runtime.py",
@@ -94,6 +95,7 @@ SCRIPT_FILES = (
     "approval_policy.py",
     "deletion_policy.py",
     "delivery_audit.py",
+    "app_close_policy.py",
     "change_contract.py",
     "page_verification.py",
     "verify_page.py",
@@ -136,15 +138,8 @@ class InstallError(RuntimeError):
 
 def configure_utf8_output() -> None:
     """Keep Chinese installer output writable on redirected Windows streams."""
-
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            continue
-        try:
-            reconfigure(encoding="utf-8", errors="replace")
-        except (OSError, ValueError):
-            pass
+    from scripts.stdio_encoding import configure_utf8_stdio
+    configure_utf8_stdio()
 
 
 def install_managed_file(source: Path, destination: Path) -> bool:
@@ -189,13 +184,14 @@ def hook_files_for_platform(platform_name: str | None = None) -> tuple[str, ...]
     return HOOK_FILES
 
 
-def install_files() -> None:
-    for filename in hook_files_for_platform():
-        source = PROJECT_ROOT / "hooks" / filename
-        destination = TARGET_HOOKS / filename
-        install_managed_file(source, destination)
-        if os.name != "nt" and filename.endswith(".sh"):
-            destination.chmod(destination.stat().st_mode | 0o111)
+def install_files(*, include_hooks: bool = True) -> None:
+    if include_hooks:
+        for filename in hook_files_for_platform():
+            source = PROJECT_ROOT / "hooks" / filename
+            destination = TARGET_HOOKS / filename
+            install_managed_file(source, destination)
+            if os.name != "nt" and filename.endswith(".sh"):
+                destination.chmod(destination.stat().st_mode | 0o111)
 
     for filename in SKILL_FILES:
         install_managed_file(
@@ -634,8 +630,10 @@ def _apply_agent_targets_loop(
                 (), (),
                 skill_name="agent-fusion",
             )
+            at.install_slash_commands(meta, Path(meta["skill_dir"]))
             shim_path = Path(meta["skill_dir"]) / "scripts" / "agentrelay_hook_shim.py"
             if target_id == "codex":
+                install_files()
                 merge_hooks_json()
             elif target_id == "claude":
                 command = at.shim_command(VENV_PYTHON, shim_path, "claude")
@@ -1293,11 +1291,14 @@ def choose_install_targets() -> tuple[list[str], str]:
         for target_id, meta in registry.items()
     }
     ids = list(registry)
-    checked = {"codex", *[t for t in ids if t != "codex" and detected[t]]}
+    checked = {
+        target_id for target_id, meta in registry.items()
+        if installed[target_id] or (target_id == "codex" and detected[target_id])
+    }
 
     while True:
         print("\n安装目标 Agent：")
-        print("  输入编号切换勾选 · 回车 = 安装并打开网页配置 · 0/web = 只开网页")
+        print("  输入编号切换勾选 · 回车 = 按勾选安装/卸载 · none = 全部卸载 · 0/web = 只开网页")
         for index, target_id in enumerate(ids, 1):
             meta = registry[target_id]
             mark = "[x]" if target_id in checked else "[ ]"
@@ -1310,6 +1311,8 @@ def choose_install_targets() -> tuple[list[str], str]:
             return [t for t in ids if t in checked], "web"
         if raw == "":
             return [t for t in ids if t in checked], "install"
+        if raw in {"none", "all-off"}:
+            return [], "install"
         for token in raw.replace("，", ",").split(","):
             token = token.strip()
             if not token:
@@ -1407,6 +1410,25 @@ def choose_install_skills(
                 checked.add(skill_id)
 
 
+def apply_target_selection(target_ids: list[str], skill_ids: list[str]) -> tuple[dict, dict]:
+    """Apply selected targets and remove only previously installed deselections."""
+    from scripts import agent_targets as at
+    registry = at.agent_targets()
+    previous, _ = _load_local_config()
+    previous_targets = set(previous.get("install_targets") or [])
+    selected = set(target_ids)
+    removed = {}
+    for target_id in sorted(previous_targets - selected):
+        meta = registry.get(target_id)
+        if meta is not None and at.relay_installed(target_id, meta):
+            removed[target_id] = at.unregister_agent_relay(target_id, meta)
+            print(f"[卸载] {meta['label']}：仅移除 AgentRelay 接入")
+    results, errors = apply_agent_targets(target_ids, skill_ids) if target_ids else ({}, {})
+    if removed:
+        results["已卸载"] = [{"name": target, "ok": True, "detail": "已备份并移除", "reason": "用户取消勾选"} for target in removed]
+    return results, errors
+
+
 def prompt_reinstall_filter(selected: list[str]) -> list[str]:
     """已接入的目标默认重装（覆盖），用户可改为跳过或逐个选择。"""
     from scripts import agent_targets as at
@@ -1464,12 +1486,8 @@ def initialize_configuration(
     if skip_install:
         print("已跳过安装（你选择了只打开网页配置）。")
     else:
-        install_list = prompt_reinstall_filter(selected_targets)
-        if install_list:
-            results, errors = apply_agent_targets(install_list, selected_skills)
-            print_verify_results(results, errors)
-        else:
-            print("没有需要安装的目标，跳过安装（已接入的部分保持原样）。")
+        results, errors = apply_target_selection(selected_targets, selected_skills)
+        print_verify_results(results, errors)
     config["install_targets"] = selected_targets
     if not skip_install:
         config["install_skills"] = selected_skills
@@ -1914,15 +1932,14 @@ def run_web_configurator() -> None:
                     install_files();merge_hooks_json();self._send({"message":"基础 Skill、Hook 和脚本已重新安装"});return
                 if self.path == "/api/targets":
                     ids=data.get("targets")
-                    if not isinstance(ids,list) or not ids: raise ValueError("请选择至少一个目标 Agent")
+                    if not isinstance(ids,list): raise ValueError("targets 必须是 Agent ID 数组")
                     from scripts import agent_targets as at
                     from scripts import skill_catalog
                     registry=at.agent_targets()
                     invalid=[x for x in ids if not isinstance(x,str) or x not in registry]
                     if invalid: raise ValueError("未知目标："+", ".join(map(str,invalid)))
                     ids=[str(x) for x in ids]
-                    if "codex" not in ids: ids=["codex",*ids]
-                    catalog=load_install_skill_catalog(ids)
+                    catalog=load_install_skill_catalog(ids or ["codex"])
                     raw_skills=data.get("skills", config.get("install_skills"))
                     if raw_skills is None:
                         skill_ids=skill_catalog.default_skill_ids(catalog)
@@ -1930,7 +1947,7 @@ def run_web_configurator() -> None:
                         if not isinstance(raw_skills,list):
                             raise ValueError("skills 必须是 Skill ID 数组")
                         skill_ids=skill_catalog.normalize_skill_ids(catalog,raw_skills)
-                    results,errors=apply_agent_targets(ids,skill_ids)
+                    results,errors=apply_target_selection(ids,skill_ids)
                     config["install_targets"]=ids
                     config["install_skills"]=skill_ids
                     save_config(config,CODEX_HOME)
@@ -2140,15 +2157,21 @@ def main(argv=None) -> int:
         ensure_virtualenv()
         install_dependencies()
         install_and_verify_chromium()
-        install_files()
-        merge_hooks_json()
+        selected = set(target_ids or selected_targets)
+        installing_codex = not interactive_config or "codex" in selected
+        if installing_codex and target_ids:
+            install_files()
+            merge_hooks_json()
+        elif selected:
+            # 其他宿主安装需要共享脚本，但不得重新注册已取消的 Codex Hook。
+            install_files(include_hooks=False)
         if target_ids:
             from scripts import agent_targets as at
             unknown = [x for x in target_ids if x not in at.agent_targets()]
             if unknown:
                 raise InstallError(f"未知目标 Agent：{', '.join(unknown)}")
             if "codex" not in target_ids:
-                target_ids.insert(0, "codex")
+                print("[提示] 仅安装命令行明确列出的目标；共享 Codex 运行时保留，不补装 Codex 接入。")
             results, errors = apply_agent_targets(target_ids, cli_skills)
             config, save_config = _load_local_config()
             config["install_targets"] = target_ids
@@ -2157,14 +2180,9 @@ def main(argv=None) -> int:
             print_verify_results(results, errors)
             if errors:
                 return 1
-        elif selected_targets and target_action == "install":
-            # 已接入的目标默认重装；用户可选择跳过或逐个确认
-            install_list = prompt_reinstall_filter(selected_targets)
-            if install_list:
-                results, errors = apply_agent_targets(install_list, selected_skills)
-                print_verify_results(results, errors)
-            else:
-                print("没有需要安装的目标，跳过安装（已接入的部分保持原样）。")
+        elif interactive_config and target_action == "install":
+            results, errors = apply_target_selection(selected_targets, selected_skills)
+            print_verify_results(results, errors)
             config, save_config = _load_local_config()
             config["install_targets"] = selected_targets
             config["install_skills"] = selected_skills
@@ -2185,7 +2203,7 @@ def main(argv=None) -> int:
             if args.menu:
                 run_chinese_menu(selected_targets, selected_skills)
             else:
-                if selected_targets and target_action == "install":
+                if target_action == "install":
                     print("\n正在打开配置网页（模型登录等后续配置在页面中完成）。")
                 else:
                     print("\n已跳过安装，直接打开配置网页。")

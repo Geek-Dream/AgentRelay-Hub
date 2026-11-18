@@ -67,22 +67,42 @@ PROBLEMS_DIR = TRACKER_DIR / "problems"
 LOGS_DIR = TRACKER_DIR / "logs"
 
 
-def _configure_utf8_stdio() -> None:
-    for stream in (sys.stdin, sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            continue
-        try:
-            reconfigure(encoding="utf-8", errors="replace")
-        except (OSError, ValueError):
-            pass
+def _load_stdio_encoding():
+    for scripts in (
+        Path(os.environ["AGENTRELAY_SCRIPTS"]) / "stdio_encoding.py"
+        if os.environ.get("AGENTRELAY_SCRIPTS") else None,
+        Path(__file__).resolve().parent.parent / "scripts" / "stdio_encoding.py",
+        CODEX_DIR / "skills" / "agent-relay" / "scripts" / "stdio_encoding.py",
+    ):
+        if scripts is not None and scripts.is_file():
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "agentrelay_stdio_encoding", scripts,
+            )
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+    class _MinimalStdioEncoding:
+        @staticmethod
+        def configure_utf8_stdio():
+            for stream in (sys.stdin, sys.stdout, sys.stderr):
+                reconfigure = getattr(stream, "reconfigure", None)
+                if reconfigure is not None:
+                    try:
+                        reconfigure(encoding="utf-8", errors="replace")
+                    except (OSError, ValueError):
+                        pass
+
+        @staticmethod
+        def utf8_environment():
+            return {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+
+    return _MinimalStdioEncoding()
 
 
-def _utf8_environment() -> dict[str, str]:
-    env = dict(os.environ)
-    env["PYTHONUTF8"] = "1"
-    env["PYTHONIOENCODING"] = "utf-8"
-    return env
+_stdio_encoding = _load_stdio_encoding()
+_configure_utf8_stdio = _stdio_encoding.configure_utf8_stdio
+_utf8_environment = _stdio_encoding.utf8_environment
 
 
 def _detached_process_options() -> dict[str, object]:
@@ -758,6 +778,7 @@ def default_state(session_id=None, agent_id=None):
         "tool_approval": {
             "pending_keys": [],
             "approved_keys": [],
+            "pending_commands": {},
         },
 
         # 当前正在执行的工具。
@@ -1712,6 +1733,19 @@ def _segment_words(segment):
     ]
 
 
+POWERSHELL_COMMAND_ALIASES = {
+    "ri": "remove-item",
+    "ni": "new-item",
+    "ac": "add-content",
+    "clc": "clear-content",
+    "cpi": "copy-item",
+    "mi": "move-item",
+    "rni": "rename-item",
+    # ``sc`` intentionally remains cmd.exe's service controller.
+    "sc": "set-content",
+}
+
+
 def _command_name(value):
     text = str(value or "")
     return (
@@ -1719,6 +1753,11 @@ def _command_name(value):
         or os.path.basename(text)
         or text
     ).lower()
+
+
+def _powershell_command_name(value):
+    command = _command_name(value)
+    return POWERSHELL_COMMAND_ALIASES.get(command, command)
 
 
 def _skip_options(words, options_with_values=()):
@@ -1845,7 +1884,7 @@ def _segment_write_command(words):
     if not words:
         return False
 
-    command = _command_name(words[0])
+    command = _powershell_command_name(words[0])
     arguments = words[1:]
 
     if command in SHELL_WRITE_COMMANDS:
@@ -2019,14 +2058,16 @@ def _segment_dangerous_reason(words, depth=0):
     if depth > 6 or not words:
         return None
 
-    command = _command_name(words[0])
+    command = _powershell_command_name(words[0])
+    raw_command = _command_name(words[0])
     if command == "sudo":
         return "权限或系统级操作"
 
     words = _unwrap_shell_words(words)
     if not words:
         return None
-    command = _command_name(words[0])
+    command = _powershell_command_name(words[0])
+    raw_command = _command_name(words[0])
     arguments = words[1:]
 
     if command in SHELL_INTERPRETERS:
@@ -2064,7 +2105,7 @@ def _segment_dangerous_reason(words, depth=0):
         "taskkill",
     }:
         return "权限或系统级操作"
-    if command in {"launchctl", "sc", "schtasks", "systemctl"} and arguments:
+    if raw_command in {"sc", "schtasks"} and arguments:
         if arguments[0].lower() in {
             "/delete",
             "/end",
@@ -2075,6 +2116,16 @@ def _segment_dangerous_reason(words, depth=0):
             "bootout",
         }:
             return "权限或系统级操作"
+    if raw_command in {"launchctl", "systemctl"} and arguments:
+        if arguments[0].lower() in {
+            "restart",
+            "stop",
+            "unload",
+            "bootout",
+        }:
+            return "权限或系统级操作"
+    if raw_command in {"stop-service", "stop-process"} and arguments:
+        return "权限或系统级操作"
     if command == "kill" and "-9" in arguments or command == "pkill":
         return "权限或系统级操作"
 
@@ -2949,20 +3000,19 @@ def _wrap_change_history_text(value, width=None, limit=220):
 
 
 def render_change_history(entries):
-    """Render the latest two changes as short paragraphs for the user."""
+    """Render only the current request and its plain-language result."""
 
-    labels = ("📝 本次修改", "🕘 上次修改")
-    blocks = []
-    for index, label in enumerate(labels):
-        entry = entries[index] if index < len(entries) else None
-        lines = [f"  {label}："]
-        if not isinstance(entry, dict):
-            lines.append("    暂无记录")
-            blocks.append("\n".join(lines))
-            continue
-        lines.extend(_change_history_summary_lines(entry.get("summary")))
-        blocks.append("\n".join(lines))
-    return "\n" + "\n\n".join(blocks)
+    if not entries or not isinstance(entries[0], dict):
+        return ""
+    entry = entries[0]
+    request = _clip_card_text(normalize_text(entry.get("request")), 160)
+    if not request:
+        request = "完成这项修改"
+    summary = _clean_change_history_summary(entry.get("summary"))
+    if not summary or summary == "已完成文件写入，但未记录具体修改说明。":
+        summary = "已完成这项修改"
+    summary = _clip_card_text(summary, 160)
+    return f"\n用户说：{request}\n我完成：{summary}"
 
 
 def annotate_change_summary(session_id, summary, file_groups):
@@ -3014,6 +3064,7 @@ def record_change_history(state, assistant_message=None):
         "turn_id": tracking.get("turn_id") or hashlib.sha256(
             f"{workspace}|{time.time_ns()}".encode("utf-8")
         ).hexdigest()[:20],
+        "request": tracking.get("request") or state.get("initial_prompt") or "",
         "session_id": session_id,
         "workspace": workspace,
         "created_at": iso_now(),
@@ -3040,7 +3091,7 @@ def record_change_history(state, assistant_message=None):
 
     tracking["recorded"] = True
     tracking["recorded_at"] = entry["created_at"]
-    return render_change_history(output_entries[:CHANGE_HISTORY_LIMIT])
+    return render_change_history([entry])
 
 
 def _tool_gate_is_danger(reason):
@@ -3174,6 +3225,7 @@ def approval_controls_snapshot(state, prompt):
                 )
                 if isinstance(item, str) and item
             ],
+            "pending_commands": dict(approvals.get("pending_commands") or {}),
         },
     }
 
@@ -3190,6 +3242,7 @@ def restore_approval_controls(state, snapshot):
     state["tool_approval"] = {
         "pending_keys": list(approvals.get("pending_keys") or []),
         "approved_keys": list(approvals.get("approved_keys") or []),
+        "pending_commands": dict(approvals.get("pending_commands") or {}),
     }
 
 
@@ -3274,6 +3327,12 @@ def semantic_approval_notice(session_id, state, prompt):
         approve_parts.extend(["--work-profile", minimum_profile])
     approve_parts.extend(["--reason", "用户明确批准当前待确认范围"])
     approve_command = format_command(approve_parts)
+    pending_commands = (state.get("tool_approval") or {}).get("pending_commands") or {}
+    can_remember = any(
+        _shared_script_module("app_close_policy").can_remember(command)
+        for command in pending_commands.values()
+    )
+    remember_command = format_command([*approve_parts, "--remember-app"])
     reject_command = format_command([
         python_path,
         tracker_path,
@@ -3301,7 +3360,12 @@ def semantic_approval_notice(session_id, state, prompt):
         )
         + "请结合确认卡、用户完整消息和当前对话自行判断。只有明确同意当前范围时，"
         f"运行：{approve_command}\n"
-        "只有明确拒绝当前范围时，运行："
+        + (
+            "用户若明确要求以后不再拦截这个 App 的关闭操作，"
+            f"使用同一批准命令加 --remember-app：{remember_command}\n"
+            if can_remember else ""
+        )
+        + "只有明确拒绝当前范围时，运行："
         f"{reject_command}\n"
         "问句、犹豫、否定、假设、补充条件或提出新范围时不要写回批准；先询问或更新确认卡。"
         "写回只对上述待审批范围生效，不能扩大到其他文件、命令或任务。"
@@ -3499,6 +3563,7 @@ def select_task_work_profile(session_id, requested, reason=""):
 
 def resolve_pending_intent(
     session_id, decision, source_sha256, reason, work_profile=None,
+    remember_app=False,
 ):
     """Atomically apply the Agent's contextual approve/reject decision."""
 
@@ -3589,6 +3654,20 @@ def resolve_pending_intent(
                     key,
                     20,
                 )
+            if remember_app:
+                app_policy = _shared_script_module("app_close_policy")
+                mode = _shared_script_module("approval_policy").load_policy(CODEX_DIR)["mode"]
+                if mode == "strict":
+                    raise ValueError("strict 模式仍需每次确认关闭应用，请改用 standard 后重试")
+                pending_commands = approvals.get("pending_commands") or {}
+                remembered = []
+                for key in pending_keys:
+                    command = pending_commands.get(key)
+                    if command:
+                        remembered.append(app_policy.remember(command, CODEX_DIR)["target"])
+                if not remembered:
+                    raise ValueError("当前没有可记住的明确应用关闭命令")
+                resolution_apps = remembered
             approvals["pending_keys"] = []
         else:
             if task_pending:
@@ -3616,6 +3695,7 @@ def resolve_pending_intent(
             "reason": reason[:500],
             "scope": resolved_scope,
             "resolved_at": iso_now(),
+            **({"remembered_applications": resolution_apps} if remember_app else {}),
         }
         selected = gate.get("work_profile")
         if decision == "approve" and isinstance(selected, dict) and selected.get("required"):
@@ -3843,6 +3923,13 @@ def evaluate_pre_tool_gate(tool_name, tool_input, session_id):
             except (ImportError, OSError, ValueError, TypeError):
                 pass
         if danger_reason and solution_key:
+            if (
+                danger_reason == "权限或系统级操作"
+                and mode != "strict"
+                and tool_is_shell(tool_name)
+                and _shared_script_module("app_close_policy").allows(command, CODEX_DIR)
+            ):
+                return True, None
             approved = [
                 item for item in approvals.get("approved_keys", [])
                 if isinstance(item, str) and item
@@ -3888,6 +3975,9 @@ def evaluate_pre_tool_gate(tool_name, tool_input, session_id):
                     )
                 return True, None
 
+            approvals["pending_commands"] = approvals.get("pending_commands") or {}
+            if tool_is_shell(tool_name):
+                approvals["pending_commands"][solution_key] = command
             approvals["pending_keys"] = _append_unique(
                 approvals.get("pending_keys", []),
                 solution_key,
@@ -7131,7 +7221,12 @@ def cli():
                 ("--source-sha256", "source_sha256"),
                 ("--reason", "reason"),
                 ("--work-profile", "work_profile"),
+                ("--remember-app", "remember_app"),
             ):
+                if option == "--remember-app":
+                    values[key] = option in remaining
+                    remaining = [item for item in remaining if item != option]
+                    continue
                 if option not in remaining:
                     continue
                 index = remaining.index(option)
@@ -7166,6 +7261,7 @@ def cli():
                     values["source_sha256"],
                     values.get("reason") or "",
                     values.get("work_profile"),
+                    remember_app=bool(values.get("remember_app")),
                 )
             except ValueError as exc:
                 print(f"Error: {exc}", file=sys.stderr)

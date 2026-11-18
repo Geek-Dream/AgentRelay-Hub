@@ -70,7 +70,14 @@ PYTHON="$CODEX_ROOT/agentrelay-env/bin/python"
 FUSION="$CODEX_ROOT/skills/agent-fusion/scripts/agent_fusion.py"
 ```
 
-Windows PowerShell：
+Windows PowerShell（仅 Windows 使用）：
+
+```powershell
+$CODEX_ROOT = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
+$PYTHON = Join-Path $CODEX_ROOT "agentrelay-env\Scripts\python.exe"
+$FUSION = Join-Path $CODEX_ROOT "skills\agent-fusion\scripts\agent_fusion.py"
+```
+
 
 ```powershell
 $CODEX_ROOT = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
@@ -82,6 +89,12 @@ Windows 下把命令开头的 `"$PYTHON"` 改为 `& $PYTHON`。状态检查：
 
 ```bash
 "$PYTHON" "$FUSION" status --json
+```
+
+Windows PowerShell（仅 Windows 使用）：
+
+```powershell
+& $PYTHON $FUSION status --json
 ```
 
 输出以 `AGENT_FUSION_RESULT=` 开头。读取 `state`：
@@ -118,6 +131,21 @@ Pi 中直接输入 `/agent-fusion` 会显示中文选择菜单，每个选项都
 "$PYTHON" "$FUSION" provider local:local-llm
 "$PYTHON" "$FUSION" provider api:kimi-api
 "$PYTHON" "$FUSION" provider none
+```
+
+Windows PowerShell（仅 Windows 使用）：
+
+```powershell
+& $PYTHON $FUSION on
+& $PYTHON $FUSION off
+& $PYTHON $FUSION status --json
+& $PYTHON $FUSION mode readonly
+& $PYTHON $FUSION mode coding --confirm-coding
+& $PYTHON $FUSION reset --workspace /path/to/project --session-id main-session
+& $PYTHON $FUSION provider web:deepseek-web
+& $PYTHON $FUSION provider local:local-llm
+& $PYTHON $FUSION provider api:kimi-api
+& $PYTHON $FUSION provider none
 ```
 
 `on` 只开启能力，不会自动选择 Provider。Fusion 永不猜测默认 Provider；必须使用
@@ -177,11 +205,13 @@ coding 模式可以直接修改文件并执行命令，必须由用户明确确�
 状态允许后，使用明确的 workspace 和 session ID 保持会话隔离：
 
 ```bash
-"$PYTHON" "$FUSION" \
-  delegate "具体可执行任务" \
-  --workspace "/path/to/project" \
-  --session-id "main-session" \
-  --context "环境、约束、相关文件和期望输出"
+"$PYTHON" "$FUSION" delegate "具体可执行任务" --workspace "/path/to/project" --session-id "main-session" --context "环境、约束、相关文件和期望输出"
+```
+
+Windows PowerShell（仅 Windows 使用）：
+
+```powershell
+& $PYTHON $FUSION delegate "具体可执行任务" --workspace "/path/to/project" --session-id "main-session" --context "环境、约束、相关文件和期望输出"
 ```
 
 同一 workspace 与 session ID 会复用持久上下文。Provider、workspace 或工具模式变化时，
@@ -202,7 +232,12 @@ Fusion 调用会写入有界 JSONL 诊断日志：
 tail -n 100 "$CODEX_ROOT/agent_relay_tracker/logs/fusion-trace.jsonl"
 ```
 
-Windows PowerShell 使用：
+Windows PowerShell（仅 Windows 使用）：
+
+```powershell
+Get-Content (Join-Path $CODEX_ROOT "agent_relay_tracker/logs/fusion-trace.jsonl") -Tail 100
+```
+
 
 ```powershell
 Get-Content (Join-Path $CODEX_ROOT "agent_relay_tracker\logs\fusion-trace.jsonl") -Tail 100

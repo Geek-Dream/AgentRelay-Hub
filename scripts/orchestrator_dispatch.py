@@ -8,6 +8,11 @@ import json
 import sys
 
 try:
+    from .stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+except ImportError:
+    from stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+
+try:
     from .orchestrator_dispatcher import Dispatcher
     from .orchestrator_store import DispatchRequest
 except ImportError:
@@ -61,4 +66,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    _configure_utf8_stdio()
     raise SystemExit(main())

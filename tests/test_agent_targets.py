@@ -547,24 +547,16 @@ class PiExtensionTests(unittest.TestCase):
         summaries = [
             item["message"]
             for item in runtime["notifications"]
-            if "本次修改：" in item["message"]
+            if "用户说：" in item["message"]
         ]
         self.assertEqual(len(summaries), 1, runtime["notifications"])
         lines = summaries[0].splitlines()
         self.assertEqual(lines[0], "")
-        self.assertEqual(lines[1], "  📝 本次修改：")
-        previous_index = lines.index("  🕘 上次修改：")
-        self.assertTrue(
-            all(
-                not line or line.startswith("    ")
-                for line in lines[2:previous_index]
-            )
-        )
-        self.assertEqual(lines[previous_index + 1], "    暂无记录")
-        self.assertNotIn("--------------------------------", summaries[0])
-        self.assertNotIn("上上次修改", summaries[0])
+        self.assertEqual(lines[1], "用户说：修复 app.py 里的一个拼写错误")
+        self.assertTrue(lines[2].startswith("我完成："))
+        self.assertNotIn("上次修改", summaries[0])
         self.assertNotIn("这次改了哪些文件：", summaries[0])
-        self.assertNotIn("app.py", summaries[0])
+        self.assertIn("我完成：已完成修改，拼写问题已修复", summaries[0])
         self.assertIn("拼写问题已修复", summaries[0])
         history_dir = codex_home / "agent_relay_tracker" / "history" / "change-summaries"
         history_files = list(history_dir.glob("*.json"))
@@ -865,6 +857,7 @@ class CodexVerifyTests(unittest.TestCase):
             shutil.copy2(PROJECT_ROOT / "hooks" / name, hook_dir / name)
         skill_dir = tmp / "skills" / "agent-relay"
         (skill_dir / "scripts").mkdir(parents=True)
+        shutil.copy2(PROJECT_ROOT / "scripts/stdio_encoding.py", skill_dir / "scripts/stdio_encoding.py")
         (skill_dir / "SKILL.md").write_text("# AgentRelay", encoding="utf-8")
         (skill_dir / "scripts" / "agent_relay.py").write_text("", encoding="utf-8")
         fusion_dir = tmp / "skills" / "agent-fusion"
@@ -908,6 +901,7 @@ class CodexVerifyTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         skill_dir = tmp / "skills" / "agent-relay"
         (skill_dir / "scripts").mkdir(parents=True)
+        shutil.copy2(PROJECT_ROOT / "scripts/stdio_encoding.py", skill_dir / "scripts/stdio_encoding.py")
         (skill_dir / "SKILL.md").write_text("# AgentRelay", encoding="utf-8")
         (skill_dir / "scripts" / "agent_relay.py").write_text("", encoding="utf-8")
         fusion_dir = tmp / "skills" / "agent-fusion"
@@ -942,6 +936,7 @@ class CodexVerifyTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         skill_dir = tmp / "skills" / "agent-relay"
         (skill_dir / "scripts").mkdir(parents=True)
+        shutil.copy2(PROJECT_ROOT / "scripts/stdio_encoding.py", skill_dir / "scripts/stdio_encoding.py")
         (skill_dir / "SKILL.md").write_text("# AgentRelay", encoding="utf-8")
         (skill_dir / "scripts" / "agent_relay.py").write_text("", encoding="utf-8")
         fusion_dir = tmp / "skills" / "agent-fusion"
@@ -975,6 +970,7 @@ class CodexVerifyTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         skill_dir = tmp / "skills" / "agent-relay"
         (skill_dir / "scripts").mkdir(parents=True)
+        shutil.copy2(PROJECT_ROOT / "scripts/stdio_encoding.py", skill_dir / "scripts/stdio_encoding.py")
         (skill_dir / "SKILL.md").write_text("# AgentRelay", encoding="utf-8")
         (skill_dir / "scripts" / "agent_relay.py").write_text("", encoding="utf-8")
         fusion_dir = tmp / "skills" / "agent-fusion"

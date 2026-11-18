@@ -20,15 +20,10 @@ except ImportError:
     import verification_state as _verification_state
 
 
-def _configure_utf8_stdio() -> None:
-    for stream in (sys.stdin, sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            continue
-        try:
-            reconfigure(encoding="utf-8", errors="replace")
-        except (OSError, ValueError):
-            pass
+try:
+    from .stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+except ImportError:
+    from stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
 
 
 VALID_MODES = {"native", "agent-image", "unavailable"}

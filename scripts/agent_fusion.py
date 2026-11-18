@@ -8,6 +8,11 @@ import os
 import sys
 import time
 from pathlib import Path
+
+try:
+    from .stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+except ImportError:
+    from stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
 from typing import Any, Mapping
 
 
@@ -786,4 +791,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    _configure_utf8_stdio()
     raise SystemExit(main())

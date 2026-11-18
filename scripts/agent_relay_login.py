@@ -1,6 +1,11 @@
 import argparse
 import os
 from pathlib import Path
+
+try:
+    from .stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+except ImportError:
+    from stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
 import tempfile
 from urllib.parse import urlparse
 
@@ -108,6 +113,7 @@ def login_custom_provider(
             browser.close()
 
 if __name__ == "__main__":
+    _configure_utf8_stdio()
     parser = argparse.ArgumentParser(description="登录 AgentRelay Provider")
     parser.add_argument(
         "--provider",

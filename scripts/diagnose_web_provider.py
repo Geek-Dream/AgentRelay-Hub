@@ -7,6 +7,11 @@ import json
 import sys
 from pathlib import Path
 
+try:
+    from .stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+except ImportError:
+    from stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agent_relay import (  # noqa: E402
@@ -97,4 +102,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    _configure_utf8_stdio()
     raise SystemExit(main())

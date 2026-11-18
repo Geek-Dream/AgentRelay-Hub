@@ -5,6 +5,11 @@ import argparse
 import json
 import os
 from pathlib import Path
+
+try:
+    from .stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+except ImportError:
+    from stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
 import tempfile
 import time
 
@@ -133,4 +138,6 @@ def main():
     args=parser.parse_args()
     home = Path(args.home).expanduser() if args.home else None
     AgentRelayDaemon(args.runtime, home=home).run(args.interval, args.once)
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    _configure_utf8_stdio()
+    main()

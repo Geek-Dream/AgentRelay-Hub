@@ -302,6 +302,27 @@ class DeliveryAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "危险"):
             audit.run_behavior(self.home, self.session, "git push --force origin main", kind="probe")
 
+    def test_script_invocation_uses_full_gate_and_fails_closed(self):
+        for command in ("rm -f /tmp/x", "npm publish", "kubectl delete pod x"):
+            result = subprocess.run(
+                [sys.executable, "-c",
+                 "import sys; sys.path.insert(0, 'scripts'); import delivery_audit; "
+                 f"print(delivery_audit._command_allowed({command!r}))"],
+                cwd=PROJECT_ROOT, text=True, capture_output=True, check=True,
+            )
+            self.assertEqual(result.stdout.strip(), "False")
+        isolated = self.home / "isolated" / "scripts"
+        isolated.mkdir(parents=True)
+        target = isolated / "delivery_audit.py"
+        target.write_text((PROJECT_ROOT / "scripts/delivery_audit.py").read_text(encoding="utf-8"), encoding="utf-8")
+        (isolated / "stdio_encoding.py").write_text((PROJECT_ROOT / "scripts/stdio_encoding.py").read_text(encoding="utf-8"), encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import delivery_audit; print(delivery_audit._command_allowed('ls'))"],
+            cwd=isolated, text=True, capture_output=True, check=True,
+        )
+        self.assertEqual(result.stdout.strip(), "False")
+
     def test_independent_review_entry_uses_real_delegate_and_records_fallback(self):
         self.start("strict")
         from unittest.mock import patch

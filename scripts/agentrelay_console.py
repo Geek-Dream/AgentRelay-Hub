@@ -13,6 +13,11 @@ from dataclasses import asdict
 import json
 import os
 from pathlib import Path
+
+try:
+    from .stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+except ImportError:
+    from stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
 import re
 import shutil
 import sys
@@ -573,4 +578,5 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    _configure_utf8_stdio()
     raise SystemExit(main())

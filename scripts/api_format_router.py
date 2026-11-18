@@ -33,6 +33,11 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+try:
+    from .stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+except ImportError:
+    from stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+
 DEFAULT_ROUTER_PORT = 15731
 
 # 上游消息格式
@@ -1032,4 +1037,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    _configure_utf8_stdio()
     main()

@@ -23,22 +23,16 @@ import sys
 from pathlib import Path
 
 
-def _configure_utf8_stdio() -> None:
-    for stream in (sys.stdin, sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            continue
-        try:
-            reconfigure(encoding="utf-8", errors="replace")
-        except (OSError, ValueError):
-            pass
-
-
-def _utf8_environment() -> dict[str, str]:
-    env = dict(os.environ)
-    env["PYTHONUTF8"] = "1"
-    env["PYTHONIOENCODING"] = "utf-8"
-    return env
+try:
+    from .stdio_encoding import (
+        configure_utf8_stdio as _configure_utf8_stdio,
+        utf8_environment as _utf8_environment,
+    )
+except ImportError:
+    from stdio_encoding import (
+        configure_utf8_stdio as _configure_utf8_stdio,
+        utf8_environment as _utf8_environment,
+    )
 
 
 def main_hook_path() -> Path:

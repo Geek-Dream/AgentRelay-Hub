@@ -31,15 +31,10 @@ except ImportError:  # pragma: no cover - POSIX
     msvcrt = None
 
 
-def _configure_utf8_stdio() -> None:
-    for stream in (sys.stdin, sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            continue
-        try:
-            reconfigure(encoding="utf-8", errors="replace")
-        except (OSError, ValueError):
-            pass
+try:
+    from .stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+except ImportError:
+    from stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
 
 
 CHECKS = {"requirements", "diff", "behavior", "visual", "self_review", "independent_review"}
@@ -708,19 +703,26 @@ def _behavior_problem(evidence: dict[str, Any]) -> str | None:
 
 
 def _command_allowed(command: str) -> bool:
-    """Reuse the host's dangerous-command policy for audit probes."""
-    try:
-        from hooks import agent_relay_tracker as tracker
-        return tracker.dangerous_command_reason("Bash", {"command": command}) is None
-    except ImportError:
-        import importlib.util
-        path = Path(__file__).resolve().parents[2] / "hooks/agent_relay_tracker.py"
+    """Reuse the installed tracker policy; never weaken it when unavailable."""
+    import importlib.util
+
+    script_dir = Path(__file__).resolve().parent
+    candidates = (
+        script_dir.parent / "hooks" / "agent_relay_tracker.py",
+        script_dir.parent.parent / "hooks" / "agent_relay_tracker.py",
+    )
+    for path in candidates:
         if not path.is_file():
-            return not re.search(r"\brm\s+-[a-z]*r|git\s+(?:reset\s+--hard|clean\s+-[a-z]*f|push\s+--force)|\b(?:drop|truncate)\s+table|deploy|production", command, re.I)
-        spec = importlib.util.spec_from_file_location("agentrelay_audit_command_gate", path)
+            continue
+        spec = importlib.util.spec_from_file_location(
+            "agentrelay_audit_command_gate", path,
+        )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        return module.dangerous_command_reason("Bash", {"command": command}) is None
+        return module.dangerous_command_reason(
+            "Bash", {"command": command},
+        ) is None
+    return False
 
 
 def _execute_behavior(command: str, workspace: str, *, kind: str, timeout: int) -> dict[str, Any]:

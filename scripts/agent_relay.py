@@ -913,6 +913,11 @@ import sys
 import time
 import traceback
 from pathlib import Path
+
+try:
+    from .stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+except ImportError:
+    from stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
 from typing import List, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -921,6 +926,7 @@ from urllib.parse import urljoin, urlparse
 # 里 from agent_relay import SiteAdapter 再导入出第二份类定义，
 # 导致 ProviderRegistry 的 isinstance 校验失败。
 if __name__ == "__main__":
+    _configure_utf8_stdio()
     sys.modules.setdefault("agent_relay", sys.modules["__main__"])
 
 try:

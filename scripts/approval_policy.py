@@ -15,15 +15,10 @@ from pathlib import Path
 from typing import Any
 
 
-def _configure_utf8_stdio() -> None:
-    for stream in (sys.stdin, sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            continue
-        try:
-            reconfigure(encoding="utf-8", errors="replace")
-        except (OSError, ValueError):
-            pass
+try:
+    from .stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+except ImportError:
+    from stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
 
 
 MODES = {"strict", "standard", "relaxed"}
@@ -35,7 +30,7 @@ DESCRIPTIONS = {
     "standard": "默认轻量检查；单点颜色/圆角/按钮方圆等样式只验目标与边界，复杂/共享/高风险自动升级。",
     "relaxed": "小任务不做正式审计；仅大型、多文件、多目标、共享或高风险任务审计，安全底线不放宽。",
 }
-COMMAND_PATTERN = re.compile(r"^/(?:agent-approval|设置)(?:\s+(\S+))?\s*$", re.I)
+COMMAND_PATTERN = re.compile(r"^/(?:agent-approval|设置)(?:\s+(apps|forget\s+\S+|\S+))?\s*$", re.I)
 SELECTION_PATTERN = re.compile(r"^[1-3](?:\s*[、.，,]\s*(?:严格|标准|宽松|strict|standard|relaxed))?\s*$", re.I)
 CANCEL_PATTERN = re.compile(r"^(?:0|q|取消|退出|cancel|exit)$", re.I)
 DEFAULT_MODE = "standard"
@@ -268,6 +263,16 @@ def command_request(prompt: str, codex_home: Path, menu_pending: bool = False) -
         argument = match.group(1)
         if argument is None:
             return {"action": "menu", "message": render_menu(codex_home)}
+        if argument.lower() == "apps":
+            import app_close_policy
+            entries = app_close_policy.load_permissions(codex_home)["applications"]
+            names = "、".join(item["target"] for item in entries) or "暂无"
+            return {"action": "saved", "message": f"已允许关闭的应用：{names}。撤销：/agent-approval forget <应用名>"}
+        if argument.lower().startswith("forget "):
+            import app_close_policy
+            target = argument.split(" ", 1)[1]
+            removed = app_close_policy.forget(target, codex_home)
+            return {"action": "saved", "message": f"{'已撤销' if removed else '未找到'}应用关闭许可：{target}"}
         if CANCEL_PATTERN.match(argument):
             return {"action": "cancel", "message": "已退出权限设置，未修改配置。"}
         try:

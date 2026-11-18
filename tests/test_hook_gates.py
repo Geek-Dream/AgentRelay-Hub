@@ -61,25 +61,11 @@ class HookGateTests(unittest.TestCase):
     def assert_change_summary_format(self, message):
         lines = message.splitlines()
         self.assertEqual(lines[0], "")
-        self.assertEqual(lines[1], "  📝 本次修改：")
-        previous_index = lines.index("  🕘 上次修改：")
-        self.assertTrue(
-            all(
-                line.startswith("    ")
-                for line in lines[2:previous_index]
-                if line
-            )
-        )
-        self.assertTrue(
-            all(
-                line.startswith("    ")
-                for line in lines[previous_index + 1:]
-            )
-        )
-        self.assertEqual(lines[previous_index - 1], "")
-        self.assertTrue(message.startswith("\n  📝 本次修改："))
-        self.assertNotIn("--------------------------------", message)
-        self.assertNotIn("上上次修改", message)
+        self.assertTrue(lines[1].startswith("用户说："))
+        self.assertTrue(lines[2].startswith("我完成："))
+        self.assertNotIn("本次修改：", message)
+        self.assertNotIn("上次修改：", message)
+        self.assertNotIn("暂无记录", message)
         self.assertNotIn("•", message)
         self.assertNotIn("这次改了哪些文件：", message)
         self.assertNotIn("涉及到的文件：", message)
@@ -104,7 +90,7 @@ class HookGateTests(unittest.TestCase):
         return match.group(1)
 
     def resolve_intent(self, session_id, source_hash, decision="approve",
-                       work_profile=None):
+                       work_profile=None, remember_app=False):
         if decision == "approve" and work_profile is None:
             work_profile = self.minimum_work_profile(session_id)
         args = [
@@ -116,6 +102,8 @@ class HookGateTests(unittest.TestCase):
         ]
         if decision == "approve" and work_profile:
             args.extend(["--work-profile", work_profile])
+        if remember_app:
+            args.append("--remember-app")
         return self.run_tracker(*args)
 
     def minimum_work_profile(self, session_id):
@@ -574,6 +562,7 @@ class HookGateTests(unittest.TestCase):
             shutil.copy2(PROJECT_ROOT / "hooks" / filename, self.codex_home / "hooks" / filename)
         scripts = self.codex_home / "skills/agent-relay/scripts"
         scripts.mkdir(parents=True)
+        shutil.copy2(PROJECT_ROOT / "scripts/stdio_encoding.py", scripts / "stdio_encoding.py")
         shutil.copy2(PROJECT_ROOT / "scripts/approval_policy.py", scripts / "approval_policy.py")
         shutil.copy2(PROJECT_ROOT / "scripts/page_verification.py", scripts / "page_verification.py")
         shutil.copy2(PROJECT_ROOT / "scripts/fusion_assist.py", scripts / "fusion_assist.py")
@@ -685,7 +674,7 @@ class HookGateTests(unittest.TestCase):
         self.assert_hook_ok(stopped)
         output = json.loads(stopped.stdout)
         self.assert_change_summary_format(output["systemMessage"])
-        self.assertNotIn("app.py", output["systemMessage"])
+        self.assertIn("我完成：已完成修改，拼写问题已修复", output["systemMessage"])
         self.assertNotIn("decision", output)
 
     def test_claude_shim_forwards_change_summary_after_final_stop(self):
@@ -739,7 +728,7 @@ class HookGateTests(unittest.TestCase):
         self.assert_hook_ok(stopped)
         output = json.loads(stopped.stdout)
         self.assert_change_summary_format(output["systemMessage"])
-        self.assertNotIn("app.py", output["systemMessage"])
+        self.assertIn("我完成：已完成修改，拼写问题已修复", output["systemMessage"])
         self.assertNotIn("decision", output)
 
     def test_blocked_stop_does_not_record_until_the_gate_allows_completion(self):
@@ -804,7 +793,7 @@ class HookGateTests(unittest.TestCase):
         ))
         self.assert_hook_ok(allowed)
         allowed_output = json.loads(allowed.stdout)
-        self.assertIn("本次修改：", allowed_output["systemMessage"])
+        self.assertIn("用户说：", allowed_output["systemMessage"])
         history_files = list(history_dir.glob("*.json"))
         self.assertEqual(len(history_files), 1)
         history = json.loads(history_files[0].read_text(encoding="utf-8"))
@@ -1620,6 +1609,27 @@ class HookGateTests(unittest.TestCase):
             json.loads(changed.stdout)["hookSpecificOutput"]["permissionDecision"],
             "deny",
         )
+
+    def test_remembered_app_close_is_allowed_twice_but_not_other_commands(self):
+        from scripts import approval_policy
+        session_id = "remember-app-close"
+        approval_policy.save_policy(self.codex_home, "standard")
+        command = 'taskkill /IM editor.exe /F'
+        payload = self.payload(session_id, "PreToolUse", tool_name="exec_command",
+                               tool_input={"cmd": command}, tool_use_id="close-1")
+        denied = self.run_hook(payload)
+        self.assertEqual(json.loads(denied.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+        candidate = self.run_hook(self.payload(session_id, "UserPromptSubmit", prompt="以后允许关闭这个 App"))
+        source_hash = self.semantic_source_hash(candidate)
+        self.assertIn("--remember-app", json.loads(candidate.stdout)["hookSpecificOutput"]["additionalContext"])
+        resolved = self.resolve_intent(session_id, source_hash, remember_app=True)
+        self.assert_hook_ok(resolved)
+        self.assertIn("editor.exe", json.loads(resolved.stdout)["remembered_applications"])
+        self.assertEqual(self.run_hook(payload).stdout, "")
+        self.assertEqual(self.run_hook({**payload, "tool_use_id": "close-2"}).stdout, "")
+        other = self.run_hook(self.payload(session_id, "PreToolUse", tool_name="exec_command",
+                                           tool_input={"cmd": "git reset --hard"}, tool_use_id="other"))
+        self.assertEqual(json.loads(other.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_read_search_and_test_commands_are_allowed(self):
         session_id = "safe-commands"

@@ -18,6 +18,36 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+_installed_scripts = Path(
+    os.environ.get("AGENTRELAY_SCRIPTS", str(CODEX_HOME / "skills" / "agent-relay" / "scripts"))
+)
+for _scripts_root in (_installed_scripts, SCRIPT_DIR.parent / "scripts"):
+    if (_scripts_root / "stdio_encoding.py").is_file():
+        sys.path.insert(0, str(_scripts_root))
+try:
+    from scripts.stdio_encoding import (
+        configure_utf8_stdio as _configure_utf8_stdio,
+        utf8_environment as _utf8_environment,
+    )
+except ImportError:
+    sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+    try:
+        from stdio_encoding import (
+            configure_utf8_stdio as _configure_utf8_stdio,
+            utf8_environment as _utf8_environment,
+        )
+    except ImportError:
+        def _configure_utf8_stdio():
+            for stream in (sys.stdin, sys.stdout, sys.stderr):
+                reconfigure = getattr(stream, "reconfigure", None)
+                if reconfigure is not None:
+                    try:
+                        reconfigure(encoding="utf-8", errors="replace")
+                    except (OSError, ValueError):
+                        pass
+
+        def _utf8_environment():
+            return {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
 TRACKER = Path(
     os.environ.get(
         "AGENT_RELAY_TRACKER_PATH",
@@ -26,24 +56,6 @@ TRACKER = Path(
 ).expanduser()
 LOG_DIR = CODEX_HOME / "agent_relay_tracker" / "logs"
 ERROR_LOG = LOG_DIR / "error.log"
-
-
-def _configure_utf8_stdio() -> None:
-    for stream in (sys.stdin, sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            continue
-        try:
-            reconfigure(encoding="utf-8", errors="replace")
-        except (OSError, ValueError):
-            pass
-
-
-def _utf8_environment() -> dict[str, str]:
-    env = dict(os.environ)
-    env["PYTHONUTF8"] = "1"
-    env["PYTHONIOENCODING"] = "utf-8"
-    return env
 
 
 def commander_child_runtime() -> tuple[Path, str] | None:

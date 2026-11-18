@@ -34,15 +34,10 @@ class TargetError(RuntimeError):
     """某个目标的注册或验证无法安全继续时抛出。"""
 
 
-def _configure_utf8_stdio() -> None:
-    for stream in (sys.stdin, sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            continue
-        try:
-            reconfigure(encoding="utf-8", errors="replace")
-        except (OSError, ValueError):
-            pass
+try:
+    from .stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+except ImportError:
+    from stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
 
 
 HOOK_TIMEOUT = 15
@@ -88,6 +83,7 @@ def agent_targets(home: Path | None = None) -> dict[str, dict]:
             "skill_dir": base / "skills" / "agent-relay",
             "hook_dir": base / "hooks",
             "config_path": base / "hooks.json",
+            "command_dir": base / "prompts",
         },
         "claude": {
             "id": "claude",
@@ -98,6 +94,7 @@ def agent_targets(home: Path | None = None) -> dict[str, dict]:
             "skill_dir": user_home / ".claude" / "skills" / "agent-relay",
             "hook_dir": base / "hooks",
             "config_path": user_home / ".claude" / "settings.json",
+            "command_dir": user_home / ".claude" / "commands",
         },
         "pi": {
             "id": "pi",
@@ -118,6 +115,7 @@ def agent_targets(home: Path | None = None) -> dict[str, dict]:
             "skill_dir": xdg / "opencode" / "skills" / "agent-relay",
             "hook_dir": base / "hooks",
             "config_path": None,
+            "command_dir": xdg / "opencode" / "commands",
         },
         "hermes": {
             "id": "hermes",
@@ -489,6 +487,106 @@ def install_skill_to(
             project_root / "skills" / skill_name / "references" / filename,
             destination_root / "references" / filename,
         )
+
+
+SLASH_COMMANDS = {
+    "agent-approval": "打开 AgentRelay 权限设置。输入 /agent-approval 查看；输入 /agent-approval 1、2、3 选择 strict、standard、relaxed。输入 /agent-approval apps 查看已允许关闭的应用，输入 /agent-approval forget <应用名> 撤销。",
+    "agent-audit": "只查看当前交付审计状态，不代表审计通过，也不要开始修改。",
+    "agent-fusion": "检查 AgentRelay Fusion 状态，按当前任务需要调用 agent-fusion Skill；不可用就本地继续，不要等待。",
+}
+
+
+def install_slash_commands(target: dict, skill_dir: Path) -> list[Path]:
+    directory = target.get("command_dir")
+    if directory is None:
+        return []
+    installed = []
+    for name, body in SLASH_COMMANDS.items():
+        text = f"---\ndescription: AgentRelay {name}\n---\n\n{body}\n"
+        source = skill_dir / "commands" / f"{name}.md"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(text, encoding="utf-8")
+        destination = Path(directory) / f"{name}.md"
+        install_managed_file(source, destination)
+        installed.append(destination)
+    return installed
+
+
+def remove_slash_commands(target: dict) -> list[Path]:
+    removed = []
+    directory = target.get("command_dir")
+    if directory is None:
+        return removed
+    for name in SLASH_COMMANDS:
+        path = Path(directory) / f"{name}.md"
+        if path.is_file() and not path.is_symlink():
+            backup_file(path, "before-agentrelay-uninstall")
+            path.unlink()
+            removed.append(path)
+    return removed
+
+
+def unregister_agent_relay(target_id: str, target: dict) -> list[str]:
+    """Remove only AgentRelay-owned registrations, preserving other entries."""
+    changes = remove_slash_commands(target)
+    for skill_name in ("agent-relay", "agent-image", "agent-fusion"):
+        directory = Path(target["skill_dir"]).with_name(skill_name)
+        if directory.is_symlink():
+            raise TargetError(f"拒绝卸载符号链接 Skill：{directory}")
+        if directory.is_dir():
+            backup = directory.with_name(f"{directory.name}.before-agentrelay-uninstall.{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}")
+            os.replace(directory, backup)
+            changes.append(backup)
+    config_path = target.get("config_path")
+    if config_path is None:
+        return [str(path) for path in changes]
+    path = Path(config_path)
+    if not path.is_file():
+        return [str(path) for path in changes]
+    backup_file(path, "before-agentrelay-uninstall")
+    if target_id == "pi":
+        path.unlink()
+        changes.append(path)
+    elif target_id in {"codex", "claude"}:
+        config = json.loads(path.read_text(encoding="utf-8"))
+        hooks = config.get("hooks") or {}
+        for event, entries in list(hooks.items()):
+            if not isinstance(entries, list):
+                continue
+            kept = []
+            for entry in entries:
+                nested = entry.get("hooks") if isinstance(entry, dict) else None
+                if isinstance(nested, list):
+                    nested = [hook for hook in nested if not (
+                        isinstance(hook, dict) and (
+                            "agent_relay_hook" in str(hook.get("command", ""))
+                            or "agentrelay_hook_shim" in str(hook.get("command", ""))
+                        )
+                    )]
+                    if nested:
+                        entry["hooks"] = nested
+                        kept.append(entry)
+                else:
+                    kept.append(entry)
+            hooks[event] = kept
+        atomic_write_json(path, config)
+        changes.append(path)
+    elif target_id == "kimi":
+        preamble, blocks = _split_toml_hook_blocks(path.read_text(encoding="utf-8"))
+        kept = [block for block in blocks if "agentrelay_hook_shim" not in "\n".join(block)]
+        sections = ["\n".join(preamble).rstrip("\n")] if preamble else []
+        sections.extend("[[hooks]]\n" + "\n".join(block).rstrip("\n") for block in kept)
+        path.write_text("\n\n".join(sections) + ("\n" if sections else ""), encoding="utf-8")
+        changes.append(path)
+    elif target_id == "hermes":
+        import yaml
+        config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for event, entries in list((config.get("hooks") or {}).items()):
+            if isinstance(entries, list):
+                config["hooks"][event] = [item for item in entries if "agentrelay_hook_shim" not in str(item.get("command", ""))]
+        path.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        changes.append(path)
+    return [str(path) for path in changes]
 
 
 def register_claude(settings_path: Path, command: str) -> bool:
@@ -1978,6 +2076,10 @@ def verify_target(
                     probe_env["AGENTRELAY_TARGET"] = "codex"
                     approval_policy.save_policy(isolated_home / ".codex", "strict")
                     probe_env.pop("CODEX_HOME", None)
+                    # Preserve the installed runtime path while isolating task state.
+                    probe_env["AGENTRELAY_SCRIPTS"] = str(
+                        Path(meta["skill_dir"]) / "scripts"
+                    )
                 else:
                     card_command = [
                         str(venv_python),

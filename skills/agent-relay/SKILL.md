@@ -16,14 +16,20 @@ CODEX_ROOT="${CODEX_HOME:-$HOME/.codex}"
 PYTHON="$CODEX_ROOT/agentrelay-env/bin/python"
 ```
 
-Windows PowerShell 使用：
+Windows PowerShell（仅 Windows 使用）：
 
 ```powershell
 $CODEX_ROOT = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
 $PYTHON = Join-Path $CODEX_ROOT "agentrelay-env\Scripts\python.exe"
 ```
 
-Windows 下把 POSIX 示例开头的 `"$PYTHON"` 改成 `& $PYTHON`，其余参数相同。
+
+```powershell
+$CODEX_ROOT = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
+$PYTHON = Join-Path $CODEX_ROOT "agentrelay-env\Scripts\python.exe"
+```
+
+先确认当前系统：macOS/Linux 只执行 `bash` 示例；Windows 只执行对应的 `powershell` 示例。不要把 bash 的 `\` 续行或 `$VAR` 直接复制到 cmd.exe。
 
 ## 按需读取的流程 reference
 
@@ -71,9 +77,13 @@ gstack 式重流程复制到每个普通任务。
 4. 真实运行与改动匹配的项目测试或行为探针，不能只复制一个“测试通过”结论：
 
 ```bash
-"$PYTHON" "$CODEX_ROOT/skills/agent-relay/scripts/delivery_audit.py" \
-  run-behavior --home "$CODEX_ROOT" --session "<当前真实 session_id>" \
-  --phase green --cmd "<项目已有测试或本地行为检查命令>" --kind test
+"$PYTHON" "$CODEX_ROOT/skills/agent-relay/scripts/delivery_audit.py" run-behavior --home "$CODEX_ROOT" --session "<当前真实 session_id>" --phase green --cmd "<项目已有测试或本地行为检查命令>" --kind test
+```
+
+Windows PowerShell（仅 Windows 使用）：
+
+```powershell
+& $PYTHON (Join-Path $CODEX_ROOT "skills/agent-relay/scripts/delivery_audit.py") run-behavior --home $CODEX_ROOT --session "<当前真实 session_id>" --phase green --cmd "<项目已有测试或本地行为检查命令>" --kind test
 ```
 
 `--kind test` 要真实执行测试且数量大于 0；CLI/API/任务探针用 `--kind probe`，不强制截图。
@@ -85,12 +95,18 @@ gstack 式重流程复制到每个普通任务。
 
 ```bash
 AUDIT="$CODEX_ROOT/skills/agent-relay/scripts/delivery_audit.py"
-"$PYTHON" "$AUDIT" record --home "$CODEX_ROOT" --session "<当前真实 session_id>" \
-  --check requirements --passed --evidence '[{"requirement_id":"R1","item":"原始需求","status":"DONE","evidence":"文件:行/真实行为"}]'
-"$PYTHON" "$AUDIT" record --home "$CODEX_ROOT" --session "<当前真实 session_id>" \
-  --check diff --passed --evidence '已读取完整 diff；修改仅限允许文件，未发现未声明行为'
-"$PYTHON" "$AUDIT" record --home "$CODEX_ROOT" --session "<当前真实 session_id>" \
-  --check self_review --passed --evidence '已检查异常路径、相邻调用、目标外影响和覆盖缺口；未发现问题'
+"$PYTHON" "$AUDIT" record --home "$CODEX_ROOT" --session "<当前真实 session_id>" --check requirements --passed --evidence '[{"requirement_id":"R1","item":"原始需求","status":"DONE","evidence":"文件:行/真实行为"}]'
+"$PYTHON" "$AUDIT" record --home "$CODEX_ROOT" --session "<当前真实 session_id>" --check diff --passed --evidence '已读取完整 diff；修改仅限允许文件，未发现未声明行为'
+"$PYTHON" "$AUDIT" record --home "$CODEX_ROOT" --session "<当前真实 session_id>" --check self_review --passed --evidence '已检查异常路径、相邻调用、目标外影响和覆盖缺口；未发现问题'
+```
+
+Windows PowerShell（仅 Windows 使用）：
+
+```powershell
+$AUDIT = Join-Path $CODEX_ROOT "skills\agent-relay\scripts\delivery_audit.py"
+& $PYTHON $AUDIT record --home $CODEX_ROOT --session "<当前真实 session_id>" --check requirements --passed --evidence '[{"requirement_id":"R1","item":"原始需求","status":"DONE","evidence":"文件:行/真实行为"}]'
+& $PYTHON $AUDIT record --home $CODEX_ROOT --session "<当前真实 session_id>" --check diff --passed --evidence '已读取完整 diff；修改仅限允许文件，未发现未声明行为'
+& $PYTHON $AUDIT record --home $CODEX_ROOT --session "<当前真实 session_id>" --check self_review --passed --evidence '已检查异常路径、相邻调用、目标外影响和覆盖缺口；未发现问题'
 ```
 
 6. 页面按上文完成真实截图和视觉认证，Hook 会复用该证据，不需要重复勾选。无视觉仍只能用户复查。
@@ -352,13 +368,24 @@ retry_count=0` 开始。Tracker 在本地归档保守命中同一问题时，只
 "$PYTHON" "$CODEX_ROOT/hooks/agent_relay_tracker.py" problems
 ```
 
+Windows PowerShell（仅 Windows 使用）：
+
+```powershell
+& $PYTHON (Join-Path $CODEX_ROOT "hooks/agent_relay_tracker.py") status
+& $PYTHON (Join-Path $CODEX_ROOT "hooks/agent_relay_tracker.py") sessions
+& $PYTHON (Join-Path $CODEX_ROOT "hooks/agent_relay_tracker.py") problems
+```
+
 真实写文件并且准备宣称完成时，必须在最终回复前运行一次：
 
 ```bash
-"$PYTHON" "$CODEX_ROOT/hooks/agent_relay_tracker.py" change-summary \
-  --summary "修复了刚才的问题。现在用户看到的结果是……，并补上了对应验证。" \
-  --file-group "修改目的=路径1,路径2" \
-  --file-group "另一修改目的=路径3"
+"$PYTHON" "$CODEX_ROOT/hooks/agent_relay_tracker.py" change-summary --summary "修复了刚才的问题。现在用户看到的结果是……，并补上了对应验证。" --file-group "修改目的=路径1,路径2" --file-group "另一修改目的=路径3"
+```
+
+Windows PowerShell（仅 Windows 使用）：
+
+```powershell
+& $PYTHON (Join-Path $CODEX_ROOT "hooks/agent_relay_tracker.py") change-summary --summary "修复了刚才的问题。现在用户看到的结果是……，并补上了对应验证。" --file-group "修改目的=路径1,路径2" --file-group "另一修改目的=路径3"
 ```
 
 `--summary` 用一小段大白话说明用户实际得到了什么结果，不复述用户请求，也不写“已处理”
@@ -369,14 +396,17 @@ retry_count=0` 开始。Tracker 在本地归档保守命中同一问题时，只
 成功写入的文件，但文件分组不会打印到 Hook 输出。当前会话无法唯一识别时才追加
 `--session <session-id>`。
 
-Hook 在最终 `Stop` 放行后显示 `📝 本次修改` / `🕘 上次修改`，最多两条。输出以空行开头；
-标题缩进两格，每个标题下只显示一段正文，两段之间空一行，不使用分隔线、文件清单或技术
-要点。长文本按约 68 列显示宽度自动折行，续行缩进四格。旧摘要会先清除“按需求……”、
-代码围栏和重复标题。没有上一条记录时，`🕘 上次修改：` 的正文为“暂无记录”。漏登记时
-Hook 会诚实显示“未记录具体修改说明”，不会拿用户原话冒充完成摘要。该记录按工作区、
-Agent 和 Session 隔离，同一项目里的多个会话不会互相显示对方的“本次修改 / 上次修改”；
-纯问答和只读检查不会产生记录。它只是修改摘要历史，不是代码回滚 checkpoint，不能替代
-Git。
+Hook 在最终 `Stop` 放行后只显示当前这一轮的大白话对话：`用户说：原始需求`，
+下一行 `我完成：实际结果`。不再显示“本次修改 / 上次修改 / 暂无记录”，也不显示历史
+任务、文件清单、内部路径或技术要点。内部历史仍按工作区、Agent 和 Session 隔离保存，
+仅供排查；纯问答和只读检查不生成完成总结，未完成任务不得伪造“我完成”。
+
+## 应用关闭许可
+
+`standard` 下首次关闭应用仍需确认；用户明确要求“以后允许关闭这个 App”时，批准命令加
+`--remember-app`。只支持明确 `taskkill /IM <名称>` 或 `Stop-Process -Name <名称>`，
+PID、通配符和系统关键进程不能记住；`strict` 始终逐次确认。`/agent-approval apps` 查看，
+`/agent-approval forget <名称>` 撤销。许可只覆盖关闭，不覆盖启动或其他命令。
 
 ## 问题权重
 
@@ -393,6 +423,13 @@ Git。
 ```bash
 "$PYTHON" "$CODEX_ROOT/skills/agent-relay/scripts/agent_relay_archive.py" search "关键词"
 "$PYTHON" "$CODEX_ROOT/skills/agent-relay/scripts/agent_relay_archive.py" projects
+```
+
+Windows PowerShell（仅 Windows 使用）：
+
+```powershell
+& $PYTHON (Join-Path $CODEX_ROOT "skills/agent-relay/scripts/agent_relay_archive.py") search "关键词"
+& $PYTHON (Join-Path $CODEX_ROOT "skills/agent-relay/scripts/agent_relay_archive.py") projects
 ```
 
 归档提醒不是调用命令；预匹配只是候选命中，Agent 仍要运行 `search` 核对旧结论是否适用
@@ -465,6 +502,13 @@ retry=0、用户未要求 → 不触发在线模型。首次外援审核的条�
 "$PYTHON" scripts/agent_relay.py "问题内容" -m 2
 ```
 
+Windows PowerShell（仅 Windows 使用）：
+
+```powershell
+& $PYTHON scripts/agent_relay.py "问题内容" -m 1
+& $PYTHON scripts/agent_relay.py "问题内容" -m 2
+```
+
 极速模式支持文本、图片、文件，适用普通问题、截图、UI、报错图片、日志、代码与配置文件；
 专家模式只支持文本，适用复杂代码逻辑、算法、架构、并发、数据库、复杂异常分析。
 
@@ -474,8 +518,13 @@ retry=0、用户未要求 → 不触发在线模型。首次外援审核的条�
 真实可读取的本地路径：
 
 ```bash
-"$PYTHON" scripts/agent_relay.py \
-  "用户的原问题" -m 1 --image "/path/to/image.png"
+"$PYTHON" scripts/agent_relay.py "用户的原问题" -m 1 --image "/path/to/image.png"
+```
+
+Windows PowerShell（仅 Windows 使用）：
+
+```powershell
+& $PYTHON scripts/agent_relay.py "用户的原问题" -m 1 --image "/path/to/image.png"
 ```
 
 多张图片对每个路径重复使用 `--image`；调用前确认文件存在。禁止用 Agent 自己的 OCR、
@@ -573,6 +622,12 @@ Hook 也会阻断；必须先形成当前会话可核对的浏览器证据和视
 "$PYTHON" scripts/agent_relay_login.py
 ```
 
+Windows PowerShell（仅 Windows 使用）：
+
+```powershell
+& $PYTHON scripts/agent_relay_login.py
+```
+
 禁止无限登录、无限重复尝试、绕过登录或验证码。
 
 ---
@@ -609,8 +664,13 @@ workspace 被用户修改、角色之间内容冲突、路径越界或验证失�
 总结。运行时事件可通过以下命令查看和驱动：
 
 ```bash
-"$PYTHON" scripts/agentrelay_console.py commander-merge TASK_ID \
-  --workspace /path/to/project --runtime-root .agentrelay/commander
+"$PYTHON" scripts/agentrelay_console.py commander-merge TASK_ID --workspace /path/to/project --runtime-root .agentrelay/commander
+```
+
+Windows PowerShell（仅 Windows 使用）：
+
+```powershell
+& $PYTHON scripts/agentrelay_console.py commander-merge TASK_ID --workspace /path/to/project --runtime-root .agentrelay/commander
 ```
 
 确认卡、需求卡、验证卡和回滚卡始终由主 Agent/Workflow 控制；外部模型只提供建议或受限
@@ -646,14 +706,21 @@ Cookie、密钥、登录状态或原始对话。
 “这个存起来” → 按用户要求回写并标记“用户要求归档”。
 
 ```bash
-"$PYTHON" scripts/agent_relay_archive.py add \
-  --title "MQ 换 Kafka" --project de \
-  --summary "生产者消费者切到 Kafka，测试通过" \
-  --file src/MqSender.java --verification "pytest 通过"
+"$PYTHON" scripts/agent_relay_archive.py add --title "MQ 换 Kafka" --project de --summary "生产者消费者切到 Kafka，测试通过" --file src/MqSender.java --verification "pytest 通过"
 "$PYTHON" scripts/agent_relay_archive.py list --project de
 "$PYTHON" scripts/agent_relay_archive.py search Kafka --project de
 "$PYTHON" scripts/agent_relay_archive.py projects
 "$PYTHON" scripts/agent_relay_archive.py path
+```
+
+Windows PowerShell（仅 Windows 使用）：
+
+```powershell
+& $PYTHON scripts/agent_relay_archive.py add --title "MQ 换 Kafka" --project de --summary "生产者消费者切到 Kafka，测试通过" --file src/MqSender.java --verification "pytest 通过"
+& $PYTHON scripts/agent_relay_archive.py list --project de
+& $PYTHON scripts/agent_relay_archive.py search Kafka --project de
+& $PYTHON scripts/agent_relay_archive.py projects
+& $PYTHON scripts/agent_relay_archive.py path
 ```
 
 规则：新问题开始时 Tracker 只读检查当前项目归档，保守命中则从 weight 2 起算、先查
