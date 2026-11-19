@@ -119,6 +119,81 @@ class WindowsCompatibilityTests(unittest.TestCase):
         install_files.assert_not_called()
         merge_hooks.assert_not_called()
         apply.assert_called_once_with([], [])
+    def test_checklist_redraws_in_place_and_codex_defaults_only_to_installed(self):
+        import install
+        import io
+        from unittest.mock import patch
+        output = io.StringIO()
+        with patch("sys.stdout", output):
+            height = install.redraw_checklist(["[ ] 1. Codex", "[x] 2. Claude"], 0, interactive=True)
+            install.redraw_checklist(["[x] 1. Codex", "[x] 2. Claude"], height, interactive=True)
+        text = output.getvalue()
+        self.assertEqual(text.count("\033[2K"), 4)
+        self.assertIn("\033[2A", text)
+        self.assertIn("\033[2K[x] 1. Codex", text)
+
+        registry = {
+            "codex": {"level": "full", "label": "Codex"},
+            "claude": {"level": "full", "label": "Claude"},
+        }
+        with patch.object(agent_targets, "agent_targets", return_value=registry), \
+                patch.object(agent_targets, "detect_agents", return_value={"codex": True, "claude": True}), \
+                patch.object(agent_targets, "relay_installed", side_effect=lambda target, meta: target == "claude"), \
+                patch("builtins.input", return_value=""):
+            selected, action = install.choose_install_targets()
+        self.assertEqual(selected, ["claude"])
+        self.assertEqual(action, "install")
+
+    def test_commander_child_command_uses_each_host_background_mode(self):
+        from scripts.research_commander import commander_child_command
+        self.assertEqual(commander_child_command("claude", "task")[:2], ["claude", "-p"])
+        self.assertEqual(commander_child_command("pi", "task")[:2], ["pi", "-p"])
+        self.assertEqual(commander_child_command("opencode", "task")[:2], ["opencode", "run"])
+        self.assertEqual(commander_child_command("codex", "task")[:2], ["codex", "exec"])
+
+    def test_commander_prefers_api_and_rejects_web_provider(self):
+        from scripts.commander_provider_pool import CommanderProviderCoordinator, ProviderProfile, WEB
+        with tempfile.TemporaryDirectory() as directory:
+            pool = CommanderProviderCoordinator(directory, [
+                ProviderProfile("local-llm", "local"),
+                ProviderProfile("my-api", "api"),
+                ProviderProfile("deepseek-web", "web"),
+            ])
+            lease, error = pool.acquire("task", "role", ["local-llm", "my-api", "deepseek-web"])
+            self.assertIsNotNone(lease)
+            self.assertEqual(lease.provider_id, "my-api")
+            pool.release(lease)
+            lease, error = pool.acquire("task-2", "role", ["deepseek-web"])
+            self.assertIsNone(lease)
+            self.assertEqual(error, "COMMANDER_WEB_PROVIDER_NOT_SUPPORTED")
+
+    def test_commander_api_call_uses_controlled_config_without_child_key(self):
+        from unittest.mock import patch
+        from scripts import commander_provider_call as bridge
+        provider = {"id": "my-api", "endpoint": "http://localhost/v1", "model": "test-model", "api_key": "secret"}
+        response = {"choices": [{"message": {"content": "answer"}}]}
+        from scripts import config_manager
+        with patch.object(config_manager, "load_config", return_value={"api_providers": [provider]}), \
+                patch.object(bridge.OpenAICompatibleAdapter, "send", return_value=response) as send:
+            self.assertEqual(bridge._request_provider("my-api", "question"), "answer")
+            send.assert_called_once_with({"messages": [{"role": "user", "content": "question"}]})
+    def test_commander_config_requires_api_or_local_not_web(self):
+        from scripts import config_manager
+        base = config_manager.default_config()
+        for providers, expected in (
+            ({"web_providers": [{"id": "web-only", "enabled": True}]}, False),
+            ({"local_providers": [{"id": "local", "endpoint": "http://localhost/v1"}]}, True),
+            ({"api_providers": [{"id": "api", "endpoint": "http://localhost/v1", "api_key": "key"}]}, True),
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                (home / ".codex").mkdir()
+                config = {**base, "commander": dict(base["commander"]), **providers}
+                saved = config_manager.load_config(home)
+                saved.update(config)
+                # save_config is the production path that normalizes commander availability.
+                config_manager.save_config(saved, home)
+                self.assertEqual(config_manager.load_config(home)["commander"]["enabled"], expected)
 
 
 if __name__ == "__main__":

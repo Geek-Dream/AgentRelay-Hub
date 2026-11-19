@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Controlled model call for a Commander child.
 
-This is the only supported child-to-model bridge. It permits one local model
-or one authenticated web conversation at a time and rejects API providers.
+The controlled bridge permits one API provider, one local model, or one
+authenticated web conversation at a time. Keys stay in the parent-controlled
+process and are never copied into child environments.
 """
 from __future__ import annotations
 
@@ -25,40 +26,27 @@ except ImportError:
 
 
 def _profiles() -> list[ProviderProfile]:
-    profiles = [
-        ProviderProfile("deepseek-web", "web", login_command="agent_relay_login.py --provider deepseek",
-                        proxy_hint=os.environ.get("AGENTRELAY_DEEPSEEK_PROXY", "")),
-        ProviderProfile("qianwen-web", "web", login_command="agent_relay_login.py --provider qianwen",
-                        proxy_hint=os.environ.get("AGENTRELAY_QIANWEN_PROXY", "")),
-        ProviderProfile("kimi-web", "web", login_command="agent_relay_login.py --provider kimi",
-                        proxy_hint=os.environ.get("AGENTRELAY_KIMI_PROXY", "")),
-        ProviderProfile("local-llm", "local"),
-        ProviderProfile("gpt-api", "api"),
-    ]
+    profiles = []
     try:
-        try:
-            from .config_manager import load_config
-        except ImportError:
-            from config_manager import load_config
-        configured = load_config().get("web_providers", [])
-    except Exception:
-        configured = []
-    known = {item.provider_id for item in profiles}
-    for item in configured if isinstance(configured, list) else []:
+        from .config_manager import load_config
+    except ImportError:
+        from config_manager import load_config
+    config = load_config()
+    for item in config.get("local_providers", []) if isinstance(config.get("local_providers"), list) else []:
+        if isinstance(item, dict) and item.get("endpoint"):
+            profiles.append(ProviderProfile(
+                "local-llm", "local",
+                enabled=bool(item.get("enabled", True)),
+            ))
+            break
+    for item in config.get("api_providers", []) if isinstance(config.get("api_providers"), list) else []:
         provider_id = str(item.get("id", "")).strip() if isinstance(item, dict) else ""
-        if not provider_id or provider_id in known:
-            continue
-        provider_name = provider_id.removesuffix("-web")
-        profiles.append(ProviderProfile(
-            provider_id,
-            "web",
-            enabled=bool(item.get("enabled", True)),
-            login_command=f"agent_relay_login.py --provider {provider_name}",
-            proxy_hint=os.environ.get(
-                f"AGENTRELAY_{provider_name.upper().replace('-', '_')}_PROXY", ""
-            ),
-        ))
-        known.add(provider_id)
+        if provider_id:
+            profiles.append(ProviderProfile(
+                provider_id,
+                "api",
+                enabled=bool(item.get("enabled", True)) and bool(item.get("endpoint") and item.get("api_key")),
+            ))
     return profiles
 
 
@@ -88,6 +76,21 @@ def _request_provider(provider_id: str, prompt: str) -> str:
     Leasing and completion stay in ``call`` so every request, including the
     post-recovery comparison request, uses the same single-concurrency rules.
     """
+    if provider_id != "local-llm":
+        try:
+            from .config_manager import load_config
+        except ImportError:
+            from config_manager import load_config
+        for item in load_config().get("api_providers", []):
+            if isinstance(item, dict) and item.get("id") == provider_id and item.get("enabled", True):
+                adapter = OpenAICompatibleAdapter(
+                    str(item["endpoint"]),
+                    model=str(item.get("model", "")),
+                    timeout=int(item.get("timeout", 120) or 120),
+                    api_key=str(item.get("api_key", "")),
+                )
+                raw = adapter.send({"messages": [{"role": "user", "content": prompt}]})
+                return str(raw.get("choices", [{}])[0].get("message", {}).get("content", ""))
     if provider_id == "local-llm":
         endpoint = os.environ.get("AGENTRELAY_LOCAL_LLM_ENDPOINT")
         if not endpoint:
@@ -115,7 +118,7 @@ def _request_provider(provider_id: str, prompt: str) -> str:
             timeout=int(os.environ.get("AGENTRELAY_WEB_TIMEOUT", "120")),
         )
         return str(raw.get("answer", "") if isinstance(raw, dict) else raw)
-    raise RuntimeError("COMMANDER_CHILD_API_DENIED")
+    raise RuntimeError("COMMANDER_PROVIDER_NOT_CONFIGURED")
 
 
 def call(provider: str, prompt: str, task_id: str, role: str, coordinator: Path,

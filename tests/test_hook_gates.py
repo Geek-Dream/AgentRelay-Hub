@@ -61,10 +61,13 @@ class HookGateTests(unittest.TestCase):
     def assert_change_summary_format(self, message):
         lines = message.splitlines()
         self.assertEqual(lines[0], "")
-        self.assertTrue(lines[1].startswith("- 用户说："))
-        self.assertEqual(lines[2], "")
-        self.assertTrue(lines[3].startswith("- 我完成："))
-        self.assertIn("上次修改", message)
+        self.assertTrue(lines[1].startswith("=================================历史记录"))
+        self.assertTrue(lines[3].startswith("- ⬆️(User)："))
+        self.assertEqual(lines[4], "")
+        self.assertTrue(lines[5].startswith("- ⬆️(Agent)："))
+        self.assertIn("=================================当前任务", message)
+        self.assertIn("- ⬇️(User)：", message)
+        self.assertIn("- ⬇️(Agent)：", message)
         self.assertNotIn("本次修改：", message)
         self.assertNotIn("•", message)
         self.assertNotIn("这次改了哪些文件：", message)
@@ -674,7 +677,7 @@ class HookGateTests(unittest.TestCase):
         self.assert_hook_ok(stopped)
         output = json.loads(stopped.stdout)
         self.assert_change_summary_format(output["systemMessage"])
-        self.assertIn("我完成：已完成修改，拼写问题已修复", output["systemMessage"])
+        self.assertIn("⬇️(Agent)：已完成修改，拼写问题已修复", output["systemMessage"])
         self.assertNotIn("decision", output)
 
     def test_claude_shim_forwards_change_summary_after_final_stop(self):
@@ -728,7 +731,7 @@ class HookGateTests(unittest.TestCase):
         self.assert_hook_ok(stopped)
         output = json.loads(stopped.stdout)
         self.assert_change_summary_format(output["systemMessage"])
-        self.assertIn("我完成：已完成修改，拼写问题已修复", output["systemMessage"])
+        self.assertIn("⬇️(Agent)：已完成修改，拼写问题已修复", output["systemMessage"])
         self.assertNotIn("decision", output)
 
     def test_blocked_stop_does_not_record_until_the_gate_allows_completion(self):
@@ -793,7 +796,7 @@ class HookGateTests(unittest.TestCase):
         ))
         self.assert_hook_ok(allowed)
         allowed_output = json.loads(allowed.stdout)
-        self.assertIn("用户说：", allowed_output["systemMessage"])
+        self.assertIn("⬇️(User)：", allowed_output["systemMessage"])
         history_files = list(history_dir.glob("*.json"))
         self.assertEqual(len(history_files), 1)
         history = json.loads(history_files[0].read_text(encoding="utf-8"))

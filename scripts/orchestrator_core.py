@@ -1019,10 +1019,10 @@ class Orchestrator:
         if native and (confirmation is None or confirmation.status != "approved" or confirmation.action != "enable_commander"):
             raise PermissionError("Commander 必须先完成需求确认，并批准“启用审查官模式”确认卡")
         try:
-            from .research_commander import CommanderRuntime, codex_cli_available
+            from .research_commander import CommanderRuntime, codex_cli_available, commander_child_command
             from .commander_provider_pool import CommanderProviderCoordinator, ProviderProfile
         except ImportError:
-            from research_commander import CommanderRuntime, codex_cli_available
+            from research_commander import CommanderRuntime, codex_cli_available, commander_child_command
             from commander_provider_pool import CommanderProviderCoordinator, ProviderProfile
         if not native or not codex_cli_available(codex):
             with fusion_commander_lock(task_id):
@@ -1040,13 +1040,11 @@ class Orchestrator:
             raise ValueError(f"Commander 源 workspace 不存在: {source}")
         with fusion_commander_lock(task_id):
             runtime_path = Path(runtime_root).resolve() if runtime_root else source / ".agentrelay" / "commander"
-            profiles = [
-                ProviderProfile("deepseek-web", "web", login_command="agent_relay_login.py --provider deepseek"),
-                ProviderProfile("qianwen-web", "web", login_command="agent_relay_login.py --provider qianwen"),
-                ProviderProfile("kimi-web", "web", login_command="agent_relay_login.py --provider kimi"),
-                ProviderProfile("local-llm", "local"),
-                ProviderProfile("gpt-api", "api"),
-            ]
+            try:
+                from .commander_provider_call import _profiles
+            except ImportError:
+                from commander_provider_call import _profiles
+            profiles = _profiles()
             coordinator = CommanderProviderCoordinator(runtime_path, profiles)
             runtime = CommanderRuntime(runtime_path, max_agents=max_agents, coordinator=coordinator)
             configs = model_configs or {}
@@ -1063,24 +1061,31 @@ class Orchestrator:
                 runtime._persist_child_context(agent)
             self._assign_fusion_takeover(task_id, agents)
 
-            # Commander 只配置终端可执行文件路径；子 Agent 的启动参数由这里统一编排。
             configured_terminal = os.environ.get("AGENTRELAY_COMMANDER_TERMINAL_PATH", "").strip()
-            # API/CLI 显式传入的路径优先；网页配置只覆盖默认的 `codex`。
-            terminal = codex if codex != "codex" else (configured_terminal or codex)
-            command_prefix = [terminal, "exec"]
+            # 优先当前宿主；其余宿主使用各自的后台非交互会话，结果统一回主审查官。
+            host = os.environ.get("AGENTRELAY_TARGET", "").strip().lower()
+            terminal = codex
+            if codex == "codex":
+                if host in {"claude", "pi", "opencode"}:
+                    terminal = host
+                else:
+                    terminal = configured_terminal or codex
+            command_prefix = [terminal]
 
             def command_factory(agent):
                 goal = agent.model_config.get("goal", "完成分配任务")
                 configured_provider = agent.model_config.get("provider")
-                if configured_provider in {"deepseek-web", "qianwen-web", "kimi-web", "local-llm"}:
+                if configured_provider == "local-llm":
+                    default_provider = configured_provider
+                elif configured_provider and configured_provider not in {"deepseek-web", "qianwen-web", "kimi-web"}:
                     default_provider = configured_provider
                 else:
-                    default_provider = os.environ.get("AGENTRELAY_COMMANDER_DEFAULT_PROVIDER", "deepseek-web")
+                    default_provider = os.environ.get("AGENTRELAY_COMMANDER_DEFAULT_PROVIDER", "gpt-api")
                 provider_id = agent.model_config.get("consult_provider", default_provider)
                 fallback_providers = tuple(agent.model_config.get("fallback_providers", ())) or tuple(
                     item.strip() for item in os.environ.get(
                         "AGENTRELAY_COMMANDER_FALLBACK_PROVIDERS",
-                        "qianwen-web,kimi-web,local-llm",
+                        "local-llm",
                     ).split(",") if item.strip()
                 )
                 coordinator_cli = str(Path(__file__).with_name("commander_provider_call.py").resolve())
@@ -1109,9 +1114,9 @@ class Orchestrator:
                         f"你是 Commander 的 {agent.role} 子 Agent。\n"
                         f"职责：{goal}\n"
                         f"{assist_note}"
-                        f"指定 Provider：{provider_id}。如果该 Provider 是 web 或 local，"
+                        f"指定 Provider：{provider_id}。如果该 Provider 是 api 或 local，"
                         "你只能通过主 Agent/AgentRelay 的受控调用使用它；不要自行打开新的 Commander，"
-                        "不要调用任何 API Provider。\n"
+                        "不要直接调用 API 或读取密钥。\n"
                         f"受控 Provider 入口（如确需咨询）：{coordinator_cli} --provider {provider_id} "
                         + " ".join(f"--fallback-provider {item}" for item in fallback_providers) + " "
                         + f"--task-id {task_id} --role {agent.role} --coordinator {runtime_path}\n"
@@ -1128,8 +1133,7 @@ class Orchestrator:
                     except ImportError:
                         from change_contract import child_prompt
                     prompt = child_prompt(contract) + "\n\n" + prompt
-                return list(command_prefix) + (["-m", str(model)] if model else []) + ["--skip-git-repo-check", "--sandbox", "workspace-write",
-                        "--approve-for-me", "--ephemeral", "--color", "never", prompt]
+                return commander_child_command(terminal, prompt, str(model or ""))
 
             takeover_agents = [
                 agent for agent in agents

@@ -3000,11 +3000,11 @@ def _wrap_change_history_text(value, width=None, limit=220):
 
 
 def render_change_history(entries):
-    """Render the current and previous task in short plain-language dialogue."""
+    """Render history first, then the current task, in plain language."""
 
-    def _block(entry):
+    def _block(entry, arrow):
         if not isinstance(entry, dict):
-            return "- 用户说：暂无记录\n\n- 我完成：暂无记录"
+            return f"- {arrow}(User)：暂无记录\n\n- {arrow}(Agent)：暂无记录"
         request = _clip_card_text(normalize_text(entry.get("request")), 160)
         if not request:
             request = "完成这项修改"
@@ -3012,7 +3012,7 @@ def render_change_history(entries):
         if not summary or summary == "已完成文件写入，但未记录具体修改说明。":
             summary = "已完成这项修改"
         summary = _clip_card_text(summary, 220)
-        return f"- 用户说：{request}\n\n- 我完成：{summary}"
+        return f"- {arrow}(User)：{request}\n\n- {arrow}(Agent)：{summary}"
 
     current = entries[0] if entries and isinstance(entries[0], dict) else None
     if current is None:
@@ -3021,8 +3021,12 @@ def render_change_history(entries):
         (item for item in entries[1:] if isinstance(item, dict)),
         None,
     )
-    divider = "=================================上次修改=================================="
-    return f"\n{_block(current)}\n\n{divider}\n\n{_block(previous)}"
+    history_divider = "=" * 33 + "历史记录" + "=" * 33
+    current_divider = "=" * 33 + "当前任务" + "=" * 33
+    return (
+        f"\n{history_divider}\n\n{_block(previous, '⬆️')}\n\n"
+        f"{current_divider}\n\n{_block(current, '⬇️')}"
+    )
 
 
 def annotate_change_summary(session_id, summary, file_groups, request=""):

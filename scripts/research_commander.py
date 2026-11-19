@@ -302,9 +302,9 @@ class CommanderRuntime:
         provider_id = agent.model_config.get("provider")
         if self.coordinator is not None and provider_id in self.coordinator.profiles:
             profile = self.coordinator.profiles[provider_id]
-            if profile.kind == "api":
+            if profile.kind == "web":
                 agent.status = "FAILED"
-                agent.result = {"error": "COMMANDER_CHILD_API_DENIED", "provider": provider_id}
+                agent.result = {"error": "COMMANDER_WEB_PROVIDER_NOT_SUPPORTED", "provider": provider_id}
                 return agent
         started = time.monotonic()
         result = runner.run(agent, command_factory(agent), timeout)
@@ -633,9 +633,7 @@ class CommanderProcess:
         if not command or any(not isinstance(part, str) for part in command):
             raise ValueError("Commander command 必须是非空字符串数组")
         child_env = os.environ.copy()
-        # Commander children never call API Providers. Do not expose API keys
-        # to their inherited environment even though the controlled bridge
-        # also rejects API provider IDs.
+        # API 密钥不进入子进程环境；API 调用只能经父侧受控 Provider 桥。
         for name in tuple(child_env):
             if name.endswith("_API_KEY") or name in {"OPENAI_API_KEY", "ANTHROPIC_API_KEY"}:
                 child_env.pop(name, None)
@@ -687,6 +685,31 @@ class CommanderProcess:
                                 "--sandbox", "workspace-write", "--approve-for-me",
                                 "--ephemeral", "--color", "never", prompt]
         return self.run(agent, command, timeout=timeout)
+
+
+def commander_child_command(terminal: str, prompt: str, model: str = "") -> list[str]:
+    """Build one bounded background session command for the active host."""
+    name = Path(terminal).name.lower()
+    if name in {"claude", "claude.exe"}:
+        command = [terminal, "-p", "--output-format", "text", "--permission-mode", "acceptEdits"]
+        if model:
+            command += ["--model", model]
+        return command + [prompt]
+    if name in {"pi", "pi.exe"}:
+        command = [terminal, "-p", "--no-session"]
+        if model:
+            command += ["--model", model]
+        return command + [prompt]
+    if name in {"opencode", "opencode.exe"}:
+        command = [terminal, "run", "--format", "json"]
+        if model:
+            command += ["--model", model]
+        return command + [prompt]
+    command = [terminal, "exec"]
+    if model:
+        command += ["-m", model]
+    return command + ["--skip-git-repo-check", "--sandbox", "workspace-write",
+                      "--approve-for-me", "--ephemeral", "--color", "never", prompt]
 
 
 def service_config(kind: str, runtime_dir: str | Path, command: list[str], *, label="com.agentrelay.daemon") -> str:

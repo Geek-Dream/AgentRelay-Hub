@@ -80,10 +80,13 @@ class ChangeHistoryTests(unittest.TestCase):
     def assert_change_summary_format(self, message):
         lines = message.splitlines()
         self.assertEqual(lines[0], "")
-        self.assertTrue(lines[1].startswith("- 用户说："))
-        self.assertEqual(lines[2], "")
-        self.assertTrue(lines[3].startswith("- 我完成："))
-        self.assertIn("上次修改", message)
+        self.assertTrue(lines[1].startswith("=================================历史记录"))
+        self.assertTrue(lines[3].startswith("- ⬆️(User)："))
+        self.assertEqual(lines[4], "")
+        self.assertTrue(lines[5].startswith("- ⬆️(Agent)："))
+        self.assertIn("=================================当前任务", message)
+        self.assertIn("- ⬇️(User)：", message)
+        self.assertIn("- ⬇️(Agent)：", message)
         self.assertNotIn("本次修改：", message)
         self.assertNotIn("•", message)
         self.assertNotIn("这次改了哪些文件：", message)
@@ -97,11 +100,11 @@ class ChangeHistoryTests(unittest.TestCase):
             },
             {"request": "补安装说明", "summary": "修改了安装文档，补充了 Windows 步骤"},
         ])
-        self.assertIn("- 用户说：把页面右上角按钮改得明显点", message)
-        self.assertIn("- 我完成：修改了页面右上角按钮组件，按需求把按钮颜色从白色改成青色", message)
-        self.assertIn("上次修改", message)
-        self.assertIn("- 用户说：补安装说明", message)
-        self.assertIn("- 我完成：修改了安装文档，补充了 Windows 步骤", message)
+        self.assertIn("- ⬇️(User)：把页面右上角按钮改得明显点", message)
+        self.assertIn("- ⬇️(Agent)：修改了页面右上角按钮组件，按需求把按钮颜色从白色改成青色", message)
+        self.assertIn("历史记录", message)
+        self.assertIn("- ⬆️(User)：补安装说明", message)
+        self.assertIn("- ⬆️(Agent)：修改了安装文档，补充了 Windows 步骤", message)
 
     def test_legacy_summary_is_cleaned_for_plain_dialogue(self):
         fence = "`" * 3
@@ -142,7 +145,7 @@ class ChangeHistoryTests(unittest.TestCase):
         )
 
         self.assertIn("已接入品牌热销地区数据", message)
-        self.assertIn("用户说：我查看了品牌热销地区图", message)
+        self.assertIn("⬇️(User)：我查看了品牌热销地区图", message)
         self.assertNotIn("这次改了哪些文件：", message)
         self.assertNotIn("页面代码", message)
         self.assertNotIn("distData.js", message)
@@ -174,7 +177,7 @@ class ChangeHistoryTests(unittest.TestCase):
             "刷新品牌分布图即可看到效果。",
         )
 
-        self.assertIn("我完成：已完成这项修改", message)
+        self.assertIn("⬇️(Agent)：已完成这项修改", message)
         self.assertNotIn("按需求“刷新品牌分布图", message)
         self.assertNotIn("自动测试", message)
         self.assertNotIn("页面代码", message)
@@ -311,8 +314,8 @@ class ChangeHistoryTests(unittest.TestCase):
             self.tracker.read_state(session_id=session_id),
             "",
         )
-        self.assertIn("- 用户说：把应用页面改得可用", message)
-        self.assertIn("- 我完成：修改了应用页面组件，按需求让空白页显示为可编辑表单", message)
+        self.assertIn("- ⬇️(User)：把应用页面改得可用", message)
+        self.assertIn("- ⬇️(Agent)：修改了应用页面组件，按需求让空白页显示为可编辑表单", message)
         self.assertNotIn("应用页面优化：", message)
         self.assertNotIn("回归测试：", message)
         self.assertNotIn("tests/test_app.py", message)
@@ -343,7 +346,7 @@ class ChangeHistoryTests(unittest.TestCase):
             if index == 1:
                 first_message = payload["systemMessage"]
 
-        self.assertIn("上次修改", first_message)
+        self.assertIn("历史记录", first_message)
         self.assertIn("暂无记录", first_message)
 
         history = self.tracker.read_change_history(
@@ -416,7 +419,7 @@ class ChangeHistoryTests(unittest.TestCase):
             "已完成修改。",
         )
 
-        self.assertIn("用户说：", first)
+        self.assertIn("⬇️(User)：", first)
         self.assertEqual(second, "")
         history = self.tracker.read_change_history(
             str(self.workspace),
@@ -469,7 +472,7 @@ class ChangeHistoryTests(unittest.TestCase):
         )
         first_message = json.loads(first_output)["systemMessage"]
         self.assertIn("第一个窗口的问题", first_message)
-        self.assertIn("上次修改", first_message)
+        self.assertIn("历史记录", first_message)
         self.assertIn("暂无记录", first_message)
 
         _, second_output = self.run_write_turn(
@@ -480,7 +483,7 @@ class ChangeHistoryTests(unittest.TestCase):
         )
         second_message = json.loads(second_output)["systemMessage"]
         self.assertIn("第二个窗口的问题", second_message)
-        self.assertIn("上次修改", second_message)
+        self.assertIn("历史记录", second_message)
         self.assertNotIn("第一个窗口的问题", second_message)
 
         first_history = self.tracker.read_change_history(
@@ -648,7 +651,7 @@ class ChangeHistoryTests(unittest.TestCase):
         self.assertIn("修改摘要已完成", message)
         self.assertNotIn("是的", message)
         self.assert_change_summary_format(message)
-        self.assertIn("上次修改", message)
+        self.assertIn("历史记录", message)
 
     def test_generic_continue_keeps_the_original_change_request(self):
         state = self.tracker.create_new_problem(

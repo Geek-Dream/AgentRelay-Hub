@@ -1273,6 +1273,17 @@ def configure_commander(config: dict) -> None:
                                  "manual_disabled": not enabled, "max_agents": max_agents})
 
 
+def redraw_checklist(lines: list[str], previous_height: int, *, interactive: bool) -> int:
+    """Redraw one checklist in place on ANSI terminals, never append duplicates."""
+    if interactive and previous_height:
+        print(f"\033[{previous_height}A", end="")
+    for line in lines:
+        print(f"\033[2K{line}" if interactive else line)
+    if interactive:
+        sys.stdout.flush()
+    return len(lines)
+
+
 def choose_install_targets() -> tuple[list[str], str]:
     """终端 [x] 清单多选安装目标。
 
@@ -1293,19 +1304,24 @@ def choose_install_targets() -> tuple[list[str], str]:
     ids = list(registry)
     checked = {
         target_id for target_id, meta in registry.items()
-        if installed[target_id] or (target_id == "codex" and detected[target_id])
+        if installed[target_id]
     }
 
+    height = 0
+    interactive = sys.stdout.isatty()
     while True:
-        print("\n安装目标 Agent：")
-        print("  输入编号切换勾选 · 回车 = 按勾选安装/卸载 · none = 全部卸载 · 0/web = 只开网页")
+        lines = [
+            "\n安装目标 Agent：",
+            "  输入编号切换勾选 · 回车 = 按勾选安装/卸载 · none = 全部卸载 · 0/web = 只开网页",
+        ]
         for index, target_id in enumerate(ids, 1):
             meta = registry[target_id]
             mark = "[x]" if target_id in checked else "[ ]"
             level = "完整支持" if meta["level"] == "full" else "仅装 Skill"
             cli = "已装" if detected[target_id] else "未装"
             relay = "已接入" if installed[target_id] else "未接入"
-            print(f"{mark} {index}. {meta['label']} — {level} · 本机{cli} · {relay}")
+            lines.append(f"{mark} {index}. {meta['label']} — {level} · 本机{cli} · {relay}")
+        height = redraw_checklist(lines, height, interactive=interactive)
         raw = input("> ").strip().lower()
         if raw in ("0", "web"):
             return [t for t in ids if t in checked], "web"
@@ -1341,13 +1357,15 @@ def choose_install_skills(
     ids = [str(entry["id"]) for entry in entries]
     checked = set(skill_catalog.default_skill_ids(catalog))
 
+    height = 0
+    interactive = sys.stdout.isatty()
     while True:
         installed_count = int(catalog.get("installed_count") or 0)
-        print(
+        lines = [
             f"\n开发 Skills（本机已装 {installed_count} 个 + "
-            "Anthropic 官方下载 + AgentRelay/Vue 内置）："
-        )
-        print("  输入编号切换勾选 · 回车 = 确认 · 0/none = 不安装")
+            "Anthropic 官方下载 + AgentRelay/Vue 内置）：",
+            "  输入编号切换勾选 · 回车 = 确认 · 0/none = 不安装",
+        ]
         for index, entry in enumerate(entries, 1):
             installable = skill_catalog.skill_is_installable(entry)
             mark = "[x]" if installable and entry["id"] in checked else "[ ]"
@@ -1373,10 +1391,11 @@ def choose_install_skills(
                 if not installable
                 else ""
             )
-            print(
+            lines.append(
                 f"{mark} {index}. {entry['name']}{version} "
                 f"[{origin}] — {entry['description']}{unavailable}"
             )
+        height = redraw_checklist(lines, height, interactive=interactive)
         raw = input("> ").strip().lower()
         if raw == "":
             return [skill_id for skill_id in ids if skill_id in checked]

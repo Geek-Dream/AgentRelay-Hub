@@ -16,6 +16,7 @@ from typing import Any
 try:
     from . import verification_state as _verification_state
 except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     import verification_state as _verification_state
 
 PAGE_SUFFIXES = {".html", ".htm", ".css", ".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte"}

@@ -91,8 +91,8 @@ class Dispatcher:
             return DispatchResult(status="rejected", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,
                                   provider_id=request.model,
-                                  error=DispatchError("COMMANDER_CHILD_API_DENIED",
-                                                       "Commander 子 Agent 不允许调用 API Provider"))
+                                  error=DispatchError("COMMANDER_PROVIDER_CONTROLLED_ONLY",
+                                                       "子 Agent 的模型调用必须经过 AgentRelay 受控入口"))
         if request.level not in {"worker", "expert"}:
             return DispatchResult(status="rejected", task_id=request.task_id,
                                   request_id=request.request_id, mode=request.level,

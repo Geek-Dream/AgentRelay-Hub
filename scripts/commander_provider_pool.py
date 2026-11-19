@@ -198,6 +198,8 @@ class CommanderProviderCoordinator:
         if depth > 1:
             return None, "COMMANDER_RECURSION_DENIED"
         candidate_ids = [item for item in candidates if item in self.profiles]
+        priority = {API: 0, LOCAL: 1, WEB: 2}
+        candidate_ids.sort(key=lambda item: priority.get(self.profiles[item].kind, 99))
         if simple_task:
             candidate_ids.sort(key=lambda item: self.profiles[item].kind != LOCAL)
         key = self._binding_key(task_id, role)
@@ -217,7 +219,7 @@ class CommanderProviderCoordinator:
             busy_candidates = []
             for provider_id in ordered:
                 profile = self.profiles[provider_id]
-                if not profile.enabled or profile.kind == API or not self._healthy(state, provider_id):
+                if not profile.enabled or profile.kind == WEB or not self._healthy(state, provider_id):
                     continue
                 if profile.kind == LOCAL and local_wait_expired:
                     continue
@@ -256,8 +258,8 @@ class CommanderProviderCoordinator:
             # A simple local task may fall through to an online candidate; a
             # caller with no candidates receives the same stable error below.
             break
-        if any(self.profiles[item].kind == API for item in candidate_ids):
-            return None, "COMMANDER_CHILD_API_DENIED"
+        if any(self.profiles[item].kind == WEB for item in candidate_ids):
+            return None, "COMMANDER_WEB_PROVIDER_NOT_SUPPORTED"
         return None, "PROVIDER_BUSY_OR_UNAVAILABLE"
 
     def complete(self, lease: ProviderLease | None, *, success: bool, quality: float = 0.0,

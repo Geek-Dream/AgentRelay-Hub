@@ -547,17 +547,17 @@ class PiExtensionTests(unittest.TestCase):
         summaries = [
             item["message"]
             for item in runtime["notifications"]
-            if "用户说：" in item["message"]
+            if "⬇️(User)：" in item["message"]
         ]
         self.assertEqual(len(summaries), 1, runtime["notifications"])
         lines = summaries[0].splitlines()
         self.assertEqual(lines[0], "")
-        self.assertEqual(lines[1], "- 用户说：修复 app.py 里的一个拼写错误")
+        self.assertEqual(lines[1], "=================================历史记录=================================")
         self.assertEqual(lines[2], "")
-        self.assertTrue(lines[3].startswith("- 我完成："))
-        self.assertIn("上次修改", summaries[0])
+        self.assertTrue(lines[5].startswith("- ⬆️(Agent)："))
+        self.assertIn("历史记录", summaries[0])
         self.assertNotIn("这次改了哪些文件：", summaries[0])
-        self.assertIn("我完成：已完成修改，拼写问题已修复", summaries[0])
+        self.assertIn("⬇️(Agent)：已完成修改，拼写问题已修复", summaries[0])
         self.assertIn("拼写问题已修复", summaries[0])
         history_dir = codex_home / "agent_relay_tracker" / "history" / "change-summaries"
         history_files = list(history_dir.glob("*.json"))

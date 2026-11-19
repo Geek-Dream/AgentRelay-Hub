@@ -364,10 +364,10 @@ def load_config(home: Path | None = None) -> dict[str, Any]:
         commander["terminal_path"] = commander.get("terminal", "codex")
     if "manual_disabled" not in commander:
         commander["manual_disabled"] = False
-    # 新配置中只要存在网页或本地 Provider，Commander 默认可用；用户手动关闭后保持关闭。
-    if (merged["web_providers"] or merged["local_providers"]) and not commander.get("manual_disabled"):
+    # Commander 只使用可执行本地工作的 API 或本地 Provider；网页模型不参与。
+    if (merged["api_providers"] or merged["local_providers"]) and not commander.get("manual_disabled"):
         commander["enabled"] = True
-    if not (merged["web_providers"] or merged["local_providers"]):
+    if not (merged["api_providers"] or merged["local_providers"]):
         commander["enabled"] = False
     return merged
 
@@ -494,7 +494,7 @@ def save_config(value: Mapping[str, Any], home: Path | None = None) -> Path:
         commander["terminal"] = commander["terminal_path"]
         commander["max_agents"] = max(1, min(5, int(commander.get("max_agents", 5) or 5)))
         commander["manual_disabled"] = bool(commander.get("manual_disabled", False))
-        if normalized.get("web_providers") or normalized.get("local_providers"):
+        if normalized.get("api_providers") or normalized.get("local_providers"):
             if not commander["manual_disabled"]:
                 commander["enabled"] = True
         else:
@@ -650,6 +650,7 @@ def apply_config_to_environment(home: Path | None = None) -> dict[str, Any]:
 
     api = _first(config.get("api_providers"))
     if api and api.get("endpoint") and api.get("api_key"):
+        os.environ.setdefault("AGENTRELAY_COMMANDER_DEFAULT_PROVIDER", str(api.get("id", "gpt-api")))
         os.environ.setdefault("AGENTRELAY_API_ENDPOINT", str(api["endpoint"]))
         os.environ.setdefault("AGENTRELAY_API_KEY", str(api["api_key"]))
         os.environ.setdefault("AGENTRELAY_API_MODEL", str(api.get("model", "")))
