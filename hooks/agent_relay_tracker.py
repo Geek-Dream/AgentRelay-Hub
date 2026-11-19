@@ -2999,19 +2999,35 @@ def _wrap_change_history_text(value, width=None, limit=220):
     return lines
 
 
+def _plain_request_summary(value):
+    """Use the Agent-recorded intent; never pass a long raw prompt off as a summary."""
+    text = normalize_text(value)
+    text = re.sub(r"\[Image\s+#\d+\]", "参考截图", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" ，,。；;\n")
+    if len(text) > 96:
+        return "未提炼本轮需求"
+    return text
+
+
+def _plain_agent_summary(value):
+    text = _clean_change_history_summary(value)
+    text = re.sub(r"\*\*|`", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" ，,。；;\n")
+    return _clip_card_text(text, 140)
+
+
 def render_change_history(entries):
     """Render history first, then the current task, in plain language."""
 
     def _block(entry, arrow):
         if not isinstance(entry, dict):
             return f"- {arrow}(User)：暂无记录\n\n- {arrow}(Agent)：暂无记录"
-        request = _clip_card_text(normalize_text(entry.get("request")), 160)
+        request = _plain_request_summary(entry.get("request"))
         if not request:
-            request = "完成这项修改"
-        summary = _clean_change_history_summary(entry.get("summary"))
+            request = "未提炼本轮需求"
+        summary = _plain_agent_summary(entry.get("summary"))
         if not summary or summary == "已完成文件写入，但未记录具体修改说明。":
-            summary = "已完成这项修改"
-        summary = _clip_card_text(summary, 220)
+            summary = "未记录具体修改说明"
         return f"- {arrow}(User)：{request}\n\n- {arrow}(Agent)：{summary}"
 
     current = entries[0] if entries and isinstance(entries[0], dict) else None
@@ -3034,6 +3050,11 @@ def annotate_change_summary(session_id, summary, file_groups, request=""):
 
     clean_summary = _clip_card_text(normalize_text(summary), 220)
     clean_request = _clip_card_text(normalize_text(request), 160)
+    if not clean_request:
+        original = normalize_text(read_state(session_id=session_id).get("initial_prompt"))
+        if len(original) > 96:
+            raise ValueError("请先提炼用户目标，不要直接粘贴原始长问题")
+        clean_request = original
     if not clean_summary:
         raise ValueError("--summary 不能为空")
     lock = acquire_lock()

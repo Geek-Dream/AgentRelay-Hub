@@ -177,7 +177,7 @@ class ChangeHistoryTests(unittest.TestCase):
             "刷新品牌分布图即可看到效果。",
         )
 
-        self.assertIn("⬇️(Agent)：已完成这项修改", message)
+        self.assertIn("⬇️(Agent)：已完成文件写入，但未记录具体修改说明", message)
         self.assertNotIn("按需求“刷新品牌分布图", message)
         self.assertNotIn("自动测试", message)
         self.assertNotIn("页面代码", message)
@@ -685,6 +685,26 @@ class ChangeHistoryTests(unittest.TestCase):
             continued["change_tracking"]["request"],
             "修复 Hook 修改历史",
         )
+    def test_complex_request_is_shortened_and_agent_summary_is_specific(self):
+        request = (
+            "涉及到无数据的，凡是这几个模块 首页 统计分析 综合查询 专项分析 运行态势 "
+            "监控预警 供应链 流程再现 场景展现 追溯查询 数据服务管理 宏观经济 "
+            "并且里面的子模块，涉及到没有数据，并不是数据返回0，就是后端没数据，"
+            "均使用 card形式的暂无数据"
+        )
+        message = self.tracker.render_change_history([{
+            "request": "统一处理各页面及子模块的无数据状态，使用暂无数据卡片",
+            "summary": "修改了首页、统计分析等模块的空状态，后端没有数据时隐藏图形、合计和百分比，只显示居中的暂无数据卡片",
+        }])
+        self.assertIn("⬇️(User)：统一处理各页面及子模块的无数据状态，使用暂无数据卡片", message)
+        self.assertIn("修改了首页、统计分析等模块的空状态", message)
+        self.assertNotIn("**", message)
+        raw = self.tracker.render_change_history([{
+            "request": request,
+            "summary": "修改了空状态",
+        }])
+        self.assertIn("未提炼本轮需求", raw)
+        self.assertNotIn("数据服务管理 宏观经济", raw)
 
 
 if __name__ == "__main__":
