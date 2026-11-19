@@ -30,6 +30,12 @@ PREFERRED_DEFAULT_SKILL_IDS = (
     "xlsx",
     "vue-best-practices",
     "web-artifacts-builder",
+    "121-java-object-oriented-design",
+    "122-java-type-design",
+    "301-frameworks-spring-boot-core",
+    "302-frameworks-spring-boot-rest",
+    "303-frameworks-spring-boot-validation",
+    "code-review-excellence",
 )
 INSTALLED_SOURCE = "installed"
 BUNDLED_SOURCE = "bundled"
@@ -41,6 +47,83 @@ COPY_INSTALL_METHOD = "copy"
 OFFICIAL_DOWNLOAD_METHOD = "official-download"
 AGENTRELAY_BUNDLED_CATALOG = "agentrelay"
 AGENTRELAY_BUNDLED_SKILLS = {
+    "121-java-object-oriented-design": {
+        "name": "Java Object-Oriented Design",
+        "description": "Java 面向对象设计：SOLID、DRY、YAGNI、封装、抽象和常见代码异味。",
+        "path": "121-java-object-oriented-design",
+        "license": "LICENSE",
+        "license_spdx": "Apache-2.0",
+        "source_label": "Plinth 内置",
+        "files": 10,
+        "bytes": 18424,
+        "sha256": "e946e346f98f45de110b569bb0078abf368a1b8490eca244d40196bbf9e49155",
+    },
+    "122-java-type-design": {
+        "name": "Java Type Design",
+        "description": "Java 类型设计、不可变性、值对象、接口和类型边界。",
+        "path": "122-java-type-design",
+        "license": "LICENSE",
+        "license_spdx": "Apache-2.0",
+        "source_label": "Plinth 内置",
+        "files": 3,
+        "bytes": 14237,
+        "sha256": "bd61702fbab1f6e3de1c54a54df4bb0dda4e988a14be06845d2270a8bbb4261c",
+    },
+    "301-frameworks-spring-boot-core": {
+        "name": "Spring Boot Core",
+        "description": "Spring Boot 核心规范：组件职责、依赖注入、配置和模块化边界。",
+        "path": "301-frameworks-spring-boot-core",
+        "license": "LICENSE",
+        "license_spdx": "Apache-2.0",
+        "source_label": "Plinth 内置",
+        "files": 3,
+        "bytes": 14611,
+        "sha256": "f9c351c4037c4cda7ac9c1ec5f185d129c8ed25d29606eaf491f4dd4f6a9e6c9",
+    },
+    "302-frameworks-spring-boot-rest": {
+        "name": "Spring Boot REST",
+        "description": "Spring REST API：DTO、HTTP 语义、错误处理和 OpenAPI 契约。",
+        "path": "302-frameworks-spring-boot-rest",
+        "license": "LICENSE",
+        "license_spdx": "Apache-2.0",
+        "source_label": "Plinth 内置",
+        "files": 3,
+        "bytes": 14585,
+        "sha256": "a3e02400e18200cf7ef12f03bcf60bf525596ec6830812502e15fc8d102a4e63",
+    },
+    "303-frameworks-spring-boot-validation": {
+        "name": "Spring Boot Validation",
+        "description": "Spring DTO 校验：Bean Validation、@Valid、校验组和一致错误响应。",
+        "path": "303-frameworks-spring-boot-validation",
+        "license": "LICENSE",
+        "license_spdx": "Apache-2.0",
+        "source_label": "Plinth 内置",
+        "files": 3,
+        "bytes": 13747,
+        "sha256": "0bc99aa632add274c89584cd04368d1e1a08e98bc3489dfe7315fdcb3759ef55",
+    },
+    "312-frameworks-spring-data-jdbc": {
+        "name": "Spring Data JDBC",
+        "description": "Spring Data JDBC：Repository、聚合边界、记录类型和持久化职责。",
+        "path": "312-frameworks-spring-data-jdbc",
+        "license": "LICENSE",
+        "license_spdx": "Apache-2.0",
+        "source_label": "Plinth 内置",
+        "files": 3,
+        "bytes": 14061,
+        "sha256": "7154b549d7ecacc9877b0f2352562736f0b6357567c3245f0c7bf232427db3f7",
+    },
+    "code-review-excellence": {
+        "name": "Code Review Excellence",
+        "description": "通用代码审查：架构、命名、重复代码、可维护性和审查清单。",
+        "path": "code-review-excellence",
+        "license": "LICENSE",
+        "license_spdx": "MIT",
+        "source_label": "Wshobson 内置",
+        "files": 4,
+        "bytes": 3040,
+        "sha256": "6725c2162e8fbd243e810b35362c9c7ec3a31fb59c2a502951861b4793e25577",
+    },
     "browser-automatic": {
         "name": "Browser Automatic",
         "description": "使用 Playwright 执行网页截图、内容提取和多步骤浏览器操作。",
@@ -352,7 +435,7 @@ def agentrelay_bundled_skill_entry(
     skill_id: str,
     installed_in: Iterable[str] | None = None,
 ) -> dict:
-    """Validate and describe an MIT Skill maintained by AgentRelay."""
+    """Validate and describe a bundled Skill and its upstream license."""
 
     metadata = AGENTRELAY_BUNDLED_SKILLS.get(skill_id)
     if metadata is None:
@@ -388,9 +471,16 @@ def agentrelay_bundled_skill_entry(
             f"AgentRelay bundled Skill {skill_id} declares an unexpected name: "
             f"{declared.get('name')!r}"
         )
-    if "MIT License" not in license_content:
+    license_spdx = str(metadata.get("license_spdx") or "")
+    license_markers = {
+        "MIT": "MIT License",
+        "Apache-2.0": "Apache License",
+    }
+    marker = license_markers.get(license_spdx)
+    if marker is None or marker not in license_content:
         raise CatalogError(
-            f"AgentRelay bundled Skill {skill_id} is missing its MIT license"
+            f"AgentRelay bundled Skill {skill_id} is missing its "
+            f"{license_spdx or 'declared'} license"
         )
     file_count, digest = _tree_sha256(source, normalize_newlines=True)
     byte_count = sum(
@@ -418,7 +508,7 @@ def agentrelay_bundled_skill_entry(
         "version": "",
         "description": metadata["description"],
         "source_type": BUNDLED_SOURCE,
-        "source_label": "AgentRelay 内置",
+        "source_label": str(metadata.get("source_label") or "AgentRelay 内置"),
         "installed_in": list(installed_in or []),
         "copy_policy": COPY_ALLOWED,
         "installable": True,

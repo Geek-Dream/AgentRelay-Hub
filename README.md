@@ -125,9 +125,13 @@ python3 install.py --targets codex,claude,pi,hermes
 
 选完 Agent 后，安装器会扫描这些 Agent 现有的 Skills 目录，把已经安装的
 Skill（例如 `mysql`）加入清单。预设默认清单是 `browser-automatic`、`docx`、
-`pdf`、`pptx`、`xlsx`、`vue-best-practices`、`web-artifacts-builder`；这些项目
-默认勾选，用户可以在确认前手动取消。其他许可证明确且允许复制的本机 Skill 会显示，
-但默认不勾选。AgentRelay 不读取模型的隐式调用记录，也不会统计你的使用行为。
+`pdf`、`pptx`、`xlsx`、`vue-best-practices`、`web-artifacts-builder`，以及 Java/Spring
+质量技能 `121-java-object-oriented-design`、`122-java-type-design`、
+`301-frameworks-spring-boot-core`、`302-frameworks-spring-boot-rest`、
+`303-frameworks-spring-boot-validation` 和通用 `code-review-excellence`；这些项目
+默认勾选，用户可以在确认前手动取消。`312-frameworks-spring-data-jdbc` 也随包提供，
+但默认不勾选，避免把特定持久化技术栈强加给所有项目。其他许可证明确且允许复制的
+本机 Skill 会显示，但默认不勾选。AgentRelay 不读取模型的隐式调用记录，也不会统计你的使用行为。
 
 清单里同时保留内置 Vue.js AI Skills。即使本机没有装过 Vue Skill，也会默认
 选择 `vue-best-practices` 作为离线兜底。你可以输入编号取消或增加项目，然后
@@ -136,6 +140,13 @@ Skill（例如 `mysql`）加入清单。预设默认清单是 `browser-automatic
 `browser-automatic` 是 AgentRelay 自己维护的 MIT Playwright Skill，不读取、也不复制
 本机已有的同名目录。安装器会从仓库内的可信包为每个选中的 Agent 分别创建独立副本，
 因此 Codex、Claude Code 和 Pi 可以同时安装，彼此不共享文件。
+
+Java/Spring 技能来自 [`jabrena/plinth`](https://github.com/jabrena/plinth)，固定提交
+`ef907871d4bd09825bba56f6585ed227a9179727`，保留 Apache-2.0 许可证；通用代码审查
+技能来自 [`wshobson/agents`](https://github.com/wshobson/agents)，固定提交
+`42203085cfc5736204bf0f6d436dff7e1da0bf3f`，保留 MIT 许可证。它们是模型的
+设计与审查参考，不会替代项目自己的编译、测试、ArchUnit、静态检查或人工验收。
+具体上游路径和完整性校验见 `skills/catalog/agentrelay/UPSTREAM.md`。
 
 其他许可证明确且允许复制的本机 Skill 安装到另一个 Agent 时，会完整复制目录、子目录
 和原有许可证文件。
@@ -159,7 +170,7 @@ Skill（例如 `mysql`）加入清单。预设默认清单是 `browser-automatic
 
 ```bash
 python3 install.py --targets codex,claude,pi \
-  --skills browser-automatic,docx,pdf,vue-best-practices
+  --skills browser-automatic,docx,pdf,vue-best-practices,121-java-object-oriented-design,302-frameworks-spring-boot-rest
 ```
 
 不写 `--skills` 时，默认安装清单中可安全安装的项目，包括从 Anthropic 官方仓库

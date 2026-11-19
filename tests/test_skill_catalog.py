@@ -404,6 +404,12 @@ class SkillCatalogTests(unittest.TestCase):
                 "xlsx",
                 "vue-best-practices",
                 "web-artifacts-builder",
+                "121-java-object-oriented-design",
+                "122-java-type-design",
+                "301-frameworks-spring-boot-core",
+                "302-frameworks-spring-boot-rest",
+                "303-frameworks-spring-boot-validation",
+                "code-review-excellence",
             ],
         )
         self.assertEqual(merged["installed_count"], 1)
@@ -499,7 +505,14 @@ class SkillCatalogTests(unittest.TestCase):
                 "pptx",
                 "web-artifacts-builder",
                 "xlsx",
+                "121-java-object-oriented-design",
+                "122-java-type-design",
+                "301-frameworks-spring-boot-core",
+                "302-frameworks-spring-boot-rest",
+                "303-frameworks-spring-boot-validation",
+                "312-frameworks-spring-data-jdbc",
                 "browser-automatic",
+                "code-review-excellence",
             ],
         )
         self.assertEqual(
@@ -564,6 +577,41 @@ class SkillCatalogTests(unittest.TestCase):
             "MIT License",
             (source / "LICENSE").read_text(encoding="utf-8"),
         )
+
+    def test_java_and_review_bundles_keep_upstream_licenses_and_defaults(self):
+        expected = {
+            "121-java-object-oriented-design": "Apache-2.0",
+            "122-java-type-design": "Apache-2.0",
+            "301-frameworks-spring-boot-core": "Apache-2.0",
+            "302-frameworks-spring-boot-rest": "Apache-2.0",
+            "303-frameworks-spring-boot-validation": "Apache-2.0",
+            "312-frameworks-spring-data-jdbc": "Apache-2.0",
+            "code-review-excellence": "MIT",
+        }
+        merged = catalog_module.catalog_with_installed_skills(PROJECT_ROOT, {})
+        entries = {entry["id"]: entry for entry in merged["skills"]}
+        for skill_id, spdx in expected.items():
+            entry = catalog_module.agentrelay_bundled_skill_entry(
+                PROJECT_ROOT, skill_id
+            )
+            self.assertEqual(entry["license_spdx"], spdx)
+            self.assertEqual(entry["source_type"], "bundled")
+            self.assertIn(skill_id, entries)
+            source = catalog_module.skill_source_dir(
+                PROJECT_ROOT, {"skills": [entry]}, skill_id
+            )
+            self.assertTrue((source / "SKILL.md").is_file())
+            self.assertTrue((source / "LICENSE").is_file())
+        for skill_id in (
+            "121-java-object-oriented-design",
+            "122-java-type-design",
+            "301-frameworks-spring-boot-core",
+            "302-frameworks-spring-boot-rest",
+            "303-frameworks-spring-boot-validation",
+            "code-review-excellence",
+        ):
+            self.assertIn(skill_id, merged["defaults"])
+        self.assertNotIn("312-frameworks-spring-data-jdbc", merged["defaults"])
 
     def test_publish_tree_rejects_private_skill_directory(self):
         installer = load_module(
@@ -1061,7 +1109,13 @@ class InstallerIntegrationTests(unittest.TestCase):
                 "pptx",
                 "web-artifacts-builder",
                 "xlsx",
+                "121-java-object-oriented-design",
+                "122-java-type-design",
+                "301-frameworks-spring-boot-core",
+                "302-frameworks-spring-boot-rest",
+                "303-frameworks-spring-boot-validation",
                 "browser-automatic",
+                "code-review-excellence",
             ],
         )
 
