@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -194,6 +195,52 @@ class WindowsCompatibilityTests(unittest.TestCase):
                 # save_config is the production path that normalizes commander availability.
                 config_manager.save_config(saved, home)
                 self.assertEqual(config_manager.load_config(home)["commander"]["enabled"], expected)
+    def test_commander_non_chat_api_uses_protocol_router(self):
+        from scripts import commander_provider_call as bridge
+        from scripts import config_manager
+        provider = {"id": "my-api", "endpoint": "https://upstream.example", "model": "test", "api_key": "secret", "format": "responses"}
+        response = {"choices": [{"message": {"content": "answer"}}]}
+        with patch.object(config_manager, "load_config", return_value={"api_providers": [provider]}), \
+                patch("scripts.api_format_router.ensure_router", return_value="http://127.0.0.1:15731/v1") as router, \
+                patch.object(bridge.OpenAICompatibleAdapter, "__init__", return_value=None) as init, \
+                patch.object(bridge.OpenAICompatibleAdapter, "send", return_value=response):
+            self.assertEqual(bridge._request_provider("my-api", "question"), "answer")
+            self.assertEqual(init.call_args.args[0], "http://127.0.0.1:15731/v1")
+            self.assertEqual(init.call_args.kwargs["model"], "my-api")
+            self.assertEqual(init.call_args.kwargs["api_key"], "")
+
+    def test_local_provider_skips_disabled_first_entry(self):
+        from scripts import commander_provider_call as bridge
+        from scripts import config_manager
+        config = {"local_providers": [
+            {"id": "disabled", "endpoint": "http://disabled", "enabled": False},
+            {"id": "enabled", "endpoint": "http://enabled", "enabled": True},
+        ], "api_providers": []}
+        with patch.object(config_manager, "load_config", return_value=config):
+            profiles = bridge._profiles()
+        self.assertEqual(len(profiles), 1)
+        self.assertTrue(profiles[0].enabled)
+
+    def test_api_provider_respects_concurrency_slots(self):
+        from scripts.commander_provider_pool import CommanderProviderCoordinator, ProviderProfile
+        with tempfile.TemporaryDirectory() as directory:
+            pool = CommanderProviderCoordinator(directory, [ProviderProfile("api", "api", max_concurrency=2)])
+            first, _ = pool.acquire("one", "role", ["api"])
+            second, _ = pool.acquire("two", "role", ["api"])
+            third, error = pool.acquire("three", "role", ["api"])
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            self.assertIsNone(third)
+            pool.release(first)
+            pool.release(second)
+
+    def test_child_response_rejects_empty_and_error_results(self):
+        from scripts.research_commander import _child_response_text
+        self.assertEqual(_child_response_text(["claude"], '{"result":"ok"}'), "ok")
+        self.assertEqual(_child_response_text(["opencode", "run"], '{"type":"text","text":"ok"}'), "ok")
+        with self.assertRaises(RuntimeError):
+            _child_response_text(["claude"], '{"is_error":true,"result":"denied"}')
+        self.assertEqual(_child_response_text(["claude"], ""), "")
 
 
 if __name__ == "__main__":

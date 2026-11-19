@@ -33,7 +33,7 @@ def _profiles() -> list[ProviderProfile]:
         from config_manager import load_config
     config = load_config()
     for item in config.get("local_providers", []) if isinstance(config.get("local_providers"), list) else []:
-        if isinstance(item, dict) and item.get("endpoint"):
+        if isinstance(item, dict) and item.get("endpoint") and item.get("enabled", True):
             profiles.append(ProviderProfile(
                 "local-llm", "local",
                 enabled=bool(item.get("enabled", True)),
@@ -46,28 +46,9 @@ def _profiles() -> list[ProviderProfile]:
                 provider_id,
                 "api",
                 enabled=bool(item.get("enabled", True)) and bool(item.get("endpoint") and item.get("api_key")),
+                max_concurrency=int(item.get("max_concurrency", 10) or 10),
             ))
     return profiles
-
-
-def _configured_web_provider(provider_id: str) -> str | None:
-    """Resolve either `qianwen` or `qianwen-web` to its runtime name."""
-    try:
-        try:
-            from .config_manager import load_config
-        except ImportError:
-            from config_manager import load_config
-        entries = load_config().get("web_providers", [])
-    except Exception:
-        entries = []
-    requested = provider_id.removesuffix("-web")
-    for item in entries if isinstance(entries, list) else []:
-        if not isinstance(item, dict) or not item.get("enabled", True):
-            continue
-        configured_id = str(item.get("id", "")).strip()
-        if configured_id and configured_id.removesuffix("-web") == requested:
-            return configured_id.removesuffix("-web")
-    return "deepseek" if requested == "deepseek" else None
 
 
 def _request_provider(provider_id: str, prompt: str) -> str:
@@ -83,14 +64,40 @@ def _request_provider(provider_id: str, prompt: str) -> str:
             from config_manager import load_config
         for item in load_config().get("api_providers", []):
             if isinstance(item, dict) and item.get("id") == provider_id and item.get("enabled", True):
+                endpoint = str(item["endpoint"])
+                model = str(item.get("model", ""))
+                api_key = str(item.get("api_key", ""))
+                if str(item.get("format") or "chat") != "chat":
+                    try:
+                        from .api_format_router import ensure_router
+                    except ImportError:
+                        from api_format_router import ensure_router
+                    endpoint = ensure_router([{
+                        "id": provider_id,
+                        "endpoint": endpoint,
+                        "api_key": api_key,
+                        "model": model or provider_id,
+                        "format": str(item.get("format") or "chat"),
+                        "timeout": int(item.get("timeout", 120) or 120),
+                    }])
+                    model = provider_id
+                    api_key = ""
                 adapter = OpenAICompatibleAdapter(
-                    str(item["endpoint"]),
-                    model=str(item.get("model", "")),
+                    endpoint,
+                    model=model,
                     timeout=int(item.get("timeout", 120) or 120),
-                    api_key=str(item.get("api_key", "")),
+                    api_key=api_key,
                 )
                 raw = adapter.send({"messages": [{"role": "user", "content": prompt}]})
-                return str(raw.get("choices", [{}])[0].get("message", {}).get("content", ""))
+                if not isinstance(raw, dict) or raw.get("error"):
+                    raise RuntimeError(f"API Provider 返回错误：{raw.get('error', raw) if isinstance(raw, dict) else raw}")
+                choices = raw.get("choices")
+                if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                    raise RuntimeError("API Provider 没有返回有效 choices")
+                answer = str(choices[0].get("message", {}).get("content", "")).strip()
+                if not answer:
+                    raise RuntimeError("API Provider 返回空回答")
+                return answer
     if provider_id == "local-llm":
         endpoint = os.environ.get("AGENTRELAY_LOCAL_LLM_ENDPOINT")
         if not endpoint:
@@ -101,23 +108,15 @@ def _request_provider(provider_id: str, prompt: str) -> str:
             timeout=int(os.environ.get("AGENTRELAY_LOCAL_LLM_TIMEOUT", "120")),
         )
         raw = adapter.send({"messages": [{"role": "user", "content": prompt}]})
-        return str(raw.get("choices", [{}])[0].get("message", {}).get("content", ""))
-    web_provider = _configured_web_provider(provider_id)
-    if web_provider:
-        # 后台调用：默认无头运行，不在用户面前弹出浏览器窗口；
-        # 调试时可设 AGENT_RELAY_WEB_HEADFUL=1 强制有头
-        os.environ.setdefault("AGENT_RELAY_WEB_HEADFUL", "0")
-        try:
-            from .agent_relay import run_provider
-        except ImportError:
-            from agent_relay import run_provider
-        raw = run_provider(
-            prompt,
-            "expert",
-            provider_name=web_provider,
-            timeout=int(os.environ.get("AGENTRELAY_WEB_TIMEOUT", "120")),
-        )
-        return str(raw.get("answer", "") if isinstance(raw, dict) else raw)
+        if not isinstance(raw, dict) or raw.get("error"):
+            raise RuntimeError(f"本地模型返回错误：{raw.get('error', raw) if isinstance(raw, dict) else raw}")
+        choices = raw.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise RuntimeError("本地模型没有返回有效 choices")
+        answer = str(choices[0].get("message", {}).get("content", "")).strip()
+        if not answer:
+            raise RuntimeError("本地模型返回空回答")
+        return answer
     raise RuntimeError("COMMANDER_PROVIDER_NOT_CONFIGURED")
 
 

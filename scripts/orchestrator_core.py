@@ -1004,6 +1004,8 @@ class Orchestrator:
             from config_manager import apply_config_to_environment
             from fusion_mode import fusion_commander_lock
         apply_config_to_environment()
+        if native and os.environ.get("AGENTRELAY_COMMANDER_ENABLED") != "1":
+            raise PermissionError("Commander 尚未在配置中心启用")
         try:
             configured_max_agents = int(os.environ.get("AGENTRELAY_COMMANDER_MAX_AGENTS", max_agents))
             if max_agents == 5:
@@ -1075,8 +1077,8 @@ class Orchestrator:
             def command_factory(agent):
                 goal = agent.model_config.get("goal", "完成分配任务")
                 configured_provider = agent.model_config.get("provider")
-                if configured_provider == "local-llm":
-                    default_provider = configured_provider
+                if configured_provider in {"local-llm", "codex-self", ""}:
+                    default_provider = os.environ.get("AGENTRELAY_COMMANDER_DEFAULT_PROVIDER", "gpt-api")
                 elif configured_provider and configured_provider not in {"deepseek-web", "qianwen-web", "kimi-web"}:
                     default_provider = configured_provider
                 else:

@@ -706,7 +706,9 @@ class CrossPlatformRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             commander_provider_pool, "fcntl", None
         ), mock.patch.object(commander_provider_pool, "msvcrt", fake_msvcrt):
-            pool = commander_provider_pool.CommanderProviderCoordinator(directory)
+            pool = commander_provider_pool.CommanderProviderCoordinator(directory, [
+                commander_provider_pool.ProviderProfile("deepseek-web", "web"),
+            ])
             lease = pool._try_lock("deepseek-web", "task-1", "backend-code")
 
             self.assertIsNotNone(lease)

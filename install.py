@@ -1259,7 +1259,7 @@ def configure_commander(config: dict) -> None:
     print("\nCommander 高级功能")
     print("开启后，主 Agent 可按任务动态启动 1-5 个隔离子 Agent，做前端、后端、数据库、审计等协同工作；")
     print("每个子 Agent 独立计时和重试，结果先审查，必须经过确认卡才合并；子 Agent 不能递归启动 Commander。")
-    print("网页/本地模型是可选辅助；至少要有当前 Codex CLI 才能启动真正的子 Agent。")
+    print("仅支持 API 或本地模型，API 优先；网页模型不参与。宿主后台会话由主审查官统一验收。")
     enabled = _yes_no("开启 Commander", False)
     config.setdefault("commander", {}).update({"enabled": enabled})
     if not enabled:
@@ -1323,6 +1323,8 @@ def choose_install_targets() -> tuple[list[str], str]:
             lines.append(f"{mark} {index}. {meta['label']} — {level} · 本机{cli} · {relay}")
         height = redraw_checklist(lines, height, interactive=interactive)
         raw = input("> ").strip().lower()
+        if interactive:
+            height += 1
         if raw in ("0", "web"):
             return [t for t in ids if t in checked], "web"
         if raw == "":
@@ -1336,6 +1338,8 @@ def choose_install_targets() -> tuple[list[str], str]:
             try:
                 target_id = ids[int(token) - 1]
             except (ValueError, IndexError):
+                if interactive:
+                    height += 1
                 print(f"忽略无效编号：{token}")
                 continue
             if target_id in checked:
@@ -1397,6 +1401,8 @@ def choose_install_skills(
             )
         height = redraw_checklist(lines, height, interactive=interactive)
         raw = input("> ").strip().lower()
+        if interactive:
+            height += 1
         if raw == "":
             return [skill_id for skill_id in ids if skill_id in checked]
         if raw in {"0", "none"}:
@@ -1416,11 +1422,15 @@ def choose_install_skills(
             try:
                 skill_id = ids[int(token) - 1]
             except (ValueError, IndexError):
+                if interactive:
+                    height += 1
                 print(f"忽略无效编号：{token}")
                 continue
             entry = skill_catalog.catalog_skill_entry(catalog, skill_id)
             if not skill_catalog.skill_is_installable(entry):
                 restriction = entry.get("restriction") or "许可证限制"
+                if interactive:
+                    height += 1
                 print(f"不能安装这个 Skill：{skill_id}（{restriction}）")
                 continue
             if skill_id in checked:
@@ -1763,7 +1773,7 @@ def run_web_configurator() -> None:
             for target_id, meta in registry.items()
         }
         result["unsupported_agents"] = list(at.UNSUPPORTED_AGENTS)
-        result["install_targets"] = config.get("install_targets") or ["codex"]
+        result["install_targets"] = config.get("install_targets") if config.get("install_targets") is not None else []
         catalog = load_install_skill_catalog(list(registry))
         result["skill_catalog"] = skill_catalog.public_catalog(catalog)
         stored_skills = config.get("install_skills")
@@ -1933,7 +1943,7 @@ def run_web_configurator() -> None:
                         from scripts import agent_targets as at
                         registry = at.agent_targets()
                         shim = TARGET_SKILL / "scripts" / "agentrelay_hook_shim.py"
-                        for target_id in config.get("install_targets") or ["codex"]:
+                        for target_id in config.get("install_targets") or []:
                             meta = registry.get(str(target_id))
                             if not meta or meta["level"] == "skill-only":
                                 continue

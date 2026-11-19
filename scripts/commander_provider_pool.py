@@ -42,6 +42,7 @@ class ProviderProfile:
     enabled: bool = True
     login_command: str = ""
     proxy_hint: str = ""
+    max_concurrency: int = 1
 
 
 @dataclass(frozen=True)
@@ -132,24 +133,27 @@ class CommanderProviderCoordinator:
 
     def _try_lock(self, provider_id: str, task_id: str, role: str) -> ProviderLease | None:
         self.locks.mkdir(parents=True, exist_ok=True)
-        handle = (self.locks / f"{provider_id}.lock").open("a+b")
-        try:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            elif msvcrt is not None:
-                handle.seek(0, os.SEEK_END)
-                if handle.tell() == 0:
-                    handle.write(b"\0")
-                    handle.flush()
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
+        profile = self.profiles[provider_id]
+        slots = max(1, int(profile.max_concurrency or 1)) if profile.kind == API else 1
+        for slot in range(slots):
+            handle = (self.locks / f"{provider_id}-{slot}.lock").open("a+b")
+            try:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                elif msvcrt is not None:
+                    handle.seek(0, os.SEEK_END)
+                    if handle.tell() == 0:
+                        handle.write(b"\0")
+                        handle.flush()
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    handle.close()
+                    continue
+                return ProviderLease(provider_id, task_id, role, handle)
+            except (BlockingIOError, OSError):
                 handle.close()
-                return None
-            return ProviderLease(provider_id, task_id, role, handle)
-        except (BlockingIOError, OSError):
-            handle.close()
-            return None
+        return None
 
     @staticmethod
     def _queue_key(task_id: str, role: str) -> str:

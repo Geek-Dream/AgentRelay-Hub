@@ -624,6 +624,41 @@ class CommanderRuntime:
         if resolver is None: return {**merged, "resolved": False}
         return {**merged, "resolution": resolver(merged["results"]), "resolved": True}
 
+def _child_response_text(command: list[str], stdout: str) -> str:
+    """Extract the actual answer, not merely a successful process status."""
+    name = Path(command[0]).name.lower() if command else ""
+    text = str(stdout or "").strip()
+    if not text:
+        return ""
+    if name in {"opencode", "opencode.exe"}:
+        parts = []
+        for line in text.splitlines():
+            try:
+                event = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") in {"error", "fatal"}:
+                raise RuntimeError(str(event.get("error") or event))
+            content = event.get("text") or event.get("content")
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(event.get("part"), dict) and isinstance(event["part"].get("text"), str):
+                parts.append(event["part"]["text"])
+        return "\n".join(parts).strip()
+    if name in {"claude", "claude.exe"}:
+        try:
+            payload = json.loads(text)
+        except (ValueError, TypeError):
+            return text
+        if isinstance(payload, dict):
+            if payload.get("is_error") or payload.get("type") == "error":
+                raise RuntimeError(str(payload.get("result") or payload.get("error") or payload))
+            return str(payload.get("result") or payload.get("text") or "").strip()
+    return text
+
+
 class CommanderProcess:
     """Run a bounded child process in an agent-owned workspace."""
     def __init__(self):
@@ -669,7 +704,18 @@ class CommanderProcess:
         agent.process_id = process.pid; agent.status = "RUNNING"
         try:
             stdout, stderr = process.communicate(timeout=timeout)
-            agent.status = "SUCCESS" if process.returncode == 0 else "FAILED"
+            try:
+                answer = _child_response_text(command, stdout)
+                if process.returncode != 0:
+                    agent.status = "FAILED"
+                elif not answer:
+                    agent.status = "FAILED"
+                    stderr = (stderr + "\n子会话没有返回有效回答").strip()
+                else:
+                    agent.status = "SUCCESS"
+            except (RuntimeError, ValueError) as exc:
+                agent.status = "FAILED"
+                stderr = (stderr + "\n" + str(exc)).strip()
             agent.result = {"exit_code": process.returncode, "stdout": stdout, "stderr": stderr}
         except subprocess.TimeoutExpired:
             process.kill(); stdout, stderr = process.communicate()
