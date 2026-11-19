@@ -3000,25 +3000,36 @@ def _wrap_change_history_text(value, width=None, limit=220):
 
 
 def render_change_history(entries):
-    """Render only the current request and its plain-language result."""
+    """Render the current and previous task in short plain-language dialogue."""
 
-    if not entries or not isinstance(entries[0], dict):
+    def _block(entry):
+        if not isinstance(entry, dict):
+            return "- 用户说：暂无记录\n\n- 我完成：暂无记录"
+        request = _clip_card_text(normalize_text(entry.get("request")), 160)
+        if not request:
+            request = "完成这项修改"
+        summary = _clean_change_history_summary(entry.get("summary"))
+        if not summary or summary == "已完成文件写入，但未记录具体修改说明。":
+            summary = "已完成这项修改"
+        summary = _clip_card_text(summary, 220)
+        return f"- 用户说：{request}\n\n- 我完成：{summary}"
+
+    current = entries[0] if entries and isinstance(entries[0], dict) else None
+    if current is None:
         return ""
-    entry = entries[0]
-    request = _clip_card_text(normalize_text(entry.get("request")), 160)
-    if not request:
-        request = "完成这项修改"
-    summary = _clean_change_history_summary(entry.get("summary"))
-    if not summary or summary == "已完成文件写入，但未记录具体修改说明。":
-        summary = "已完成这项修改"
-    summary = _clip_card_text(summary, 160)
-    return f"\n用户说：{request}\n我完成：{summary}"
+    previous = next(
+        (item for item in entries[1:] if isinstance(item, dict)),
+        None,
+    )
+    divider = "=================================上次修改=================================="
+    return f"\n{_block(current)}\n\n{divider}\n\n{_block(previous)}"
 
 
-def annotate_change_summary(session_id, summary, file_groups):
+def annotate_change_summary(session_id, summary, file_groups, request=""):
     """Store the Agent's actual completion description before Stop renders it."""
 
     clean_summary = _clip_card_text(normalize_text(summary), 220)
+    clean_request = _clip_card_text(normalize_text(request), 160)
     if not clean_summary:
         raise ValueError("--summary 不能为空")
     lock = acquire_lock()
@@ -3036,12 +3047,16 @@ def annotate_change_summary(session_id, summary, file_groups):
             strict=True,
         )
         tracking["summary"] = clean_summary
+        if clean_request:
+            tracking["request"] = clean_request
         tracking["file_groups"] = normalized_groups
         write_state(state, session_id=session_id)
     finally:
         release_lock(lock)
+    updated = read_state(session_id=session_id).get("change_tracking") or {}
     return {
         "summary": clean_summary,
+        "request": clean_request or updated.get("request"),
         "file_groups": normalized_groups,
         "changed_files": list(tracking.get("files") or []),
     }
@@ -3091,7 +3106,7 @@ def record_change_history(state, assistant_message=None):
 
     tracking["recorded"] = True
     tracking["recorded_at"] = entry["created_at"]
-    return render_change_history([entry])
+    return render_change_history(output_entries[:CHANGE_HISTORY_LIMIT])
 
 
 def _tool_gate_is_danger(reason):
@@ -7319,11 +7334,12 @@ def cli():
 
         if command == "change-summary":
             summary = ""
+            request = ""
             file_groups = []
             remaining = list(args)
             while remaining:
                 option = remaining.pop(0)
-                if option not in {"--summary", "--file-group"}:
+                if option not in {"--summary", "--request", "--file-group"}:
                     print(
                         "Error: unexpected arguments: " + option,
                         file=sys.stderr,
@@ -7338,6 +7354,8 @@ def cli():
                 value = remaining.pop(0)
                 if option == "--summary":
                     summary = value
+                elif option == "--request":
+                    request = value
                 else:
                     file_groups.append(value)
             if not normalize_text(summary):
@@ -7368,6 +7386,7 @@ def cli():
                     resolved_session,
                     summary,
                     file_groups,
+                    request=request,
                 )
             except ValueError as exc:
                 print(f"Error: {exc}", file=sys.stderr)
