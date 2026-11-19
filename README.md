@@ -27,6 +27,7 @@ AgentRelay 的目标不是把每个小任务都做得很重。简单问答和只
 ## 目录
 
 - [30 秒看懂](#30-秒看懂)
+- [能力总览](#能力总览)
 - [新手安装](#新手安装)
 - [第一次使用](#第一次使用)
 - [什么时候会出现确认卡](#什么时候会出现确认卡)
@@ -53,6 +54,38 @@ AgentRelay 的目标不是把每个小任务都做得很重。简单问答和只
 
 AgentRelay 负责提供边界、证据和协作能力，最终判断仍由主 Agent 负责。网页模型给出的建议
 不能直接当答案，必须由主 Agent 结合代码和测试验证。
+
+## 能力总览
+
+| 能力 | 能做什么 | 关键边界 |
+|---|---|---|
+| Hook 门禁 | 在提交需求、调用工具和结束时检查确认卡、写入范围、危险命令和证据 | 主 Agent 负责最终判断，Hook 不靠关键词猜批准 |
+| Fusion 外援 | 把大日志、批量阅读、跨文件搜索、独立复现和局部杂活交给持久外援会话 | 默认只读，`coding` 需明确开启；外援结果必须复核 |
+| Commander 审查官 | 拆成 1～5 个隔离子 Agent 并行处理，再汇总审查、批准后合并 | 只使用 API 或本地模型，API 优先；网页模型不参与代码执行 |
+| Provider 配置中心 | 管理网页/API/本地模型、登录状态、测试、并发、排队和租约 | API Key 不回显，配置加密保存，登录状态不进 Git |
+| Skill 分发 | 把内置和本机 Skill 安装到 Codex、Claude、Pi、OpenCode 等宿主 | Skill 只提供指导，不替代 ArchUnit、静态检查和真实测试 |
+| 交付审计 | 核对需求覆盖、真实 diff、行为测试、视觉证据、主审和独立复核 | 未验证不能写成完成，RED→GREEN 和 scope drift 要有证据 |
+| Stop 摘要 | 用大白话总结历史任务和当前任务 | User 先提炼目标，Agent 写清模块与变化，长原话不直接冒充摘要 |
+
+### Commander 的实际规则
+
+Commander 适合跨模块、需要并行分工的任务，不是每个小修改都启动。它只接受 **API 模型或本地
+模型**，默认 **API → 本地模型**；API 调用经过受控入口，API Key 不直接暴露给子进程。Codex
+有原生非交互子会话能力，Claude / Pi / OpenCode 通过后台独立会话协作，最后由主审查官验收和
+决定是否合并。网页模型只用于咨询，不参与 Commander 的本地代码执行。
+
+### 内置 Skill
+
+内置包已精简为“核心规则 + 按需参考”，不要求一次加载全部长文。默认提供 Browser、文档处理、
+Vue、Java 面向对象、Java 类型设计、Spring Boot Core/REST/Validation 和通用代码审查；Spring
+Data JDBC 也随包提供但默认不勾选，避免把特定持久化技术强加给所有项目。Skill 来自上游固定
+commit 并保留许可证，完整性由安装器校验。
+
+### 验证边界
+
+macOS 主流程、单元测试和真实 Chromium 页面检查是主要验证路径。Windows、Hermes 等宿主的代码
+路径和自动化测试已覆盖，但真实 Windows 安装、宿主 Hook 可见性、后台会话和 Task Scheduler 仍
+需要对应环境验收；不能把自动化测试直接等同于全平台实测完成。
 
 ## 新手安装
 
@@ -690,7 +723,7 @@ AgentRelay 把重流程放在按需读取的 reference 中，由任务复杂度�
 | `skills/agent-fusion/` | Fusion 使用规则 |
 | `skills/agent-image/` | 图片识别中继规则 |
 | `skills/catalog/vuejs-ai/` | 固定 commit、带 MIT 许可和校验指纹的 Vue.js AI Skill 快照 |
-| `skills/catalog/agentrelay/` | AgentRelay 自有的 MIT Browser Automation Skill 包 |
+| `skills/catalog/agentrelay/` | AgentRelay 自有及上游固定版本的精简 Skill 包（含许可证） |
 | `scripts/skill_catalog.py` | 本机 Skill 发现、官方 Skill 下载与内容校验 |
 | `tests/` | 正式自动化测试，不是临时演示垃圾 |
 | `runtime/` | 本地运行数据，默认被 Git 忽略 |
