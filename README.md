@@ -406,10 +406,12 @@ scripts/approval_policy.py set standard
 
 模式放宽不会放开危险 Git、部署、越界修改或未批准的新范围。
 
-`standard` 下首次关闭应用仍需确认。用户明确选择“以后允许关闭这个 App”后，只记住明确的
-`taskkill /IM <名称>` 或 `Stop-Process -Name <名称>`，后续同名应用可重复关闭；PID、通配符
-和系统关键进程不能记住，`strict` 仍逐次确认。`/agent-approval apps` 查看许可，
-`/agent-approval forget <名称>` 撤销。许可不覆盖启动或其他命令。
+`standard` 下首次关闭应用仍需确认。用户明确选择“以后允许关闭这个 App”后，只记住规范化的
+`taskkill /IM <名称>`、PowerShell `Stop-Process -Name <名称>` 或 macOS `pkill -x <名称>`；
+`/F` 可出现在任意合法位置。PID、`/T`、过滤条件、通配符、重定向和命令串联都不能记住，
+`strict` 仍逐次确认。`/agent-approval apps` 查看许可，`/agent-approval forget <名称>` 撤销。
+许可只覆盖关闭，不覆盖启动或其他命令。它是 Hook 命令授权，不是 sudo/UAC 密码认证；
+同名不同路径程序不能视为强身份认证，无法确认身份时应继续逐次确认。
 
 ### 工作档
 

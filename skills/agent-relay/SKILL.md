@@ -423,9 +423,11 @@ Hook 在最终 `Stop` 放行后先显示历史记录，再显示当前任务：
 ## 应用关闭许可
 
 `standard` 下首次关闭应用仍需确认；用户明确要求“以后允许关闭这个 App”时，批准命令加
-`--remember-app`。只支持明确 `taskkill /IM <名称>` 或 `Stop-Process -Name <名称>`，
-PID、通配符和系统关键进程不能记住；`strict` 始终逐次确认。`/agent-approval apps` 查看，
-`/agent-approval forget <名称>` 撤销。许可只覆盖关闭，不覆盖启动或其他命令。
+`--remember-app`。只支持规范化的 `taskkill /IM <名称>`、PowerShell `Stop-Process -Name <名称>`
+或 macOS `pkill -x <名称>`，不允许 PID、`/T`、过滤条件、通配符、重定向或命令串联；
+`strict` 始终逐次确认。`/agent-approval apps` 查看，`/agent-approval forget <名称>` 撤销。
+许可只覆盖关闭，不覆盖启动或其他命令；同名不同路径不构成强身份认证。sudo/UAC 密码仍由
+用户在系统安全界面输入，Hook 不保存、不代填、不绕过。
 
 ## 问题权重
 

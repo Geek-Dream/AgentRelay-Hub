@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -24,45 +25,76 @@ def load_permissions(codex_home: Path) -> dict[str, Any]:
     return {"version": 1, "applications": entries if isinstance(entries, list) else []}
 
 
-def _target(command: str) -> str | None:
-    """Return a literal executable/image name, never a PID or wildcard."""
+def _words(command: str) -> list[str] | None:
+    """Parse only one literal command; never authorize a shell chain."""
+    text = str(command or "").strip()
+    if not text or re.search(r"(?:&&|\|\||[;|<>`\n\r])", text):
+        return None
     try:
-        import shlex
-        words = shlex.split(command, posix=False)
+        words = shlex.split(text, posix=False)
     except ValueError:
         return None
-    if not words:
+    return [word.strip('"') for word in words] or None
+
+
+def _valid_target(value: str) -> str | None:
+    target = str(value or "").strip().strip('"').strip()
+    if not target or re.search(r"[*?\[\];|&/\\]", target):
         return None
-    command_name = Path(words[0].strip('"')).name.lower()
-    target = None
-    if command_name == "taskkill":
-        for index, word in enumerate(words):
-            if word.lower() in {"/pid", "/f", "/t"}:
-                return None
-            if word.lower() == "/im" and index + 1 < len(words):
-                target = words[index + 1]
-                break
-    elif command_name == "stop-process":
-        for index, word in enumerate(words):
-            lowered = word.lower().lstrip("-")
-            if lowered in {"id", "inputobject"}:
-                return None
-            if lowered == "name" and index + 1 < len(words):
-                target = words[index + 1]
-                break
-            if not word.startswith("-") and index > 0 and target is None:
-                target = word
-    else:
-        return None
-    target = str(target or "").strip('"').strip()
-    if not target or re.search(r"[*?\[\];|&]", target):
-        return None
-    if Path(target).name.lower() in {
+    if target.casefold() in {
         "system", "registry", "smss.exe", "csrss.exe", "wininit.exe",
         "winlogon.exe", "services.exe", "lsass.exe", "explorer.exe",
+        "kernel", "launchd", "windowserver", "loginwindow",
     }:
         return None
     return target.casefold()
+
+
+def _target(command: str) -> str | None:
+    """Return a target only for a single safe app-close invocation."""
+    words = _words(command)
+    if not words:
+        return None
+    command_name = Path(words[0]).name.lower()
+    target = None
+    if command_name == "taskkill":
+        index = 1
+        while index < len(words):
+            option = words[index].lower()
+            if option == "/im" and index + 1 < len(words):
+                if target is not None:
+                    return None
+                target = words[index + 1]
+                index += 2
+                continue
+            if option in {"/f"}:
+                index += 1
+                continue
+            if option in {"/fi", "/pid", "/t"}:
+                return None
+            return None
+    elif command_name == "stop-process":
+        index = 1
+        while index < len(words):
+            option = words[index].lower()
+            if option == "-name" and index + 1 < len(words):
+                if target is not None:
+                    return None
+                target = words[index + 1]
+                index += 2
+                continue
+            if option in {"-force", "-confirm:$false", "-passthru"}:
+                index += 1
+                continue
+            return None
+    elif command_name == "pkill":
+        if len(words) == 3 and words[1] == "-x":
+            target = words[2]
+        else:
+            return None
+    else:
+        return None
+    return _valid_target(target or "")
 
 
 def can_remember(command: str) -> bool:
@@ -72,7 +104,7 @@ def can_remember(command: str) -> bool:
 def remember(command: str, codex_home: Path) -> dict[str, Any]:
     target = _target(command)
     if target is None:
-        raise ValueError("只有明确指定应用名称的 taskkill /IM 或 Stop-Process -Name 才能记住")
+        raise ValueError("只有明确指定应用名称的 taskkill /IM、Stop-Process -Name 或 pkill -x 才能记住")
     data = load_permissions(codex_home)
     entry = {"target": target, "fingerprint": hashlib.sha256(target.encode("utf-8")).hexdigest()}
     if entry not in data["applications"]:

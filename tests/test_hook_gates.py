@@ -1634,6 +1634,21 @@ class HookGateTests(unittest.TestCase):
                                            tool_input={"cmd": "git reset --hard"}, tool_use_id="other"))
         self.assertEqual(json.loads(other.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
 
+    def test_sudo_approval_is_one_shot_and_dangerous_variants_recheck(self):
+        session_id = "sudo-one-shot"
+        command = self.payload(session_id, "PreToolUse", tool_name="exec_command",
+                               tool_input={"cmd": "sudo kill -9 123"}, tool_use_id="sudo-1")
+        denied = self.run_hook(command)
+        self.assertEqual(json.loads(denied.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+        candidate = self.run_hook(self.payload(session_id, "UserPromptSubmit", prompt="本次允许使用 sudo"))
+        source_hash = self.semantic_source_hash(candidate)
+        self.assertEqual(self.resolve_intent(session_id, source_hash).returncode, 0)
+        self.assertEqual(self.run_hook(command).stdout, "")
+        repeated = self.run_hook({**command, "tool_use_id": "sudo-2"})
+        self.assertEqual(json.loads(repeated.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+        changed = self.run_hook({**command, "tool_input": {"cmd": "sudo kill -9 1"}, "tool_use_id": "sudo-3"})
+        self.assertEqual(json.loads(changed.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
+
     def test_read_search_and_test_commands_are_allowed(self):
         session_id = "safe-commands"
         self.run_hook(self.payload(
