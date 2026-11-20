@@ -136,11 +136,14 @@ class HookGateTests(unittest.TestCase):
         self.assertIn("需求卡/确认卡", context["additionalContext"])
         self.assertIn("不得写入", context["additionalContext"])
         system_message = output["systemMessage"]
-        self.assertIn("「需求卡」", system_message)
+        self.assertIn("╭─ ◎  「需求确认」", system_message)
         self.assertIn("任务", system_message)
         self.assertIn("影响范围", system_message)
-        self.assertIn("当前状态", system_message)
-        self.assertIn("waiting_for_approval", system_message)
+        self.assertIn("尚未修改文件", system_message)
+        self.assertIn("◇ 等待确认 · 尚未修改文件", system_message)
+        self.assertNotIn("任务ID", system_message)
+        self.assertNotIn("waiting_for_approval", system_message)
+        self.assertNotIn("exec_command", system_message)
         self.assertIn("主要风险", system_message)
         self.assertIn("将修改工作区文件", system_message)
         self.assertNotIn("1. 确认审批", system_message)
@@ -157,22 +160,41 @@ class HookGateTests(unittest.TestCase):
         )
         self.assertNotIn("semantic_approval_candidate", state)
 
-    def test_all_hook_card_fields_share_the_widest_label_column(self):
+    def test_card_fields_match_the_user_specified_symbol_template(self):
         from hooks import agent_relay_tracker as tracker
 
         card = tracker.render_task_gate_card("完整实现前后端和数据库功能", {})
-        lines = [line for line in card.splitlines() if line.startswith("- ")]
-        expected_width = max(tracker._card_label_width(line[2:].split("：", 1)[0]) for line in lines)
-        for line in lines:
-            label, value = line[2:].split("：", 1)
-            self.assertEqual(
-                len(value) - len(value.lstrip()),
-                expected_width - tracker._card_label_width(label) + 1,
-                line,
+        self.assertIn("│  -| 任务：", card)
+        self.assertIn("│  ┄ 修改范围 ▼", card)
+        self.assertIn("│     - 影响范围： 模块：", card)
+        self.assertIn("│     - 文件：     待读取相关代码后确认；未明确前不得写入", card)
+        self.assertIn("│  ┄ 安全边界 ▼", card)
+        self.assertIn("│     - 目标外边界：", card)
+        self.assertIn("│  ┄ 主要风险 ▼", card)
+        self.assertIn("│  ┄ 验证与回滚 ▼", card)
+        self.assertTrue(card.startswith("╭─ ◎  「需求确认」"))
+        self.assertIn("│  ◇ 等待确认 · 尚未修改文件", card)
+        self.assertTrue(card.endswith("╰" + "─" * 87 + " §"))
+        self.assertNotIn("\x1b[", card)
+
+    def test_tool_cards_use_the_same_symbol_frame(self):
+        from hooks import agent_relay_tracker as tracker
+
+        for reason, title in (
+            ("[AgentRelay 任务门禁] 写入前需要确认", "「写入确认」"),
+            ("[AgentRelay 安全门禁] 删除前需要确认", "「危险操作确认」"),
+        ):
+            card = tracker.render_tool_gate_card(
+                "exec_command", {"cmd": "example"}, reason,
             )
-        self.assertIn("- 主要风险：   ", card)
-        self.assertIn("- 验证：       ", card)
-        self.assertIn("- 回滚：       ", card)
+            self.assertTrue(card.startswith(f"╭─ ◎  {title}"))
+            self.assertIn("│  -| 操作内容：", card)
+            self.assertIn("│  ┄ 批准边界 ▼", card)
+            self.assertIn("│  ┄ 验证与回滚 ▼", card)
+            self.assertIn("│  ◇ 等待确认 · 当前操作已阻断", card)
+            self.assertNotIn("任务ID", card)
+            self.assertTrue(card.endswith("╰" + "─" * 87 + " §"))
+            self.assertNotIn("\x1b[", card)
 
     def test_complex_write_card_exposes_work_profile_and_five_columns(self):
         result = self.run_hook(self.payload(
@@ -184,10 +206,10 @@ class HookGateTests(unittest.TestCase):
         self.assert_hook_ok(result)
         output = json.loads(result.stdout)
         system_message = output["systemMessage"]
-        self.assertIn("- 工作档：", system_message)
+        self.assertIn("-| 工作档：", system_message)
         self.assertIn("strict", system_message)
         for label in ("现象", "期望", "定位", "边界", "疑点"):
-            self.assertIn(f"- {label}：", system_message)
+            self.assertIn(f"-| {label}：", system_message)
         self.assertIn("推荐方案", system_message)
         state = json.loads(
             (self.codex_home / "agent_relay_tracker/sessions/complex-five-column.json").read_text(
@@ -365,7 +387,7 @@ class HookGateTests(unittest.TestCase):
         self.assertTrue(selection["card_required"])
         self.assertEqual(selection["status"], "awaiting_confirmation")
         for label in ("现象", "期望", "定位", "边界", "疑点"):
-            self.assertIn(f"- {label}：", selection["card"])
+            self.assertIn(f"-| {label}：", selection["card"])
 
         state = json.loads(
             (
@@ -567,6 +589,7 @@ class HookGateTests(unittest.TestCase):
         scripts.mkdir(parents=True)
         shutil.copy2(PROJECT_ROOT / "scripts/stdio_encoding.py", scripts / "stdio_encoding.py")
         shutil.copy2(PROJECT_ROOT / "scripts/approval_policy.py", scripts / "approval_policy.py")
+        shutil.copy2(PROJECT_ROOT / "scripts/card_render.py", scripts / "card_render.py")
         shutil.copy2(PROJECT_ROOT / "scripts/page_verification.py", scripts / "page_verification.py")
         shutil.copy2(PROJECT_ROOT / "scripts/fusion_assist.py", scripts / "fusion_assist.py")
         installed = subprocess.run(
@@ -1216,7 +1239,7 @@ class HookGateTests(unittest.TestCase):
         context = output["hookSpecificOutput"]["additionalContext"]
         self.assertIn("页面验证门禁", context)
         self.assertIn("任务门禁", context)
-        self.assertEqual(output["systemMessage"].count("「需求卡」"), 1)
+        self.assertEqual(output["systemMessage"].count("「需求确认」"), 1)
         self.assertIn("统计快报", output["systemMessage"])
         state = json.loads(
             (
@@ -1362,7 +1385,7 @@ class HookGateTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         output = json.loads(completed.stdout)
-        self.assertIn("「需求卡」", output["systemMessage"])
+        self.assertIn("「需求确认」", output["systemMessage"])
 
     def test_pi_target_keeps_context_and_supports_visible_card(self):
         self.env["AGENTRELAY_TARGET"] = "pi"
@@ -1401,7 +1424,7 @@ class HookGateTests(unittest.TestCase):
         self.assertEqual(denied_output["permissionDecision"], "deny")
         self.assertIn("尚未获得用户批准", denied_output["permissionDecisionReason"])
         system_message = denied_payload["systemMessage"]
-        self.assertIn("「确认卡」", system_message)
+        self.assertIn("「写入确认」", system_message)
         self.assertIn("工具", system_message)
         self.assertIn("批准边界", system_message)
         self.assertNotIn("1. 确认审批", system_message)
@@ -1477,7 +1500,7 @@ class HookGateTests(unittest.TestCase):
         output = json.loads(follow_up.stdout)
         self.assertIn("任务门禁", output["hookSpecificOutput"]["additionalContext"])
         self.assertIn("参考图或截图推导的 UI 修改范围", output["systemMessage"])
-        self.assertIn("「需求卡」", output["systemMessage"])
+        self.assertIn("「需求确认」", output["systemMessage"])
         state = json.loads(
             (self.codex_home / "agent_relay_tracker/sessions" / f"{session_id}.json").read_text(
                 encoding="utf-8"
@@ -1574,9 +1597,9 @@ class HookGateTests(unittest.TestCase):
         self.assertEqual(denied_output["permissionDecision"], "deny")
         self.assertIn("Git 破坏性操作", denied_output["permissionDecisionReason"])
         system_message = denied_payload["systemMessage"]
-        self.assertIn("危险操作确认卡", system_message)
+        self.assertIn("危险操作确认", system_message)
         self.assertIn("主要风险", system_message)
-        self.assertIn("[AgentRelay 安全门禁]", system_message)
+        self.assertIn("[AgentRelay 安全门禁]", denied_output["permissionDecisionReason"])
         self.assertIn("检测到高风险操作：Git 破坏性操作", system_message)
         self.assertNotIn("2. 修改需求", system_message)
         self.assertNotIn("3. 拒绝审批", system_message)
@@ -1842,7 +1865,7 @@ class HookGateTests(unittest.TestCase):
         ))
         output = json.loads(result.stdout)
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
-        self.assertIn("危险操作确认卡", output["systemMessage"])
+        self.assertIn("危险操作确认", output["systemMessage"])
         self.assertIn("尚未获得用户批准", output["hookSpecificOutput"]["permissionDecisionReason"])
         self.assertTrue(target.exists())
 
@@ -1870,7 +1893,7 @@ class HookGateTests(unittest.TestCase):
             denied_output["hookSpecificOutput"]["permissionDecision"],
             "deny",
         )
-        self.assertIn("危险操作确认卡", denied_output["systemMessage"])
+        self.assertIn("危险操作确认", denied_output["systemMessage"])
         self.assertIn("尚未获得用户批准", denied_output["hookSpecificOutput"]["permissionDecisionReason"])
         self.assertNotIn("未显示额外审批卡", denied.stdout)
         self.assertTrue(target.exists())
@@ -2034,7 +2057,7 @@ class HookGateTests(unittest.TestCase):
         self.assertEqual(output["hookEventName"], "UserPromptSubmit")
         self.assertIn("任务门禁", output["additionalContext"])
         self.assertIn(
-            "「需求卡」",
+            "「需求确认」",
             json.loads(result.stdout)["systemMessage"],
         )
 

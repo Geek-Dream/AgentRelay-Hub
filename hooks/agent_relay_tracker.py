@@ -2264,24 +2264,64 @@ def _card_label_width(label):
     return sum(2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1 for char in str(label))
 
 
-def _card_field(label, value, width=None):
+def _card_field(label, value, width=None, *, section=False):
     values = _card_values(value)
     label_width = width if width is not None else _card_label_width(label)
     padding = " " * max(0, label_width - _card_label_width(label))
-    prefix = f"- {label}：{padding} "
+    prefix = f"│     - {label}：{padding} " if section else f"│  -| {label}："
     lines = [prefix + values[0]]
-    continuation = " " * (label_width + 5)
+    indent = label_width + 5 if section else label_width + 6
+    continuation = "│" + " " * indent
     lines.extend(continuation + item for item in values[1:])
     return lines
 
 
 def _card_section(title):
-    return ["", title]
+    return ["│", f"│  ┄ {title} ▼"]
+
+
+def _card_frame(title):
+    return [f"╭─ ◎  {title}", "│"]
 
 
 def _hook_card_choices():
     """Hook systemMessage is informational; the host has no clickable choices."""
-    return [HOOK_CARD_DIVIDER]
+    return ["│", "╰" + "─" * 87 + " §"]
+
+
+def _render_card_fields(lines, fields):
+    """Place existing approval facts into stable sections, regardless of field order."""
+    sections = {
+        "影响范围": "修改范围",
+        "目标外边界": "安全边界", "复用优先": "安全边界", "作用域": "安全边界",
+        "UI 参考": "安全边界", "创作权限": "安全边界", "允许修改": "安全边界",
+        "允许属性": "安全边界", "新组件授权": "安全边界", "禁止修改": "安全边界",
+        "禁止副作用": "安全边界", "共享影响": "安全边界", "额外 Bug": "安全边界",
+        "批准后": "安全边界", "主要风险": "主要风险", "批准边界": "批准边界",
+        "验证": "验证与回滚", "回滚": "验证与回滚", "验收": "验证与回滚",
+        "不变验收": "验证与回滚",
+    }
+    grouped = {title: [] for title in dict.fromkeys(sections.values())}
+    for label, value in fields:
+        if label in {"任务ID", "工具", "当前状态"}:
+            continue
+        section = sections.get(label)
+        if section is None:
+            lines.extend(_card_field(label, value))
+        elif label == "影响范围" and isinstance(value, list):
+            # Module and file are independent scope facts; align each label.
+            module = next((item for item in value if item.startswith("模块：")), "模块：以当前需求涉及的相关代码为准")
+            file_value = next((item for item in value if item.startswith("文件：")), "文件：待读取相关代码后确认；未明确前不得写入")
+            grouped[section].append(("影响范围", module))
+            grouped[section].append(("文件", file_value.removeprefix("文件：")))
+        else:
+            grouped[section].append((label, value))
+    for section, section_fields in grouped.items():
+        if section_fields:
+            lines.extend(_card_section(section))
+            width = max(_card_label_width(label) for label, _ in section_fields)
+            for label, value in section_fields:
+                lines.extend(_card_field(label, value, width, section=True))
 
 
 def _task_card_summary(prompt):
@@ -2341,10 +2381,7 @@ def render_task_gate_card(prompt, gate):
     else:
         scope.append("文件：待读取相关代码后确认；未明确前不得写入")
 
-    lines = [
-        "「需求卡」",
-        HOOK_CARD_DIVIDER,
-    ]
+    lines = _card_frame("「需求确认」")
     contract = gate.get("change_contract")
     has_contract = isinstance(contract, dict)
     base_fields = [("任务", _task_card_summary(prompt)),
@@ -2383,16 +2420,15 @@ def render_task_gate_card(prompt, gate):
         except (ImportError, ValueError, TypeError):
             pass
     base_fields.extend([
-        ("当前状态", "等待批准 · 尚未修改文件 · waiting_for_approval"),
+        ("当前状态", "等待批准 · 尚未修改文件"),
         ("批准后", "仅执行本卡明确的目标与边界；扩大范围、修改公共组件或产生连带影响必须重新确认。"
          if has_contract else "仅执行当前展示的修改方案；新增范围必须重新确认。"),
         ("主要风险", _task_gate_risks(prompt)),
         ("验证", ["先运行与改动直接相关的测试或构建命令。", "确认通过后，再运行项目已有的完整测试。"]),
         ("回滚", "修改前保留原文件内容；验证失败时按文件恢复，并记录失败原因。"),
     ])
-    width = max(_card_label_width(label) for label, _ in base_fields)
-    for label, value in base_fields:
-        lines.extend(_card_field(label, value, width))
+    _render_card_fields(lines, base_fields)
+    lines.extend(["│", "│  ◇ 等待确认 · 尚未修改文件"])
     lines.extend(_hook_card_choices())
     return "\n".join(lines)
 
@@ -3138,32 +3174,36 @@ def _tool_gate_is_danger(reason):
     return "[AgentRelay 安全门禁]" in str(reason or "")
 
 
+def _tool_card_reason(reason):
+    """Keep the concrete risk, not internal model-facing gate instructions."""
+    text = _clip_card_text(reason, 800)
+    text = re.sub(r"\[AgentRelay [^\]]+\]", "", text)
+    return next((line.strip() for line in text.splitlines() if line.strip()), "当前操作需要用户确认")
+
+
+
 def render_tool_gate_card(tool_name, tool_input, reason):
     """生成 Codex systemMessage 可稳定显示的纯文本工具确认卡。"""
 
     danger = _tool_gate_is_danger(reason)
     solution_key = build_solution_key(tool_name, tool_input) or tool_name
     targets = _tool_targets(tool_name, tool_input)
-    title = "「危险操作确认卡」" if danger else "「确认卡」"
+    title = "「危险操作确认」" if danger else "「写入确认」"
 
-    lines = [
-        title,
-        HOOK_CARD_DIVIDER,
-    ]
-    action_fields = [("任务", _task_card_summary(reason)),
+    lines = _card_frame(title)
+    action_fields = [("任务", _tool_card_reason(reason)),
                      ("任务ID", _task_card_id(solution_key)),
                      ("工具", normalize_text(tool_name) or "unknown"),
                      ("操作内容", targets or ["未提供具体路径或命令"]),
                      ("当前状态", "已阻断 · 等待批准")]
     action_fields.extend([
-        ("主要风险", [_clip_card_text(reason, 800)]),
+        ("主要风险", [_tool_card_reason(reason)]),
         ("批准边界", "仅限完全相同的工具输入执行一次；命令、路径、参数或影响范围变化必须重新确认。"),
         ("验证", "检查实际 diff 与目标外副作用，再运行相关测试；目标外变化必须报告。"),
         ("回滚", "修改类操作使用修改前备份或版本控制恢复；删除类操作可能无法恢复。"),
     ])
-    width = max(_card_label_width(label) for label, _ in action_fields)
-    for label, value in action_fields:
-        lines.extend(_card_field(label, value, width))
+    _render_card_fields(lines, action_fields)
+    lines.extend(["│", "│  ◇ 等待确认 · 当前操作已阻断"])
     lines.extend(_hook_card_choices())
     return "\n".join(lines)
 

@@ -62,6 +62,7 @@ FUSION_SCRIPT_FILES = (
 SCRIPT_FILES = (
     "subprocess_compat.py",
     "stdio_encoding.py",
+    "card_render.py",
     "agent_relay.py",
     "agent_relay_login.py",
     "agent_relay_runtime.py",

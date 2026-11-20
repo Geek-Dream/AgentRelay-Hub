@@ -1873,7 +1873,8 @@ def visible_card_in_stdout(stdout_text: str) -> bool:
     if not isinstance(message, str) or not message.strip():
         return False
     return any(
-        marker in message for marker in ("需求卡", "确认卡", "审批卡", "任务门禁")
+        marker in message
+        for marker in ("需求卡", "需求确认", "确认卡", "执行确认", "危险操作确认", "写入确认", "审批卡", "任务门禁")
     )
 
 
@@ -1925,8 +1926,8 @@ def verify_pi_visible_cards(
         "const toolGate = await handlers.get('tool_call')({\n"
         "  toolName: 'exec_command', input: {cmd: 'git reset --hard'}, toolCallId: 'verify-danger'\n"
         "}, ctx);\n"
-        "const promptCard = notifications.some((text) => text.includes('需求卡'));\n"
-        "const toolCard = notifications.some((text) => text.includes('危险操作确认卡'));\n"
+        "const promptCard = notifications.some((text) => text.includes('需求确认'));\n"
+        "const toolCard = notifications.some((text) => text.includes('危险操作确认'));\n"
         "console.log(JSON.stringify({promptCard, toolCard, blocked: toolGate?.block === true, notifications}));\n",
         encoding="utf-8",
     )
@@ -1934,6 +1935,7 @@ def verify_pi_visible_cards(
         **os.environ,
         "CODEX_HOME": str(isolated_home),
         "AGENTRELAY_MAIN_HOOK": str(main_hook),
+        "AGENTRELAY_TARGET": "pi",
         "AGENTRELAY_SHIM": str(shim_path),
         "AGENTRELAY_PYTHON": str(venv_python),
     }
@@ -2054,6 +2056,9 @@ def verify_target(
                 **os.environ,
                 "CODEX_HOME": str(isolated_home),
                 "AGENTRELAY_MAIN_HOOK": str(main_hook),
+                # This probe owns its protocol; an outer Agent session must not
+                # turn a visible-card probe into an already-displayed reminder.
+                "AGENTRELAY_TARGET": target_id,
             }
             if target_id == "pi":
                 card_ok, card_detail = verify_pi_visible_cards(

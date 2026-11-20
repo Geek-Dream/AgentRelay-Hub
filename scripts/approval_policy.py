@@ -17,8 +17,10 @@ from typing import Any
 
 try:
     from .stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+    from . import card_render
 except ImportError:
     from stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
+    import card_render
 
 
 MODES = {"strict", "standard", "relaxed"}
@@ -229,24 +231,23 @@ def apply_selection(codex_home: Path, selection: str) -> dict[str, str]:
 
 def render_menu(codex_home: Path) -> str:
     current = load_policy(codex_home)["mode"]
-    divider = "─" * 24
-    lines = [divider, "「AgentRelay · 权限设置」", divider, "",
-             f"当前模式: {current} · {LABELS[current]}", "",
-             "01 · 选择权限容忍度"]
+    lines = card_render.frame("权限设置")
+    lines.extend(card_render.field("当前模式", f"{current} · {LABELS[current]}"))
+    choices = []
     for number, mode in MENU_MODES.items():
         marker = "（当前）" if mode == current else ("（默认）" if mode == DEFAULT_MODE else "")
-        lines.extend([f"[{number}] {LABELS[mode]} · {mode} {marker}", f"    {DESCRIPTIONS[mode]}", ""])
-    lines.extend([
-        "02 · 交付审计绑定",
-        "strict: 完整交付审计，缺需求/行为/视觉/主审/独立审查证据不能完成。",
-        "standard: 轻量审计，单点样式只验目标/边界；复杂/共享/高风险自动升级，不让小改走多余流程。",
-        "relaxed: 小任务不做正式审计；大型/多文件/多目标/共享/高风险才审计，安全底线保留。",
-        "", "03 · 始终保留的安全边界",
-        "危险命令、共享影响、元素级约束和未批准的扩大范围不会被宽松模式豁免。",
-        "切换权限模式不会批准当前待确认任务。",
-        "", divider, "请输入 1、2、3；输入 0 取消。", divider,
-    ])
-    return "\n".join(lines)
+        choices.append((f"[{number}] {mode}", f"{LABELS[mode]} {marker}\n{DESCRIPTIONS[mode]}"))
+    lines.extend(card_render.section("选择权限容忍度", choices))
+    lines.extend(card_render.section("交付审计绑定", [
+        ("strict", "完整交付审计，缺需求/行为/视觉/主审/独立审查证据不能完成。"),
+        ("standard", "轻量审计，单点样式只验目标/边界；复杂/共享/高风险自动升级，不让小改走多余流程。"),
+        ("relaxed", "小任务不做正式审计；大型/多文件/多目标/共享/高风险才审计，安全底线保留。"),
+    ]))
+    lines.extend(card_render.section("始终保留的安全边界", [
+        ("危险操作", "危险命令、共享影响、元素级约束和未批准的扩大范围不会被宽松模式豁免。"),
+        ("审批边界", "切换权限模式不会批准当前待确认任务。"),
+    ]))
+    return card_render.finish(lines, "请输入 1、2、3；输入 0 取消")
 
 
 def saved_message(codex_home: Path, mode: str) -> str:

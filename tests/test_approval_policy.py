@@ -71,6 +71,15 @@ class ApprovalPolicyTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 policy.apply_selection(self.home, number)
 
+    def test_menu_uses_the_shared_symbol_template_and_indented_choices(self):
+        menu = policy.render_menu(self.home)
+        self.assertTrue(menu.startswith("╭─ ◎  「权限设置」"))
+        self.assertIn("│  ┄ 选择权限容忍度 ▼", menu)
+        self.assertIn("│  ┄ 交付审计绑定 ▼", menu)
+        self.assertIn("│  ◇ 请输入 1、2、3；输入 0 取消", menu)
+        self.assertTrue(menu.endswith("╰" + "─" * 87 + " §"))
+        self.assertTrue(all(line.startswith(("│", "╭", "╰")) for line in menu.splitlines()))
+
     def test_menu_cli_defaults_to_menu_and_accepts_a_number(self):
         shown = subprocess.run([sys.executable, str(PROJECT_ROOT / "scripts/approval_policy.py"),
                                 "--codex-home", str(self.home)],
