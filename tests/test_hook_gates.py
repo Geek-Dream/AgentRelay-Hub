@@ -58,21 +58,6 @@ class HookGateTests(unittest.TestCase):
     def assert_hook_ok(self, result):
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def assert_change_summary_format(self, message):
-        lines = message.splitlines()
-        self.assertEqual(lines[0], "")
-        self.assertTrue(lines[1].startswith("=================================历史记录"))
-        self.assertTrue(lines[3].startswith("- ⬆️(User)："))
-        self.assertEqual(lines[4], "")
-        self.assertTrue(lines[5].startswith("- ⬆️(Agent)："))
-        self.assertIn("=================================当前任务", message)
-        self.assertIn("- ⬇️(User)：", message)
-        self.assertIn("- ⬇️(Agent)：", message)
-        self.assertNotIn("本次修改：", message)
-        self.assertNotIn("•", message)
-        self.assertNotIn("这次改了哪些文件：", message)
-        self.assertNotIn("涉及到的文件：", message)
-
     def run_tracker(self, *args):
         return subprocess.run(
             [sys.executable, str(TRACKER), *args],
@@ -176,6 +161,29 @@ class HookGateTests(unittest.TestCase):
         self.assertIn("│  ◇ 等待确认 · 尚未修改文件", card)
         self.assertTrue(card.endswith("╰" + "─" * 87 + " §"))
         self.assertNotIn("\x1b[", card)
+
+    def test_card_preserves_multiline_indent_and_wraps_long_values(self):
+        from hooks import agent_relay_tracker as tracker
+
+        field_lines = tracker._card_field("任务", "第一行\n第二行")
+        self.assertEqual(field_lines[0], "│  -| 任务：第一行")
+        self.assertEqual(field_lines[1], "│" + " " * 11 + "第二行")
+
+        prompt = (
+            "你修改一下\n\n"
+            "https://mail.sparkspace.huaweicloud.com/webmail/index.html#/mail  "
+            "你看看，我已经打开这个页面了，然后呢，你自己上下滚动看一下，"
+            "是配置有问题，还是哪里有问题"
+        )
+        card = tracker.render_task_gate_card(prompt, {})
+        lines = card.splitlines()
+        self.assertTrue(all(line.startswith("│") for line in lines[1:-1]))
+        self.assertTrue(all(
+            tracker._card_label_width(line) <= tracker._CARD_LINE_WIDTH
+            for line in lines
+            if line.startswith("│")
+        ))
+        self.assertIn("https://", card)
 
     def test_tool_cards_use_the_same_symbol_frame(self):
         from hooks import agent_relay_tracker as tracker
@@ -672,7 +680,7 @@ class HookGateTests(unittest.TestCase):
         self.assertNotIn("Fusion 调用超时", stop.stdout)
         self.assertNotEqual(json.loads(stop.stdout or "{}").get("decision"), "block")
 
-    def test_shell_wrapper_forwards_change_summary_after_final_stop(self):
+    def test_shell_wrapper_keeps_final_stop_silent(self):
         workspace = self.codex_home / "shell-wrapper-workspace"
         workspace.mkdir()
         source = workspace / "app.py"
@@ -698,12 +706,9 @@ class HookGateTests(unittest.TestCase):
             last_assistant_message="已完成修改，拼写问题已修复。",
         ), shell_wrapper=True)
         self.assert_hook_ok(stopped)
-        output = json.loads(stopped.stdout)
-        self.assert_change_summary_format(output["systemMessage"])
-        self.assertIn("⬇️(Agent)：已完成修改，拼写问题已修复", output["systemMessage"])
-        self.assertNotIn("decision", output)
+        self.assertEqual(stopped.stdout, "")
 
-    def test_claude_shim_forwards_change_summary_after_final_stop(self):
+    def test_claude_shim_keeps_final_stop_silent(self):
         workspace = self.codex_home / "claude-workspace"
         workspace.mkdir()
         source = workspace / "app.py"
@@ -752,10 +757,7 @@ class HookGateTests(unittest.TestCase):
             last_assistant_message="已完成修改，拼写问题已修复。",
         ))
         self.assert_hook_ok(stopped)
-        output = json.loads(stopped.stdout)
-        self.assert_change_summary_format(output["systemMessage"])
-        self.assertIn("⬇️(Agent)：已完成修改，拼写问题已修复", output["systemMessage"])
-        self.assertNotIn("decision", output)
+        self.assertEqual(stopped.stdout, "")
 
     def test_blocked_stop_does_not_record_until_the_gate_allows_completion(self):
         from scripts import delivery_audit
@@ -818,8 +820,7 @@ class HookGateTests(unittest.TestCase):
             last_assistant_message="已完成修改，常量和测试均已修复。",
         ))
         self.assert_hook_ok(allowed)
-        allowed_output = json.loads(allowed.stdout)
-        self.assertIn("⬇️(User)：", allowed_output["systemMessage"])
+        self.assertEqual(allowed.stdout, "")
         history_files = list(history_dir.glob("*.json"))
         self.assertEqual(len(history_files), 1)
         history = json.loads(history_files[0].read_text(encoding="utf-8"))

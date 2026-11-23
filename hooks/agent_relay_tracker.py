@@ -2250,18 +2250,63 @@ def _clip_card_text(value, limit=600):
 
 def _card_values(value):
     if isinstance(value, (list, tuple, set)):
-        values = [
-            _clip_card_text(item)
-            for item in value
-            if str(item or "").strip()
-        ]
-        return values or ["无"]
-    text = _clip_card_text(value)
-    return [text] if text else ["无"]
+        raw_values = value
+    else:
+        raw_values = [value]
+    values = []
+    for item in raw_values:
+        text = _clip_card_text(item)
+        values.extend(line.strip() for line in text.splitlines() if line.strip())
+    return values or ["无"]
 
 
 def _card_label_width(label):
     return sum(2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1 for char in str(label))
+
+
+_CARD_LINE_WIDTH = 88
+
+
+def _wrap_card_text(value, width):
+    """Wrap card text by terminal display width without breaking card borders."""
+
+    remaining = str(value)
+    if not remaining:
+        return [""]
+
+    lines = []
+    preferred_breaks = set(" \t、，。；：,.;:/-")
+    while remaining:
+        if _card_label_width(remaining) <= width:
+            lines.append(remaining)
+            break
+
+        used_width = 0
+        cut_index = 0
+        preferred_cut = 0
+        for index, char in enumerate(remaining):
+            char_width = _card_label_width(char)
+            if used_width + char_width > width:
+                break
+            used_width += char_width
+            cut_index = index + 1
+            if char in preferred_breaks:
+                preferred_cut = cut_index
+
+        if cut_index == 0:
+            cut_index = 1
+        break_index = (
+            preferred_cut
+            if preferred_cut >= max(1, cut_index // 2)
+            else cut_index
+        )
+        line = remaining[:break_index].rstrip()
+        if not line:
+            break_index = cut_index
+            line = remaining[:break_index]
+        lines.append(line)
+        remaining = remaining[break_index:].lstrip()
+    return lines
 
 
 def _card_field(label, value, width=None, *, section=False):
@@ -2269,10 +2314,14 @@ def _card_field(label, value, width=None, *, section=False):
     label_width = width if width is not None else _card_label_width(label)
     padding = " " * max(0, label_width - _card_label_width(label))
     prefix = f"│     - {label}：{padding} " if section else f"│  -| {label}："
-    lines = [prefix + values[0]]
-    indent = label_width + 5 if section else label_width + 6
-    continuation = "│" + " " * indent
-    lines.extend(continuation + item for item in values[1:])
+    prefix_width = _card_label_width(prefix)
+    continuation = "│" + " " * max(0, prefix_width - 1)
+    value_width = max(1, _CARD_LINE_WIDTH - prefix_width)
+    lines = []
+    for index, item in enumerate(values):
+        wrapped = _wrap_card_text(item, value_width)
+        lines.append((prefix if index == 0 else continuation) + wrapped[0])
+        lines.extend(continuation + line for line in wrapped[1:])
     return lines
 
 
@@ -3082,7 +3131,7 @@ def render_change_history(entries):
 
 
 def annotate_change_summary(session_id, summary, file_groups, request=""):
-    """Store the Agent's actual completion description before Stop renders it."""
+    """Store an optional plain-language description in the local change history."""
 
     clean_summary = _clip_card_text(normalize_text(summary), 220)
     clean_request = _clip_card_text(normalize_text(request), 160)
@@ -3124,7 +3173,7 @@ def annotate_change_summary(session_id, summary, file_groups, request=""):
 
 
 def record_change_history(state, assistant_message=None):
-    """Persist and render the latest two write summaries for this Stop."""
+    """Persist the latest write summary; final Stop remains silent."""
 
     tracking = change_tracking(state)
     if tracking.get("recorded") or not tracking.get("had_write"):
@@ -3241,19 +3290,6 @@ def emit_hook_context(event_name, context, system_message=None):
     if system_message and visible_hook_cards_enabled():
         payload["systemMessage"] = system_message
     print(json.dumps(payload, ensure_ascii=False), flush=True)
-
-
-def emit_stop_summary(message):
-    """Print the non-blocking recent-change summary after a final Stop."""
-
-    text = str(message or "").rstrip()
-    if not text.strip() or not visible_hook_cards_enabled():
-        return False
-    print(
-        json.dumps({"systemMessage": text}, ensure_ascii=False),
-        flush=True,
-    )
-    return True
 
 
 def emit_pre_tool_deny(reason, system_message=None):
@@ -6790,7 +6826,7 @@ def handle_stop(session_id=None, last_assistant_message=None):
         stop_event_state = state
 
         if informational_reply:
-            change_summary = record_change_history(
+            record_change_history(
                 state,
                 assistant_message,
             )
@@ -6801,7 +6837,6 @@ def handle_stop(session_id=None, last_assistant_message=None):
             except (ImportError, OSError, ValueError, TypeError) as exc:
                 log_event("delivery_audit_close_error", {"error": str(exc)})
             write_state(state, session_id=session_id)
-            emit_stop_summary(change_summary)
             return state
 
         # 助手已明确宣告解决时，优先按解决处理：
@@ -6819,7 +6854,7 @@ def handle_stop(session_id=None, last_assistant_message=None):
             write_state(state, session_id=session_id)
             return state
 
-        change_summary = record_change_history(
+        record_change_history(
             state,
             assistant_message,
         )
@@ -6887,8 +6922,6 @@ def handle_stop(session_id=None, last_assistant_message=None):
             state,
             session_id=session_id,
         )
-        emit_stop_summary(change_summary)
-
         return state
 
     finally:

@@ -271,7 +271,7 @@ class ChangeHistoryTests(unittest.TestCase):
             [{"label": "应用逻辑", "files": ["src/app.py"]}],
         )
 
-    def test_change_summary_cli_persists_agent_groups_for_stop_output(self):
+    def test_change_summary_cli_persists_agent_groups_for_local_history(self):
         session_id = "cli-summary"
         state = self.tracker.create_new_problem(
             "优化页面并补充测试",
@@ -332,8 +332,7 @@ class ChangeHistoryTests(unittest.TestCase):
             ],
         )
 
-    def test_five_write_turns_show_and_keep_only_latest_two(self):
-        first_message = ""
+    def test_five_write_turns_are_silent_and_keep_only_latest_two(self):
         for index in range(1, 5):
             _, output = self.run_write_turn(
                 "history-limit",
@@ -341,13 +340,7 @@ class ChangeHistoryTests(unittest.TestCase):
                 f"file-{index}.py",
                 f"已修复第{index}次修改问题并通过定向验证。",
             )
-            payload = json.loads(output)
-            self.assert_change_summary_format(payload["systemMessage"])
-            if index == 1:
-                first_message = payload["systemMessage"]
-
-        self.assertIn("历史记录", first_message)
-        self.assertIn("暂无记录", first_message)
+            self.assertEqual(output, "")
 
         history = self.tracker.read_change_history(
             str(self.workspace),
@@ -368,13 +361,15 @@ class ChangeHistoryTests(unittest.TestCase):
             "file-5.py",
             "已修复第5次修改问题并通过定向验证。",
         )
-        message = json.loads(output)["systemMessage"]
-        self.assert_change_summary_format(message)
-        self.assertIn("第5次修改", message)
-        self.assertIn("第4次修改", message)
-        self.assertNotIn("第3次修改", message)
-        self.assertNotIn("第1次修改", message)
-        self.assertNotIn("第2次修改", message)
+        self.assertEqual(output, "")
+        history = self.tracker.read_change_history(
+            str(self.workspace),
+            "default",
+            "history-limit",
+        )
+        self.assertEqual(len(history["entries"]), 2)
+        self.assertIn("第5次修改", history["entries"][0]["summary"])
+        self.assertIn("第4次修改", history["entries"][1]["summary"])
 
     def test_question_and_read_only_turn_do_not_create_history(self):
         state = self.tracker.create_new_problem(
@@ -470,10 +465,7 @@ class ChangeHistoryTests(unittest.TestCase):
             "session-a.py",
             "已修复第一个窗口的问题。",
         )
-        first_message = json.loads(first_output)["systemMessage"]
-        self.assertIn("第一个窗口的问题", first_message)
-        self.assertIn("历史记录", first_message)
-        self.assertIn("暂无记录", first_message)
+        self.assertEqual(first_output, "")
 
         _, second_output = self.run_write_turn(
             "parallel-session-b",
@@ -481,10 +473,7 @@ class ChangeHistoryTests(unittest.TestCase):
             "session-b.py",
             "已修复第二个窗口的问题。",
         )
-        second_message = json.loads(second_output)["systemMessage"]
-        self.assertIn("第二个窗口的问题", second_message)
-        self.assertIn("历史记录", second_message)
-        self.assertNotIn("第一个窗口的问题", second_message)
+        self.assertEqual(second_output, "")
 
         first_history = self.tracker.read_change_history(
             str(self.workspace),

@@ -428,7 +428,7 @@ class PiExtensionTests(unittest.TestCase):
         self.assertTrue(ok, detail)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js 未安装")
-    def test_generated_extension_bridges_pi_write_results_to_change_history(self):
+    def test_generated_extension_persists_pi_history_without_stop_notification(self):
         tmp = Path(tempfile.mkdtemp(prefix="agentrelay-pi-history-test-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         workspace = tmp / "workspace"
@@ -549,16 +549,11 @@ class PiExtensionTests(unittest.TestCase):
             for item in runtime["notifications"]
             if "⬇️(User)：" in item["message"]
         ]
-        self.assertEqual(len(summaries), 1, runtime["notifications"])
-        lines = summaries[0].splitlines()
-        self.assertEqual(lines[0], "")
-        self.assertEqual(lines[1], "=================================历史记录=================================")
-        self.assertEqual(lines[2], "")
-        self.assertTrue(lines[5].startswith("- ⬆️(Agent)："))
-        self.assertIn("历史记录", summaries[0])
-        self.assertNotIn("这次改了哪些文件：", summaries[0])
-        self.assertIn("⬇️(Agent)：已完成修改，拼写问题已修复", summaries[0])
-        self.assertIn("拼写问题已修复", summaries[0])
+        self.assertEqual(summaries, [], runtime["notifications"])
+        self.assertFalse(any(
+            "历史记录" in item["message"]
+            for item in runtime["notifications"]
+        ))
         history_dir = codex_home / "agent_relay_tracker" / "history" / "change-summaries"
         history_files = list(history_dir.glob("*.json"))
         self.assertEqual(len(history_files), 1)
