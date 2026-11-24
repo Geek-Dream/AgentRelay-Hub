@@ -50,7 +50,7 @@ HOOK_FILES = (
 )
 SKILL_FILES = ("SKILL.md",)
 IMAGE_SKILL_FILES = ("SKILL.md",)
-IMAGE_SCRIPT_FILES = ("agent_image.py",)
+IMAGE_SCRIPT_FILES = ("agent_image.py", "stdio_encoding.py")
 FUSION_SKILL_FILES = ("SKILL.md",)
 FUSION_SCRIPT_FILES = (
     "agent_fusion.py",

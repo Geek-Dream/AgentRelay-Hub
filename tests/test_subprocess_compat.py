@@ -170,7 +170,7 @@ class WindowsCommandConstructionTests(unittest.TestCase):
 
 
 class InstallerCompatibilityTests(unittest.TestCase):
-    def test_installer_copies_helper_and_registers_utf8_hook(self):
+    def test_installer_copies_runtime_helpers_and_registers_utf8_hook(self):
         installer = load_module(
             "agent_relay_installer_subprocess_compat",
             PROJECT_ROOT / "install.py",
@@ -204,9 +204,27 @@ class InstallerCompatibilityTests(unittest.TestCase):
                 installer.merge_hooks_json()
 
             target_skill = targets["TARGET_SKILL"]
+            target_image_skill = targets["TARGET_IMAGE_SKILL"]
             self.assertTrue(
                 (target_skill / "scripts" / "subprocess_compat.py").is_file()
             )
+            image_helper = (
+                target_image_skill / "scripts" / "stdio_encoding.py"
+            )
+            self.assertTrue(image_helper.is_file())
+            image_script = (
+                target_image_skill / "scripts" / "agent_image.py"
+            )
+            completed = subprocess.run(
+                [sys.executable, str(image_script), "--help"],
+                cwd=root,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertFalse(
                 (targets["TARGET_HOOKS"] / "agent_relay_hook.sh").exists()
             )
