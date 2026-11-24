@@ -35,7 +35,7 @@ def provider_capabilities(kind: str, entry: Mapping[str, Any] | None = None) -> 
     values = entry if isinstance(entry, Mapping) else {}
     if normalized_kind in {"api", "local"}:
         capabilities = ["text", "analysis", "code_generation", "code_review"]
-        if normalized_kind == "local" and bool(values.get("vision")):
+        if bool(values.get("vision")):
             capabilities.append("images")
         return tuple(capabilities)
     if normalized_kind == "web":

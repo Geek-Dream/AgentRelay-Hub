@@ -182,8 +182,10 @@ Hook 可以保守预筛选直接行动句式（如“现在调用 DeepSeek”“
   或如实转为 `user_review_required` 请用户复查。
 - **原生视觉默认**：当前主 Agent 能读取用户图片或 Playwright 截图时，使用 `native` 视觉审查；
   不调用 agent-image 不代表没有视觉。只有主 Agent 明确无法读图时才考虑借视觉 Provider。
-- 无视觉时调用 `visual_review.py agent-image` 借视觉 Provider；Provider 必须逐项返回
-  `target: 通过: 实际观察` 和各目标外项目的实际观察。失败或无法判断只能用户复查。
+- 只有用户当次明确要求用 `agent-image` 审查本次页面，且主 Agent 无视觉时，才允许调用
+  `visual_review.py agent-image --user-invoked`；Provider 必须逐项返回 `target: 通过: 实际观察`
+  和各目标外项目的实际观察。普通 UI 验收、Hook、普通识图措辞不得被动触发；缺少当次显式
+  调用、Provider 失败或无法判断时只能用户复查。
 - 无视觉 Provider 时不强制截图：用 `verify_page.py --no-screenshots` 完成真实 Chromium 的
   DOM/布局、控制台、文件哈希、按钮点击/输入和目标外检查，随后 `visual_review.py nonvisual`
   登记结构化结果。最终只能 `user_review_required`，明确请用户看页面，不得声称视觉通过。

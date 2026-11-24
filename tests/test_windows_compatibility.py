@@ -18,7 +18,8 @@ class WindowsCompatibilityTests(unittest.TestCase):
         env = dict(os.environ, PYTHONIOENCODING="cp936")
         env.pop("PYTHONUTF8", None)
         result = subprocess.run(
-            [sys.executable, str(PROJECT_ROOT / "scripts/agent_image.py"), "/missing.png"],
+            [sys.executable, str(PROJECT_ROOT / "scripts/agent_image.py"),
+             "/missing.png", "--user-invoked"],
             cwd=PROJECT_ROOT, env=env, text=True, encoding="utf-8", errors="replace",
             capture_output=True, check=False,
         )

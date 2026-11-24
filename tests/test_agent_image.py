@@ -89,6 +89,33 @@ class LocalVisionSelectionTests(unittest.TestCase):
         self.assertIsNone(agent_image.pick_local_provider(config, "other"))
 
 
+class ApiVisionSelectionTests(unittest.TestCase):
+    def test_only_enabled_api_models_with_explicit_vision_are_picked(self):
+        config = _config(api_providers=[
+            {"id": "text", "endpoint": "https://api.example/v1",
+             "model": "text-model", "enabled": True},
+            {"id": "disabled", "endpoint": "https://api.example/v1",
+             "model": "vision-model", "vision": True, "enabled": False},
+            {"id": "vision", "endpoint": "https://api.example/v1",
+             "model": "vision-model", "vision": True, "enabled": True},
+        ])
+        entries = agent_image.api_vision_providers(config)
+        self.assertEqual([item["id"] for item in entries], ["vision"])
+
+
+class ActiveInvocationTests(unittest.TestCase):
+    def test_missing_explicit_invocation_is_rejected_before_config_or_provider_access(self):
+        output = io.StringIO()
+        with mock.patch.object(agent_image, "load_config") as load, \
+                mock.patch.object(agent_image, "run_web_provider_attempt") as web_call, \
+                redirect_stdout(output):
+            result = agent_image.main(["/not-read.png"])
+        self.assertEqual(result, 2)
+        self.assertIn("只能由用户当次显式调用", output.getvalue())
+        load.assert_not_called()
+        web_call.assert_not_called()
+
+
 class ProviderOrderTests(unittest.TestCase):
     def setUp(self):
         self.directory = Path(tempfile.mkdtemp())
@@ -100,6 +127,15 @@ class ProviderOrderTests(unittest.TestCase):
             "model": "minicpm-v", "vision": True, "enabled": True,
         }
         self.web = _web("deepseek-web", images=True)
+        self.api = {
+            "id": "vision-api", "name": "Vision API",
+            "endpoint": "https://api.example/v1", "model": "vision-model",
+            "api_key": "test-key", "vision": True, "enabled": True,
+        }
+
+    @staticmethod
+    def _args(path):
+        return [str(path), "--no-cache", "--user-invoked"]
 
     def test_local_success_never_calls_beta_web(self):
         config = _config(
@@ -113,14 +149,15 @@ class ProviderOrderTests(unittest.TestCase):
                 ) as local_call, mock.patch.object(
                     agent_image, "run_web_provider_attempt",
                 ) as web_call:
-            result = agent_image.main([str(self.image), "--no-cache"])
+            result = agent_image.main(self._args(self.image))
         self.assertEqual(result, 0)
         local_call.assert_called_once()
         web_call.assert_not_called()
 
-    def test_beta_web_is_attempted_only_after_local_failure(self):
+    def test_local_failure_skips_api_and_uses_beta_web_as_last_resort(self):
         config = _config(
-            local_providers=[self.local], web_providers=[self.web],
+            local_providers=[self.local], api_providers=[self.api],
+            web_providers=[self.web],
             web_assist={"enabled": True},
         )
         output = "💬 AI回复:\n网页描述\n" + "=" * 60
@@ -129,12 +166,51 @@ class ProviderOrderTests(unittest.TestCase):
                     agent_image, "run_local_provider_attempt",
                     return_value=(False, "", "offline"),
                 ) as local_call, mock.patch.object(
+                    agent_image, "run_api_provider_attempt",
+                ) as api_call, mock.patch.object(
                     agent_image, "run_web_provider_attempt",
                     return_value=(True, output, ""),
                 ) as web_call:
-            result = agent_image.main([str(self.image), "--no-cache"])
+            result = agent_image.main(self._args(self.image))
         self.assertEqual(result, 0)
         local_call.assert_called_once()
+        api_call.assert_not_called()
+        web_call.assert_called_once()
+
+    def test_api_is_used_when_no_local_visual_model_exists(self):
+        config = _config(
+            api_providers=[self.api], web_providers=[self.web],
+            web_assist={"enabled": True},
+        )
+        with mock.patch.object(agent_image, "load_config", return_value=config), \
+                mock.patch.object(
+                    agent_image, "run_api_provider_attempt",
+                    return_value=(True, "API 描述", ""),
+                ) as api_call, mock.patch.object(
+                    agent_image, "run_web_provider_attempt",
+                ) as web_call:
+            result = agent_image.main(self._args(self.image))
+        self.assertEqual(result, 0)
+        api_call.assert_called_once()
+        web_call.assert_not_called()
+
+    def test_api_failure_can_use_declared_beta_web_vision(self):
+        config = _config(
+            api_providers=[self.api], web_providers=[self.web],
+            web_assist={"enabled": True},
+        )
+        output = "💬 AI回复:\n网页描述\n" + "=" * 60
+        with mock.patch.object(agent_image, "load_config", return_value=config), \
+                mock.patch.object(
+                    agent_image, "run_api_provider_attempt",
+                    return_value=(False, "", "offline"),
+                ) as api_call, mock.patch.object(
+                    agent_image, "run_web_provider_attempt",
+                    return_value=(True, output, ""),
+                ) as web_call:
+            result = agent_image.main(self._args(self.image))
+        self.assertEqual(result, 0)
+        api_call.assert_called_once()
         web_call.assert_called_once()
 
     def test_web_only_config_does_nothing_while_beta_is_off(self):
@@ -143,7 +219,7 @@ class ProviderOrderTests(unittest.TestCase):
         with mock.patch.object(agent_image, "load_config", return_value=config), \
                 mock.patch.object(agent_image, "run_web_provider_attempt") as web_call, \
                 redirect_stdout(output):
-            result = agent_image.main([str(self.image), "--no-cache"])
+            result = agent_image.main(self._args(self.image))
         self.assertEqual(result, 0)
         self.assertIn("Beta 网页测试协助", output.getvalue())
         web_call.assert_not_called()
@@ -243,6 +319,37 @@ class LocalProviderCallTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(answer, "")
         self.assertTrue(reason)
+
+
+class ApiProviderCallTests(unittest.TestCase):
+    def test_api_call_reuses_formatted_adapter_and_sends_image_parts(self):
+        directory = Path(tempfile.mkdtemp())
+        image = directory / "t.png"
+        image.write_bytes(PNG_1PX)
+        entry = {"endpoint": "https://api.example/v1", "model": "vision",
+                 "format": "responses", "queue_timeout": 5}
+        response = {"choices": [{"message": {"content": "API 视觉描述"}}]}
+        with mock.patch("agent_fusion._call_formatted_model", return_value=response) as call:
+            ok, answer, reason = agent_image.run_api_provider_attempt(
+                entry, "描述", [image])
+        self.assertTrue(ok)
+        self.assertEqual(answer, "API 视觉描述")
+        self.assertEqual(reason, "")
+        messages = call.call_args.args[1]
+        self.assertEqual(messages[0]["content"][0], {"type": "text", "text": "描述"})
+        self.assertEqual(messages[0]["content"][1]["type"], "image_url")
+        self.assertTrue(messages[0]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_api_empty_answer_is_a_failure(self):
+        directory = Path(tempfile.mkdtemp())
+        image = directory / "t.png"
+        image.write_bytes(PNG_1PX)
+        response = {"choices": [{"message": {"content": ""}}]}
+        with mock.patch("agent_fusion._call_formatted_model", return_value=response):
+            ok, answer, reason = agent_image.run_api_provider_attempt({}, "描述", [image])
+        self.assertFalse(ok)
+        self.assertEqual(answer, "")
+        self.assertIn("未返回", reason)
 
 
 class PrepareImageTests(unittest.TestCase):

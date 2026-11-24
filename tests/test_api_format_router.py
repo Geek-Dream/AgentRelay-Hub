@@ -202,6 +202,23 @@ def test_ir_to_anthropic_serializes_tools():
     assert body["tools"][0]["input_schema"] == {"type": "object"}
 
 
+def test_ir_to_anthropic_preserves_text_and_base64_image():
+    ir = chat_request_to_ir({
+        "model": "m",
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "描述图片"},
+            {"type": "image_url", "image_url": {
+                "url": "data:image/png;base64,AA=="}},
+        ]}],
+    })
+    body = ir_to_anthropic_request(ir, "claude-vision")
+    assert body["messages"][0]["content"] == [
+        {"type": "text", "text": "描述图片"},
+        {"type": "image", "source": {
+            "type": "base64", "media_type": "image/png", "data": "AA=="}},
+    ]
+
+
 def test_ir_to_responses_serializes():
     ir = chat_request_to_ir({
         "model": "m",
@@ -213,6 +230,22 @@ def test_ir_to_responses_serializes():
     assert body["instructions"] == "s"
     assert body["input"][0]["type"] == "message"
     assert body["max_output_tokens"] == 50
+
+
+def test_ir_to_responses_preserves_text_and_image():
+    ir = chat_request_to_ir({
+        "model": "m",
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "描述图片"},
+            {"type": "image_url", "image_url": {
+                "url": "data:image/png;base64,AA=="}},
+        ]}],
+    })
+    body = ir_to_responses_request(ir, "gpt-vision")
+    assert body["input"][0]["content"] == [
+        {"type": "input_text", "text": "描述图片"},
+        {"type": "input_image", "image_url": "data:image/png;base64,AA=="},
+    ]
 
 
 def test_anthropic_response_to_chat():

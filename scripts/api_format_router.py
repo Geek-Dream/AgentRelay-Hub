@@ -235,6 +235,74 @@ def _conversation_messages(ir: dict) -> list:
     return [m for m in ir["messages"] if m.get("role") != "system"]
 
 
+def _part_image_url(part: dict) -> str:
+    value = part.get("image_url")
+    if isinstance(value, dict):
+        return str(value.get("url") or "")
+    return str(value or part.get("url") or "")
+
+
+def _anthropic_image_block(part: dict) -> dict:
+    url = _part_image_url(part)
+    if url.startswith("data:"):
+        header, separator, data = url.partition(",")
+        media_type = header[5:].split(";", 1)[0]
+        if (not separator or ";base64" not in header
+                or not media_type.startswith("image/") or not data):
+            raise ValueError("图片 data URL 必须是带媒体类型的 base64 数据")
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            },
+        }
+    if url.startswith(("https://", "http://")):
+        return {"type": "image", "source": {"type": "url", "url": url}}
+    raise ValueError("Anthropic 图片缺少有效的 data URL 或 HTTP(S) 地址")
+
+
+def _anthropic_content_blocks(content) -> list[dict]:
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content else []
+    blocks = []
+    for part in content if isinstance(content, list) else []:
+        if not isinstance(part, dict):
+            continue
+        part_type = part.get("type")
+        if part_type in {"text", "input_text", "output_text"}:
+            text = str(part.get("text") or "")
+            if text:
+                blocks.append({"type": "text", "text": text})
+        elif part_type in {"image_url", "input_image"}:
+            blocks.append(_anthropic_image_block(part))
+        elif part_type == "image" and isinstance(part.get("source"), dict):
+            blocks.append(part)
+    return blocks
+
+
+def _responses_content_blocks(content, role: str) -> list[dict]:
+    text_type = "output_text" if role == "assistant" else "input_text"
+    if isinstance(content, str):
+        return [{"type": text_type, "text": content}] if content else []
+    blocks = []
+    for part in content if isinstance(content, list) else []:
+        if not isinstance(part, dict):
+            continue
+        part_type = part.get("type")
+        if part_type in {"text", "input_text", "output_text"}:
+            text = str(part.get("text") or "")
+            if text:
+                blocks.append({"type": text_type, "text": text})
+        elif part_type in {"image_url", "input_image"}:
+            url = _part_image_url(part)
+            if not url:
+                raise ValueError("Responses 图片缺少 image_url")
+            blocks.append({"type": "input_image", "image_url": url})
+    return blocks
+
+
 def ir_to_chat_request(ir: dict, model: str) -> dict:
     body = {
         "model": model,
@@ -264,10 +332,7 @@ def ir_to_anthropic_request(ir: dict, model: str) -> dict:
                 }],
             })
             continue
-        blocks = []
-        text = _text_of(m.get("content"))
-        if text:
-            blocks.append({"type": "text", "text": text})
+        blocks = _anthropic_content_blocks(m.get("content"))
         for call in m.get("tool_calls") or []:
             try:
                 arguments = json.loads(
@@ -325,24 +390,21 @@ def ir_to_responses_request(ir: dict, model: str) -> dict:
                     "arguments": str(
                         call.get("function", {}).get("arguments") or ""),
                 })
-            text = _text_of(m.get("content"))
-            if text:
+            blocks = _responses_content_blocks(m.get("content"), "assistant")
+            if blocks:
                 input_items.append({
                     "type": "message",
                     "role": "assistant",
-                    "content": [{"type": "output_text", "text": text}],
+                    "content": blocks,
                 })
             continue
-        text = _text_of(m.get("content"))
-        if text:
+        normalized_role = "assistant" if role == "assistant" else "user"
+        blocks = _responses_content_blocks(m.get("content"), normalized_role)
+        if blocks:
             input_items.append({
                 "type": "message",
-                "role": "user" if role != "assistant" else "assistant",
-                "content": [{
-                    "type": "input_text" if role != "assistant"
-                    else "output_text",
-                    "text": text,
-                }],
+                "role": normalized_role,
+                "content": blocks,
             })
     body = {
         "model": model,

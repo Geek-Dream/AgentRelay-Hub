@@ -671,10 +671,18 @@ def review_with_agent_image(
     unchanged_checks: list[str],
     target_items: Iterable[str] | None = None,
     item_screenshots: dict[str, str] | Iterable[tuple[str, str]] | None = None,
+    user_invoked: bool = False,
 ) -> dict[str, Any]:
-    """Ask the configured vision provider, never simulate a visual response."""
+    """Ask a Provider only after an explicit user invocation; never simulate vision."""
     checks = [str(item).strip() for item in unchanged_checks if str(item).strip()]
     items = _normalize_target_items(target, target_items)
+    if not user_invoked:
+        return record_review(
+            home, session_id, mode="unavailable", screenshots=screenshots,
+            target=target, unchanged_checks=checks, passed=False,
+            summary="未获得用户当次显式 agent-image 调用，已阻止被动识图；需用户复查",
+            target_items=items, item_screenshots=item_screenshots,
+        )
     script = home / "skills" / "agent-image" / "scripts" / "agent_image.py"
     if not script.is_file():
         return record_review(home, session_id, mode="unavailable", screenshots=screenshots,
@@ -689,7 +697,8 @@ def review_with_agent_image(
                 + "\n每项都必须明确回答；不知道就写无法判断，不能编造或只说整体没问题。")
     try:
         completed = subprocess.run(
-            [str(python), "-X", "utf8", str(script), *screenshots, "--question", question],
+            [str(python), "-X", "utf8", str(script), "--user-invoked",
+             *screenshots, "--question", question],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -1045,6 +1054,11 @@ def main() -> int:
         item.add_argument("--self-reviewed", action="store_true", help="主 Agent 确认已逐项读取截图")
         item.add_argument("--attestation", default="", help="逐项读取截图并对照页面的自评审说明")
         item.add_argument("--passed", action="store_true")
+        if name == "agent-image":
+            item.add_argument(
+                "--user-invoked", action="store_true",
+                help="仅在用户当次显式要求 agent-image 审查时传入；否则拒绝被动识图",
+            )
     args = parser.parse_args()
     try:
         if args.command == "record":
@@ -1067,7 +1081,8 @@ def main() -> int:
             result = review_with_agent_image(args.home, args.session, screenshots=args.screenshot,
                                              target=args.target, unchanged_checks=args.unchanged,
                                              target_items=args.target_item or None,
-                                             item_screenshots=_item_screenshot_mapping(args.item_screenshot))
+                                             item_screenshots=_item_screenshot_mapping(args.item_screenshot),
+                                             user_invoked=args.user_invoked)
         elif args.command == "cleanup":
             result = {
                 "deleted": cleanup_screenshots(args.home, args.session, args.screenshot),

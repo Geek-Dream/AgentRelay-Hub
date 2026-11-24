@@ -60,9 +60,19 @@ class FusionConfigWebTests(unittest.TestCase):
         self.assertIn('id="fusion-provider"', page)
         self.assertIn('id="fusion-mode"', page)
         self.assertIn('id="web-assist-enabled"', page)
+        self.assertIn('id="web-vision-status"', page)
         self.assertIn("Beta 网页测试协助", page)
+        self.assertIn("网页视觉可作为最后辅助", page)
+        self.assertIn("网页 Provider 未声明视觉", page)
         self.assertIn("自动：API → 本地", page)
         self.assertIn("/agent-fusion", page)
+
+    def test_local_and_api_forms_expose_and_save_explicit_vision(self):
+        page = build_config_page(self.page_config())
+        self.assertEqual(page.count("switchRow('f-vision','支持图片识别'"), 2)
+        self.assertIn("p.vision=!!($('f-vision')||{}).checked", page)
+        self.assertIn("已声明视觉", page)
+        self.assertIn("未声明视觉", page)
 
     def test_unconfigured_provider_state_is_visible_and_explained(self):
         page = build_config_page(self.page_config())

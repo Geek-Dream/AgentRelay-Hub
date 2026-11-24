@@ -561,18 +561,32 @@ class VisualReviewTests(unittest.TestCase):
                 "",
             )
             result = review.review_with_agent_image(self.home, self.session, screenshots=[str(self.image)],
-                                                   target="target", unchanged_checks=["其他模块"])
+                                                   target="target", unchanged_checks=["其他模块"],
+                                                   user_invoked=True)
         self.assertEqual(result["status"], "passed")
+        self.assertIn("--user-invoked", call.call_args.args[0])
         call.return_value = subprocess.CompletedProcess([], 0, "看起来没问题", "")
         result = review.review_with_agent_image(self.home, self.session, screenshots=[str(self.image)],
-                                               target="target", unchanged_checks=["其他模块"])
+                                               target="target", unchanged_checks=["其他模块"],
+                                               user_invoked=True)
         self.assertEqual(result["status"], "user_review_required")
 
     def test_agent_image_missing_script_degrades_to_user_review(self):
         result = review.review_with_agent_image(self.home, self.session, screenshots=[str(self.image)],
-                                               target="按钮", unchanged_checks=["其他模块"])
+                                               target="按钮", unchanged_checks=["其他模块"],
+                                               user_invoked=True)
         self.assertEqual(result["status"], "user_review_required")
         self.assertIn("无视觉", result["summary"])
+
+    def test_agent_image_passive_review_is_blocked_without_calling_script(self):
+        with mock.patch("subprocess.run") as call:
+            result = review.review_with_agent_image(
+                self.home, self.session, screenshots=[str(self.image)],
+                target="按钮", unchanged_checks=["其他模块"],
+            )
+        self.assertEqual(result["status"], "user_review_required")
+        self.assertIn("阻止被动识图", result["summary"])
+        call.assert_not_called()
 
     def test_generic_observation_cannot_become_visual_pass(self):
         with self.assertRaisesRegex(ValueError, "观察过于笼统"):

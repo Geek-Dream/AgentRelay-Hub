@@ -1853,6 +1853,7 @@ def run_web_configurator() -> None:
             value = {"id": provider_id, "name": str(value.get("name") or provider_id), "endpoint": endpoint,
                      "model": str(value["model"]), "api_key": api_key, "request_type": str(value.get("request_type", "openai-compatible")),
                      "format": fmt,
+                     "vision": bool(value.get("vision", old.get("vision", False))),
                      "enabled": bool(value.get("enabled", True)), "timeout": max(5, min(600, int(value.get("timeout", 60)))),
                      "max_concurrency": value.get("max_concurrency", old.get("max_concurrency")),
                      "queue_timeout": value.get("queue_timeout", old.get("queue_timeout")),

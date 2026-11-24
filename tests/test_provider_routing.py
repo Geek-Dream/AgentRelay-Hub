@@ -11,6 +11,15 @@ from agent_relay import DeepSeekAdapter  # noqa: E402
 from agent_relay_runtime import SessionRef  # noqa: E402
 from generic_web_adapter import GenericWebAdapter  # noqa: E402
 import config_manager  # noqa: E402
+from scripts.model_router import provider_capabilities  # noqa: E402
+
+
+class VisionCapabilityTests(unittest.TestCase):
+    def test_api_and_local_require_the_same_explicit_vision_declaration(self):
+        for kind in ("api", "local"):
+            with self.subTest(kind=kind):
+                self.assertIn("images", provider_capabilities(kind, {"vision": True}))
+                self.assertNotIn("images", provider_capabilities(kind, {"vision": False}))
 
 
 class DeepSeekRoutingTests(unittest.TestCase):

@@ -14,10 +14,17 @@ def _replace_once(page: str, needle: str, replacement: str) -> str:
 def _apply_fusion_ui(page: str) -> str:
     css = r"""
 .fusion-status{display:flex;align-items:flex-start;gap:10px;margin-top:16px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:#f7f9fa}.fusion-status .dot{margin-top:6px}.fusion-status strong{display:block;font-size:14px}.fusion-status small{display:block;color:var(--muted);margin-top:2px}.fusion-status.ready{border-color:#bfe8d8;background:#effaf5}.fusion-status.warn{border-color:#efd39e;background:#fff8e9}.fusion-status.off{background:#f5f7f8}.fusion-overview{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:14px;padding:12px 14px;border:1px solid #efd39e;border-radius:8px;background:#fff8e9}.fusion-overview.ready{border-color:#bfe8d8;background:#effaf5}.fusion-overview strong{display:block}.fusion-overview small{display:block;color:var(--muted);margin-top:2px}.fusion-command{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px;padding:11px 12px;border:1px solid var(--line);border-radius:8px;background:#f7f9fa;font-size:13px}.fusion-command code{padding:2px 6px;border-radius:5px;background:#e8eef2;color:#34495e}@media(max-width:780px){.fusion-overview,.fusion-command{align-items:flex-start;flex-direction:column}}
+.web-vision-status{margin-top:10px;padding:10px 12px;border-left:3px solid var(--line-strong);background:var(--panel-soft);font-size:12px}.web-vision-status.ready{border-left-color:var(--teal)}.web-vision-status strong,.web-vision-status small{display:block}.web-vision-status small{margin-top:3px;color:var(--muted);line-height:1.6}
 """
     nav = r"""<button data-tab="fusion"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="m8.6 10.5 6.8-3M8.6 13.5l6.8 3"/></svg><span>Fusion 辅助 Agent</span></button>"""
     overview = r"""<div id="fusion-overview" class="fusion-overview"></div><div class="grid" id="stats"></div>"""
     view = r"""<div id="fusion" class="view"><div class="head"><div><h1>Fusion 辅助 Agent</h1><p class="hint">主 Agent 负责拆解任务、审查改动和最终验收；Fusion 只承接明确的辅助调查、批量阅读和局部杂活。</p></div><button class="btn primary" onclick="saveFusion()">保存</button></div><div class="card"><div class="form"><div class="field full"><div class="switch-row"><div><label>启用 Fusion 辅助能力</label><small>Provider 留空时自动按 API → 本地选择，不会继承网页默认模型。</small></div><label class="switch"><input id="fusion-enabled" type="checkbox"><span class="slider"></span></label></div></div><div class="field full"><div class="switch-row"><div><label>Beta 网页测试协助</label><small>默认关闭。显式开启后，网页外援、Hook 和网页识图才可作为最后辅助；网页不能执行本机任务。</small></div><label class="switch"><input id="web-assist-enabled" type="checkbox" onchange="updateWebAssistControls()"><span class="slider"></span></label></div></div><div class="field full"><label>Provider</label><select id="fusion-provider" onchange="updateFusionControls(true)"></select><p class="hint" id="fusion-provider-note">留空自动使用 API → 本地；也可精确指定 Provider。</p></div><div class="field"><label>工具模式</label><select id="fusion-mode" onchange="updateFusionControls(true)"><option value="readonly">只读：查阅、搜索和整理</option><option id="fusion-coding-option" value="coding">可修改：写入文件并执行命令</option></select><p class="hint" id="fusion-mode-note">只读模式不能写文件或执行命令。</p></div></div><div id="fusion-status" class="fusion-status"></div><div class="notice">正常协助只使用 API 或本地模型。Beta 网页测试协助是可选尾巴功能，不参与默认路由，也不能获得本机文件写入和 shell 能力。</div><div class="fusion-command"><span>会话内也可管理同一份配置</span><code>/agent-fusion</code></div></div></div>"""
+    view = _replace_once(
+        view,
+        '<div class="field full"><label>Provider</label>',
+        '<div class="field full"><div id="web-vision-status" class="web-vision-status" role="status"></div></div>'
+        '<div class="field full"><label>Provider</label>',
+    )
     javascript = r"""
 function fusionReason(reason){
   const messages={
@@ -78,6 +85,35 @@ function updateWebAssistControls(){
   provider.innerHTML=fusionProviderOptions(selected);
   provider.value=selected;
   updateFusionControls(false);
+  renderWebVisionStatus();
+}
+function webVisionModes(p){
+  const images=(p.conversation||{}).images||{};
+  const names={flash:'极速',expert:'专家',hybrid:'混合'};
+  return ['flash','expert','hybrid'].filter(mode=>images[mode]===true).map(mode=>names[mode]);
+}
+function visionLabel(p){return p.vision===true?' · 已声明视觉':' · 未声明视觉'}
+function renderWebVisionStatus(){
+  const node=$('web-vision-status');
+  if(!node)return;
+  const beta=$('web-assist-enabled').checked;
+  const entries=providers('web').filter(p=>p.enabled!==false);
+  const capable=entries.filter(p=>webVisionModes(p).length>0);
+  let title='';
+  let detail='';
+  if(!entries.length){
+    title='未配置网页视觉';
+    detail='主动识图只使用本地视觉；没有本地视觉时使用 API 视觉。';
+  }else if(!capable.length){
+    title='网页 Provider 未声明视觉';
+    detail='请在“线上模型”编辑页按会话勾选支持图片；当前不会把图片发送给网页。';
+  }else{
+    const models=capable.map(p=>`${p.name||p.id}（${webVisionModes(p).join('、')}）`).join('；');
+    title=beta?'网页视觉可作为最后辅助':'网页视觉已声明，Beta 当前关闭';
+    detail=models+(beta?'。仅用户主动调用 agent-image 时，排在本地/API 主路由之后。':'。不会检查网页登录或启动浏览器。');
+  }
+  node.className='web-vision-status '+(beta&&capable.length?'ready':'off');
+  node.innerHTML=`<strong>${esc(title)}</strong><small>${esc(detail)}</small>`;
 }
 function renderFusion(){
   const fusion=state.fusion||{};
@@ -94,6 +130,7 @@ function renderFusion(){
   $('fusion-provider').value=selected;
   $('fusion-mode').value=fusion.tool_mode||'readonly';
   updateFusionControls(false);
+  renderWebVisionStatus();
   const status=$('fusion-status');
   status.className='fusion-status '+(ready?'ready':(enabled?'warn':'off'));
   status.innerHTML=`<span class="dot ${ready?'on':'off'}"></span><div><strong>${esc(title)}</strong><small>${esc(detail)}</small></div>`;
@@ -147,6 +184,36 @@ async function saveFusion(){
         page,
         "async function saveCommander()",
         javascript + "\nasync function saveCommander()",
+    )
+    page = _replace_once(
+        page,
+        "const pics=(c.images&&Object.keys(c.images).some(k=>c.images[k]))?' · 可识图':'';",
+        "const pics=(c.images&&Object.keys(c.images).some(k=>c.images[k]))?' · 已声明视觉':' · 未声明视觉';",
+    )
+    page = _replace_once(
+        page,
+        "if(kind==='local')return '<b>协作模型</b>：本地执行任务按 API → 本地路由'+limit;",
+        "if(kind==='local')return '<b>协作模型</b>：本地执行任务按 API → 本地路由'+visionLabel(p)+limit;",
+    )
+    page = _replace_once(
+        page,
+        "return `<b>协作模型 · 消息格式 ${fmtMap[p.format]||'Chat'}</b>${limit}`",
+        "return `<b>协作模型 · 消息格式 ${fmtMap[p.format]||'Chat'}</b>${visionLabel(p)}${limit}`",
+    )
+    page = _replace_once(
+        page,
+        "${limitFields('local',p)}</div><div class=\"notice warn\">",
+        "${limitFields('local',p)}<div class=\"field full\">${switchRow('f-vision','支持图片识别','只有模型和接口确实支持图片输入时才开启；有本地视觉时优先于 API',p.vision===true)}</div></div><div class=\"notice warn\">",
+    )
+    page = _replace_once(
+        page,
+        "${limitFields('api',p)}</div><div class=\"notice warn\">",
+        "${limitFields('api',p)}<div class=\"field full\">${switchRow('f-vision','支持图片识别','只有视觉模型才开启；没有本地视觉模型时，AgentImage 使用此 API',p.vision===true)}</div></div><div class=\"notice warn\">",
+    )
+    page = _replace_once(
+        page,
+        "}else{p.endpoint=$('f-endpoint').value.trim();p.model=$('f-model').value.trim()}if(kind==='api')",
+        "}else{p.endpoint=$('f-endpoint').value.trim();p.model=$('f-model').value.trim();p.vision=!!($('f-vision')||{}).checked}if(kind==='api')",
     )
     return page
 

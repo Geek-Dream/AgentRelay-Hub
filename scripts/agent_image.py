@@ -6,10 +6,9 @@
 这样即使本地 Agent 模型不支持图片识别，也能借助线上模型理解图片。
 
 Provider 选择顺序：
-1. 显式 --provider 指定、且支持识图的网页 Provider；
-2. 默认网页 Provider（支持识图时）；
-3. 其他已启用且支持识图的网页 Provider；
-4. 安装时探测/标记 vision=true 的本地模型（OpenAI 兼容接口直接调用）。
+1. 有本地视觉模型时使用本地模型（OpenAI 兼容接口直接调用）；
+2. 没有本地视觉模型时使用标记 vision=true 的 API 模型；
+3. 用户开启 Beta 后，已明确声明图片能力的网页 Provider 最后辅助。
 
 一个 Provider 失败时自动按顺序切换下一个；全部失败时把每个 Provider 的
 失败原因注入 stdout（exit 0），由调用方 Agent 转达用户并引导重新登录/配置。
@@ -260,6 +259,15 @@ def local_vision_providers(config: Mapping[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def api_vision_providers(config: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return API Providers explicitly declared to accept image input."""
+    return [
+        item for item in config.get("api_providers", []) or []
+        if isinstance(item, dict) and item.get("enabled", True)
+        and item.get("vision") and item.get("endpoint") and item.get("model")
+    ]
+
+
 def validate_images(paths: list[str]) -> tuple[list[Path], list[str]]:
     images: list[Path] = []
     problems: list[str] = []
@@ -339,6 +347,18 @@ def _encode_image(path: Path) -> tuple[str, str]:
     return mime, base64.b64encode(path.read_bytes()).decode("ascii")
 
 
+def _vision_content(prompt: str, images: list[Path]) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for image in images:
+        mime, data = _encode_image(image)
+        content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}})
+    return content
+
+
+def _vision_timeout(entry: Mapping[str, Any], image_count: int) -> int:
+    return max(5, int(entry.get("queue_timeout", 30) or 30)) * max(1, image_count) + 30
+
+
 def run_local_provider_attempt(
     entry: Mapping[str, Any], prompt: str, images: list[Path]
 ) -> tuple[bool, str, str]:
@@ -346,12 +366,9 @@ def run_local_provider_attempt(
     endpoint = str(entry.get("endpoint", "")).rstrip("/")
     if not endpoint.endswith("/chat/completions"):
         endpoint += "/chat/completions"
-    timeout = max(5, int(entry.get("queue_timeout", 30) or 30)) * max(1, len(images)) + 30
-    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    timeout = _vision_timeout(entry, len(images))
     try:
-        for image in images:
-            mime, data = _encode_image(image)
-            content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}})
+        content = _vision_content(prompt, images)
     except OSError as exc:
         return False, "", f"读取图片失败（{exc}）"
     payload = {
@@ -380,6 +397,33 @@ def run_local_provider_attempt(
         return False, "", f"{type(exc).__name__}"
 
 
+def run_api_provider_attempt(
+    entry: Mapping[str, Any], prompt: str, images: list[Path]
+) -> tuple[bool, str, str]:
+    """Call a vision-capable API through the existing Chat/Responses/Anthropic adapter."""
+    try:
+        content = _vision_content(prompt, images)
+    except OSError as exc:
+        return False, "", f"读取图片失败（{exc}）"
+    try:
+        try:
+            from .agent_fusion import _call_formatted_model, _chat_answer
+        except ImportError:
+            from agent_fusion import _call_formatted_model, _chat_answer
+        response = _call_formatted_model(
+            entry,
+            [{"role": "user", "content": content}],
+            [],
+            _vision_timeout(entry, len(images)),
+        )
+        answer = _chat_answer(response)
+        if not answer:
+            return False, "", "模型未返回描述内容"
+        return True, answer, ""
+    except Exception as exc:  # noqa: BLE001 - 每个候选失败都要继续给定路由
+        return False, "", f"{type(exc).__name__}"
+
+
 def print_failure_report(failures: list[tuple[str, str]]) -> None:
     """全部失败后注入说明，由调用方 Agent 转达用户。"""
     print("\n【AgentImage 注】")
@@ -387,9 +431,8 @@ def print_failure_report(failures: list[tuple[str, str]]) -> None:
     for name, reason in failures:
         print(f"  - {name}：{reason}")
     print("本次没有图片被成功识别。")
-    installer = "py install.py" if os.name == "nt" else "python3 install.py"
-    print(f"建议：重新运行 {installer} 写入 DeepSeek 的 Cookie，"
-          "或在配置中心检查 Provider 状态后重试。")
+    print("建议：在配置中心检查本地/API 的视觉开关、接口和模型名称；"
+          "只有使用网页最后辅助时才需要开启 Beta 并检查网页登录。")
 
 
 # ---------------------------------------------------------------------------
@@ -398,12 +441,16 @@ def print_failure_report(failures: list[tuple[str, str]]) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="AgentRelay 图片识别中继：本地视觉模型优先，Beta 网页模型最后辅助。"
+        description="AgentRelay 主动图片识别：本地视觉优先，无本地用 API，Beta 网页最后辅助。"
     )
     parser.add_argument("images", nargs="+", help="图片文件路径，最多 5 张。")
     parser.add_argument(
         "--provider", default="",
-        help="匹配指定的本地或网页 Provider；本地始终优先，网页需要开启 Beta。",
+        help="优先匹配指定的本地、API 或网页 Provider；网页需要开启 Beta。",
+    )
+    parser.add_argument(
+        "--user-invoked", action="store_true",
+        help="确认用户当次显式调用了 agent-image；缺少此标记时拒绝发送图片。",
     )
     parser.add_argument(
         "--question", default="",
@@ -418,6 +465,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if not args.user_invoked:
+        print("❌ AgentImage 只能由用户当次显式调用。请使用 /agent-image 或 $agent-image；"
+              "普通识图措辞、Hook 和页面验收都不能被动触发，本次图片未被发送。")
+        return 2
     images, problems = validate_images(list(args.images))
     for problem in problems:
         print(f"⚠️ {problem}")
@@ -454,39 +505,49 @@ def main(argv: list[str] | None = None) -> int:
             print(f"🗜️ {image.name} 已压缩后再发送（超过 {MAX_IMAGE_BYTES // 1024 // 1024}MB 或边长超过 {MAX_IMAGE_DIMENSION}px）。")
         prepared.append(send_path)
 
-    web_assist_enabled = config_manager.web_assist_enabled(config)
     web_candidates = image_capable_web_providers(config)
+    local_candidates = local_vision_providers(config)
+    api_candidates = api_vision_providers(config)
     requested = (args.provider or "").strip().lower()
     requested_note = ""
     if requested:
         aliases = {requested, f"{requested}-web", requested.removesuffix("-web")}
-        match = next((item for item in web_candidates
-                      if str(item.get("id", "")).strip().lower() in aliases), None)
-        entry = config_manager.find_web_provider(config, requested)
-        if entry is not None and not web_assist_enabled:
-            requested_note = "Beta 网页测试协助未开启，已忽略指定的网页 Provider。"
-        elif match is not None:
-            web_candidates = [match] + [item for item in web_candidates if item is not match]
-        elif entry is not None:
-            requested_note = f"指定的 Provider（{requested}）不支持图片，已改用其他支持识图的 Provider。"
-        else:
-            requested_note = f"找不到指定的 Provider（{requested}），已改用其他支持识图的 Provider。"
-
-    local_candidates = local_vision_providers(config)
-    if requested and local_candidates:
-        match = next((item for item in local_candidates
-                      if str(item.get("id", "")).strip().lower() == requested), None)
-        if match is not None:
-            local_candidates = [match] + [item for item in local_candidates if item is not match]
+        web_match = next((item for item in web_candidates
+                          if str(item.get("id", "")).strip().lower() in aliases), None)
+        local_match = next((item for item in local_candidates
+                            if str(item.get("id", "")).strip().lower() == requested), None)
+        api_match = next((item for item in api_candidates
+                          if str(item.get("id", "")).strip().lower() == requested), None)
+        if web_match is not None:
+            web_candidates = [web_match] + [item for item in web_candidates if item is not web_match]
+        if local_match is not None:
+            local_candidates = [local_match] + [item for item in local_candidates if item is not local_match]
+        if api_match is not None:
+            api_candidates = [api_match] + [item for item in api_candidates if item is not api_match]
+        if not any((web_match, local_match, api_match)):
+            configured = any(
+                str(item.get("id", "")).strip().lower() == requested
+                for section in ("local_providers", "api_providers")
+                for item in config.get(section, []) or []
+                if isinstance(item, dict)
+            )
+            web_entry = config_manager.find_web_provider(config, requested)
+            if web_entry is not None and not config_manager.web_assist_enabled(config):
+                requested_note = "Beta 网页测试协助未开启，已忽略指定的网页 Provider。"
+            elif configured or web_entry is not None:
+                requested_note = f"指定的 Provider（{requested}）未启用或未声明视觉，已改用其他可用 Provider。"
+            else:
+                requested_note = f"找不到指定的 Provider（{requested}），已改用其他可用 Provider。"
 
     if requested_note:
         print(f"[Provider] {requested_note}", flush=True)
 
-    if not web_candidates and not local_candidates:
+    if not web_candidates and not local_candidates and not api_candidates:
         print(
             "⚠️ 当前没有任何支持图片识别的模型可用：\n"
             "  - 本地模型需要在配置时确认支持图片识别（vision）。\n"
-            "  - 网页模型仅是最后辅助，需先开启“Beta 网页测试协助”，并启用支持图片的对话模式。\n"
+            "  - 没有本地视觉模型时，使用已声明支持图片识别（vision）的 API 模型。\n"
+            "  - 网页模型仅是次辅助，需先开启“Beta 网页测试协助”，并启用支持图片的对话模式。\n"
             "  请先在配置中心完成配置后再试；本次图片未被发送。"
         )
         return 0
@@ -503,6 +564,19 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         print(f"[Provider] {label} 失败（{reason}），切换下一个候选。", flush=True)
         failures.append((label, reason))
+
+    if not local_candidates:
+        for entry in api_candidates:
+            label = f"API 模型 {entry.get('name', entry.get('id'))}"
+            print(f"[Provider] 没有本地视觉模型，使用 {label} 识别图片。", flush=True)
+            ok, answer, reason = run_api_provider_attempt(entry, prompt, prepared)
+            if ok:
+                print(answer)
+                if not args.no_cache:
+                    cache_store(digest, label, answer)
+                return 0
+            print(f"[Provider] {label} 失败（{reason}），切换下一个候选。", flush=True)
+            failures.append((label, reason))
 
     for entry in web_candidates:
         provider_id = str(entry.get("id", "deepseek-web"))
