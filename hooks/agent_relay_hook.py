@@ -254,7 +254,7 @@ def merge_agent_message_context(stdout_text: str, event_name: str, context: str)
 
 def agent_message_context(payload: dict, event_name: str) -> str:
     """Register this host session and release queued peer messages at safe events."""
-    enabled = os.environ.get("AGENTRELAY_MESSAGES", "off").strip().lower()
+    enabled = os.environ.get("AGENTRELAY_MESSAGES", "on").strip().lower()
     if enabled not in {"1", "on", "true", "yes"} or not isinstance(payload, dict):
         return ""
     session_id = str(

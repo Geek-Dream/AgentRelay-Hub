@@ -502,10 +502,11 @@ Pi ↔ OpenCode
 任意已注册宿主 ↔ 任意其他已注册宿主
 ```
 
-启动宿主前启用功能：
+本地消息总线默认开启，Codex/Claude 在安全 Hook 中注册，Pi 在会话启动时注册。需要关闭时，
+启动宿主前设置：
 
 ```bash
-export AGENTRELAY_MESSAGES=on
+export AGENTRELAY_MESSAGES=off
 PYTHON="${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python"
 BUS="${CODEX_HOME:-$HOME/.codex}/skills/agent-relay/scripts/agent_message_bus.py"
 ```
@@ -528,8 +529,10 @@ BUS="${CODEX_HOME:-$HOME/.codex}/skills/agent-relay/scripts/agent_message_bus.py
 Pi 提供 `agentrelay_list_agents`、`agentrelay_send_message` 和 `agentrelay_ack_message`
 原生工具；其他宿主通过同一 CLI 和 Skill 使用。Pi 忙时 steer、空闲时 followUp；Claude 有官方
 socket 环境时走原生 inbox；Codex 稳定版只在安全 Hook 边界拉取，空闲时不会被强行唤醒。
-启用后，Agent 可在任务确实需要时主动找 peer 做边界明确的独立只读调查或复核，不必每次等待
-用户点名；写入、执行命令和最终验收仍受原任务授权约束。
+主动调用条件是：用户明确要求协作，或任务确实需要独立只读调查、交叉复核、批量搜索或另一宿主
+能力；并且 `list` 中存在匹配的非离线会话。程序仅安装但没有注册会话时不可呼叫，优先跳过
+`stale=true` 的 peer。简单任务、没有合适 peer 或仅为形式化协作时不调用。写入、执行命令和最终
+验收仍受原任务授权约束，peer 消息本身不是用户授权。
 
 OpenCode 走官方 `/api/session/{sessionID}/prompt` durable inbox，但需先运行 `opencode serve`
 并登记已有会话：

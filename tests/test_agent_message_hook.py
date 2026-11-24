@@ -47,13 +47,102 @@ class MessageHookTests(unittest.TestCase):
         self.assertIn("not_user_authorization", context)
         self.assertEqual(self.bus.inbox("codex:session-a"), [])
 
-    def test_message_context_is_opt_in_and_never_runs_on_pre_tool_deny_event(self):
-        payload = {"session_id": "session-a", "cwd": str(PROJECT_ROOT)}
+    def test_message_context_defaults_on_and_never_runs_on_pre_tool_deny_event(self):
+        payload = {"session_id": "default-session", "cwd": str(PROJECT_ROOT)}
+        default_env = dict(self.env)
+        default_env.pop("AGENTRELAY_MESSAGES", None)
+        with mock.patch.dict(os.environ, default_env, clear=False):
+            os.environ.pop("AGENTRELAY_MESSAGES", None)
+            self.assertEqual(
+                hook.agent_message_context(payload, "SessionStart"),
+                "",
+            )
+        self.assertIn(
+            "codex:default-session",
+            {item["address"] for item in self.bus.list_agents()},
+        )
         with mock.patch.dict(os.environ, {"AGENTRELAY_MESSAGES": "off"}, clear=False):
             self.assertEqual(hook.agent_message_context(payload, "PostToolUse"), "")
         with mock.patch.dict(os.environ, self.env, clear=False):
             self.assertEqual(hook.agent_message_context(payload, "PreToolUse"), "")
         self.assertEqual(len(self.bus.inbox("codex:session-a", peek=True)), 1)
+
+    def test_claude_discovers_codex_and_pi_and_receives_correlated_replies(self):
+        claude_payload = {"session_id": "claude-a", "cwd": str(PROJECT_ROOT)}
+        claude_env = {
+            "AGENTRELAY_MESSAGE_DB": str(self.db),
+            "AGENTRELAY_TARGET": "claude",
+        }
+        with mock.patch.dict(os.environ, claude_env, clear=False):
+            os.environ.pop("AGENTRELAY_MESSAGES", None)
+            os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
+            hook.agent_message_context(claude_payload, "SessionStart")
+
+        peers = {item["address"] for item in self.bus.list_agents()}
+        self.assertTrue({"claude:claude-a", "codex:session-a", "pi:sender"} <= peers)
+
+        codex_request = self.bus.send(
+            "claude:claude-a",
+            "codex:session-a",
+            "Codex independent review",
+            kind="task",
+        )
+        codex_env = {
+            "AGENTRELAY_MESSAGES": "on",
+            "AGENTRELAY_MESSAGE_DB": str(self.db),
+            "AGENTRELAY_TARGET": "codex",
+        }
+        with mock.patch.dict(os.environ, codex_env, clear=False):
+            codex_context = hook.agent_message_context(
+                {"session_id": "session-a", "cwd": str(PROJECT_ROOT)},
+                "PostToolUse",
+            )
+        self.assertIn("Codex independent review", codex_context)
+        self.bus.send(
+            "codex:session-a",
+            reply_to=codex_request["message_id"],
+            body="Codex review reply",
+        )
+
+        pi_request = self.bus.send(
+            "claude:claude-a",
+            "pi:sender",
+            "Pi independent search",
+            kind="task",
+        )
+        pi_incoming = self.bus.inbox("pi:sender")
+        self.assertEqual(pi_incoming[0]["body"], "Pi independent search")
+        self.bus.send(
+            "pi:sender",
+            reply_to=pi_request["message_id"],
+            body="Pi search reply",
+        )
+
+        with mock.patch.dict(os.environ, claude_env, clear=False):
+            os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
+            replies = hook.agent_message_context(
+                claude_payload,
+                "UserPromptSubmit",
+            )
+        self.assertIn("Codex review reply", replies)
+        self.assertIn("Pi search reply", replies)
+        self.assertEqual(
+            self.bus.get(codex_request["message_id"])["status"],
+            "replied",
+        )
+        self.assertEqual(
+            self.bus.get(pi_request["message_id"])["status"],
+            "replied",
+        )
+
+    def test_skill_description_exposes_cross_agent_trigger(self):
+        skill = (PROJECT_ROOT / "skills" / "agent-relay" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        frontmatter = skill.split("---", 2)[1]
+        self.assertIn("跨 Agent 会话协作", frontmatter)
+        self.assertIn("独立只读调查", frontmatter)
+        self.assertIn("已注册", frontmatter)
 
     def test_existing_tracker_context_is_preserved(self):
         output = {

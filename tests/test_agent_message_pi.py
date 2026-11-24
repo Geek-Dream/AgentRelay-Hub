@@ -97,7 +97,6 @@ class PiMessageExtensionTests(unittest.TestCase):
                 **os.environ,
                 "HOME": str(root),
                 "CODEX_HOME": str(root / ".codex"),
-                "AGENTRELAY_MESSAGES": "on",
                 "AGENTRELAY_MESSAGE_DB": str(database),
                 "AGENTRELAY_MESSAGE_BUS": str(PROJECT_ROOT / "scripts" / "agent_message_bus.py"),
                 "AGENTRELAY_PYTHON": sys.executable,

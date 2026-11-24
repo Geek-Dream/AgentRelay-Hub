@@ -1917,7 +1917,8 @@ def verify_pi_visible_cards(
     )
     bridge.write_text(
         'const schema = () => ({}); schema.Object = schema; schema.String = schema; '
-        'schema.Optional = schema; export const Type = schema;\n',
+        'schema.Optional = schema; schema.Boolean = schema; schema.Union = schema; '
+        'schema.Literal = schema; export const Type = schema;\n',
         encoding="utf-8",
     )
     driver = isolated_home / "pi-visible-card-driver.mjs"
@@ -1952,6 +1953,7 @@ def verify_pi_visible_cards(
         **os.environ,
         "CODEX_HOME": str(isolated_home),
         "AGENTRELAY_MAIN_HOOK": str(main_hook),
+        "AGENTRELAY_MESSAGES": "off",
         "AGENTRELAY_TARGET": "pi",
         "AGENTRELAY_SHIM": str(shim_path),
         "AGENTRELAY_PYTHON": str(venv_python),
@@ -2040,6 +2042,7 @@ def verify_target(
         "cwd": str(workspace),
         "prompt": "AgentRelay 安装验证，无需处理",
     }
+    hook_env = {**os.environ, "AGENTRELAY_MESSAGES": "off"}
     if target_id in {"claude", "pi", "hermes", "kimi"}:
         command = [
             str(venv_python),
@@ -2054,10 +2057,10 @@ def verify_target(
         if target_id == "hermes":
             # Hermes 真实 payload 不带事件名，验证 shim 的注入路径。
             probe_payload.pop("hook_event_name", None)
-        hook_ok, hook_detail, _ = dry_run_hook(command, probe_payload)
+        hook_ok, hook_detail, _ = dry_run_hook(command, probe_payload, env=hook_env)
     else:
         command = [str(venv_python), *PYTHON_UTF8_ARGS, str(main_hook)]
-        hook_ok, hook_detail, _ = dry_run_hook(command, payload)
+        hook_ok, hook_detail, _ = dry_run_hook(command, payload, env=hook_env)
     checks.append({
         "name": "Hook 干跑",
         "ok": hook_ok,
@@ -2073,6 +2076,7 @@ def verify_target(
                 **os.environ,
                 "CODEX_HOME": str(isolated_home),
                 "AGENTRELAY_MAIN_HOOK": str(main_hook),
+                "AGENTRELAY_MESSAGES": "off",
                 # This probe owns its protocol; an outer Agent session must not
                 # turn a visible-card probe into an already-displayed reminder.
                 "AGENTRELAY_TARGET": target_id,

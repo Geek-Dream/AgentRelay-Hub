@@ -491,6 +491,9 @@ class PiExtensionTests(unittest.TestCase):
             "  Object: (properties) => ({ type: 'object', properties }),\n"
             "  String: (options = {}) => ({ type: 'string', ...options }),\n"
             "  Optional: (schema) => schema,\n"
+            "  Boolean: (options = {}) => ({ type: 'boolean', ...options }),\n"
+            "  Union: (schema) => schema,\n"
+            "  Literal: (value) => ({ const: value }),\n"
             "};\n",
             encoding="utf-8",
         )
@@ -611,6 +614,9 @@ class PiExtensionTests(unittest.TestCase):
             "  Object: (properties) => ({ type: 'object', properties }),\n"
             "  String: (options = {}) => ({ type: 'string', ...options }),\n"
             "  Optional: (schema) => schema,\n"
+            "  Boolean: (options = {}) => ({ type: 'boolean', ...options }),\n"
+            "  Union: (schema) => schema,\n"
+            "  Literal: (value) => ({ const: value }),\n"
             "};\n",
             encoding="utf-8",
         )
@@ -870,6 +876,8 @@ class CodexVerifyTests(unittest.TestCase):
         self.assertTrue(targets.visible_card_in_stdout(card))
 
     def test_verify_codex_target_in_temp_home(self):
+        import sqlite3
+
         tmp = Path(tempfile.mkdtemp(prefix="agentrelay-verify-test-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         hook_dir = tmp / "hooks"
@@ -878,7 +886,8 @@ class CodexVerifyTests(unittest.TestCase):
             shutil.copy2(PROJECT_ROOT / "hooks" / name, hook_dir / name)
         skill_dir = tmp / "skills" / "agent-relay"
         (skill_dir / "scripts").mkdir(parents=True)
-        shutil.copy2(PROJECT_ROOT / "scripts/stdio_encoding.py", skill_dir / "scripts/stdio_encoding.py")
+        for name in ("stdio_encoding.py", "agent_message_bus.py"):
+            shutil.copy2(PROJECT_ROOT / "scripts" / name, skill_dir / "scripts" / name)
         (skill_dir / "SKILL.md").write_text("# AgentRelay", encoding="utf-8")
         (skill_dir / "scripts" / "agent_relay.py").write_text("", encoding="utf-8")
         fusion_dir = tmp / "skills" / "agent-fusion"
@@ -900,7 +909,12 @@ class CodexVerifyTests(unittest.TestCase):
             "id": "codex", "label": "Codex CLI", "level": "full",
             "skill_dir": skill_dir, "hook_dir": hook_dir, "config_path": hooks_json,
         }
-        with patch.dict(os.environ, {"CODEX_HOME": str(tmp)}):
+        message_db = tmp / "message-probes.sqlite3"
+        with patch.dict(os.environ, {
+            "CODEX_HOME": str(tmp),
+            "AGENTRELAY_MESSAGE_DB": str(message_db),
+            "AGENTRELAY_MESSAGES": "on",
+        }):
             checks = targets.verify_target(
                 "codex", meta,
                 Path(sys.executable),
@@ -916,6 +930,16 @@ class CodexVerifyTests(unittest.TestCase):
         ):
             self.assertIn(name, results)
             self.assertTrue(results[name]["ok"], f"{name}: {results[name]['detail']}")
+        registered = []
+        if message_db.exists():
+            with sqlite3.connect(message_db) as connection:
+                registered = [
+                    row[0] for row in connection.execute("SELECT address FROM agents")
+                ]
+        self.assertFalse(
+            [address for address in registered if ":agentrelay-verify-" in address],
+            "安装自检不得把合成会话注册到消息总线",
+        )
 
     def test_verify_claude_requires_a_visible_card_protocol(self):
         tmp = Path(tempfile.mkdtemp(prefix="agentrelay-claude-verify-"))
