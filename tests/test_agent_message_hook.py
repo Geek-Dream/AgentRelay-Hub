@@ -23,7 +23,7 @@ class MessageHookTests(unittest.TestCase):
         self.bus = bus_module.MessageBus(self.db)
         self.bus.register("pi:sender", session_id="sender")
         self.bus.register("codex:session-a", session_id="session-a")
-        self.bus.send(
+        self.send(
             "pi:sender",
             "codex:session-a",
             "peer finding",
@@ -34,6 +34,12 @@ class MessageHookTests(unittest.TestCase):
             "AGENTRELAY_MESSAGE_DB": str(self.db),
             "AGENTRELAY_TARGET": "codex",
         }
+
+    def send(self, *args, **kwargs):
+        if not kwargs.get("reply_to"):
+            kwargs.setdefault("review_action", "new")
+            kwargs.setdefault("review_reason", "Independent peer input is needed")
+        return self.bus.send(*args, **kwargs)
 
     def test_safe_hook_event_registers_and_renders_peer_context(self):
         payload = {
@@ -67,6 +73,37 @@ class MessageHookTests(unittest.TestCase):
             self.assertEqual(hook.agent_message_context(payload, "PreToolUse"), "")
         self.assertEqual(len(self.bus.inbox("codex:session-a", peek=True)), 1)
 
+    def test_claude_native_send_message_cannot_bypass_task_review(self):
+        payload = {
+            "session_id": "claude-a",
+            "tool_name": "SendMessage",
+            "tool_input": {"to": "another-claude", "message": "duplicate task"},
+        }
+        env = {
+            "AGENTRELAY_MESSAGES": "on",
+            "AGENTRELAY_MESSAGE_DB": str(self.db),
+            "AGENTRELAY_TARGET": "claude",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            reason = hook.agent_message_context(payload, "PreToolUse")
+            self.assertIn("task review", reason)
+            self.assertIn("history", reason)
+            self.assertEqual(
+                hook.agent_message_context(
+                    {**payload, "tool_name": "Read"},
+                    "PreToolUse",
+                ),
+                "",
+            )
+        merged = json.loads(hook.merge_agent_message_context(
+            "",
+            "PreToolUse",
+            reason,
+        ))
+        output = merged["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "deny")
+        self.assertIn("task review", output["permissionDecisionReason"])
+
     def test_claude_discovers_codex_and_pi_and_receives_correlated_replies(self):
         claude_payload = {"session_id": "claude-a", "cwd": str(PROJECT_ROOT)}
         claude_env = {
@@ -81,7 +118,7 @@ class MessageHookTests(unittest.TestCase):
         peers = {item["address"] for item in self.bus.list_agents()}
         self.assertTrue({"claude:claude-a", "codex:session-a", "pi:sender"} <= peers)
 
-        codex_request = self.bus.send(
+        codex_request = self.send(
             "claude:claude-a",
             "codex:session-a",
             "Codex independent review",
@@ -98,13 +135,13 @@ class MessageHookTests(unittest.TestCase):
                 "PostToolUse",
             )
         self.assertIn("Codex independent review", codex_context)
-        self.bus.send(
+        self.send(
             "codex:session-a",
             reply_to=codex_request["message_id"],
             body="Codex review reply",
         )
 
-        pi_request = self.bus.send(
+        pi_request = self.send(
             "claude:claude-a",
             "pi:sender",
             "Pi independent search",
@@ -112,7 +149,7 @@ class MessageHookTests(unittest.TestCase):
         )
         pi_incoming = self.bus.inbox("pi:sender")
         self.assertEqual(pi_incoming[0]["body"], "Pi independent search")
-        self.bus.send(
+        self.send(
             "pi:sender",
             reply_to=pi_request["message_id"],
             body="Pi search reply",
@@ -161,7 +198,7 @@ class MessageHookTests(unittest.TestCase):
         self.assertIn("peer context", context)
 
     def test_when_idle_message_is_released_at_the_next_prompt_boundary(self):
-        message = self.bus.send(
+        message = self.send(
             "pi:sender",
             "codex:session-a",
             "idle-only finding",

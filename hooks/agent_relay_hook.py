@@ -245,6 +245,13 @@ def merge_agent_message_context(stdout_text: str, event_name: str, context: str)
         output["hookSpecificOutput"] = hook_output
     expected_event = "PostToolUse" if event_name == "PostToolUseFailure" else event_name
     hook_output["hookEventName"] = expected_event
+    if event_name == "PreToolUse":
+        existing_reason = str(hook_output.get("permissionDecisionReason") or "").strip()
+        hook_output["permissionDecision"] = "deny"
+        hook_output["permissionDecisionReason"] = (
+            existing_reason + "\n\n" + context if existing_reason else context
+        )
+        return json.dumps(output, ensure_ascii=False)
     existing = str(hook_output.get("additionalContext") or "").strip()
     hook_output["additionalContext"] = (
         existing + "\n\n" + context if existing else context
@@ -272,6 +279,19 @@ def agent_message_context(payload: dict, event_name: str) -> str:
             import agent_message_bus
         target = os.environ.get("AGENTRELAY_TARGET", "codex").strip().lower() or "codex"
         address = agent_message_bus.session_address(target, session_id)
+        if event_name == "PreToolUse":
+            tool_name = str(
+                payload.get("tool_name") or payload.get("toolName") or ""
+            )
+            if target == "claude" and tool_name == "SendMessage":
+                return (
+                    "Native Claude SendMessage bypasses AgentRelay task review. "
+                    "First run agent_message_bus.py history for this sender, then "
+                    "use agent_message_bus.py send with --review-action "
+                    "new|follow_up|skip and --review-reason. AgentRelay will use "
+                    "the official Claude messaging socket when it is available."
+                )
+            return ""
         bus = agent_message_bus.MessageBus()
         if event_name == "Stop":
             bus.heartbeat(address, state="idle")

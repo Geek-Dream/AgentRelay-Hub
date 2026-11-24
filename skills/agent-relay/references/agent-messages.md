@@ -21,7 +21,8 @@ Windows 使用 `%USERPROFILE%\.codex\agentrelay-env\Scripts\python.exe`，其余
 `AGENTRELAY_MESSAGE_DB`。
 
 Codex/Claude 在安全 Hook 事件中注册和拉取；Pi 原生扩展自动注册，并提供
-`agentrelay_list_agents`、`agentrelay_send_message`、`agentrelay_ack_message` 工具。列出 peer：
+`agentrelay_list_agents`、`agentrelay_task_history`、`agentrelay_send_message`、
+`agentrelay_ack_message` 工具。列出 peer：
 
 ```bash
 "$PYTHON" "$BUS" list
@@ -31,6 +32,28 @@ Codex/Claude 在安全 Hook 事件中注册和拉取；Pi 原生扩展自动注�
 `host` 是注册标签，不限于上述示例；其他程序注册后也会出现在同一个列表中。程序仅安装但没有
 活跃会话注册时不可呼叫。默认列表排除 `offline`，主动调用还应跳过 `stale=true` 的会话，除非
 用户明确接受消息只排队、等待对方下次活动。
+
+## 发送前必要性审核
+
+每个非回复消息先查询当前发送方的近期任务，只读取有界摘要，不加载完整对话：
+
+```bash
+"$PYTHON" "$BUS" history --agent "claude:CLAUDE_SESSION" \
+  --to "codex:CODEX_SESSION" --limit 20
+```
+
+当前 Agent 必须比较任务目标、接收方、工作区和状态，再明确选择一种审核结果：
+
+- `new`：确实是必要的新任务；可传稳定的 `--task-id`，总线会在发送事务内原子预留。
+- `follow_up`：已有任务出现新信息、新错误或明确追问；必须传 `--related-task-id`，沿用原任务。
+- `skip`：已有任务正在处理、已经得到答案，或没有必要协作；只记录审核，不投递消息。
+
+三种动作都需要简短的 `--review-reason`。语义是否相同由当前 Agent 判断，不能只用文本哈希；
+系统负责相同 `task_id` 的原子防重。`queued/dispatched/delivered/read` 的任务仍属于 active，
+不要因为尚未回复就再建一个新任务。`reply_to` 的直接回复已经关联原任务，不需要重复审核。
+
+启用总线时，Claude 原生 `SendMessage` 会被 PreToolUse Hook 拒绝，防止绕过历史审核。改走总线
+并不代表放弃官方通道：接收方有官方 messaging socket 时，适配器仍使用该 socket 投递。
 
 ## 何时主动调用
 
@@ -54,12 +77,17 @@ Codex/Claude 在安全 Hook 事件中注册和拉取；Pi 原生扩展自动注�
 
 ```bash
 "$PYTHON" "$BUS" list
+"$PYTHON" "$BUS" history --agent "claude:CLAUDE_SESSION" \
+  --to "codex:CODEX_SESSION"
 "$PYTHON" "$BUS" send \
   --from "claude:CLAUDE_SESSION" --to "codex:CODEX_SESSION" --kind task \
+  --review-action new --review-reason "需要独立只读检查 schema" \
   --body "目标：只读检查 schema。工作区：/path/project。限制：不得修改文件。请按 message_id 回复结论。"
 
+"$PYTHON" "$BUS" history --agent "claude:CLAUDE_SESSION" --to "pi:PI_SESSION"
 "$PYTHON" "$BUS" send \
   --from "claude:CLAUDE_SESSION" --to "pi:PI_SESSION" --kind task \
+  --review-action new --review-reason "需要独立搜索相关配置" \
   --body "目标：独立搜索相关配置。只读；请按 message_id 回复文件和结论。"
 ```
 
@@ -72,6 +100,8 @@ Codex/Claude 在安全 Hook 事件中注册和拉取；Pi 原生扩展自动注�
 
 需要时设置 `--ttl`、
 `--idempotency-key`、`--delivery when_idle` 和 `--max-hops`。不要用自动无限互答循环。
+同一任务需要补充信息时使用 `--review-action follow_up --related-task-id "task_ID"`；发现重复或
+没有必要发送时使用 `--review-action skip --related-task-id "task_ID" --review-reason "原因"`。
 
 ```bash
 "$PYTHON" "$BUS" get --message-id "msg_ID"

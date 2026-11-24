@@ -98,6 +98,7 @@ SCRIPT_FILES = (
     "deletion_policy.py",
     "delivery_audit.py",
     "agent_message_bus.py",
+    "agent_message_probe.py",
     "agent_message_adapters.py",
     "agent_message_pi.ts",
     "app_close_policy.py",
@@ -1308,10 +1309,15 @@ def choose_install_targets() -> tuple[list[str], str]:
         for target_id, meta in registry.items()
     }
     ids = list(registry)
-    checked = {
-        target_id for target_id, meta in registry.items()
-        if installed[target_id]
-    }
+    previous, _ = _load_local_config()
+    saved_targets = previous.get("install_targets")
+    if isinstance(saved_targets, list):
+        checked = {
+            target_id for target_id in saved_targets
+            if isinstance(target_id, str) and target_id in registry
+        }
+    else:
+        checked = {target_id for target_id in ids if installed[target_id]}
 
     height = 0
     interactive = sys.stdout.isatty()
@@ -1780,6 +1786,14 @@ def run_web_configurator() -> None:
         }
         result["unsupported_agents"] = list(at.UNSUPPORTED_AGENTS)
         result["install_targets"] = config.get("install_targets") if config.get("install_targets") is not None else []
+        try:
+            from scripts import agent_message_probe
+            from scripts.agent_message_bus import MessageBus
+            result["message_agents"] = agent_message_probe.list_peers(MessageBus())
+            result["message_agents_error"] = ""
+        except Exception as exc:
+            result["message_agents"] = []
+            result["message_agents_error"] = str(exc)
         catalog = load_install_skill_catalog(list(registry))
         result["skill_catalog"] = skill_catalog.public_catalog(catalog)
         stored_skills = config.get("install_skills")
@@ -1921,6 +1935,16 @@ def run_web_configurator() -> None:
             from urllib.parse import parse_qs as parse_query, urlsplit
             parsed = urlsplit(self.path)
             if parsed.path == "/api/config": self._send({"config":public_config()});return
+            if parsed.path == "/api/messages/peers":
+                from scripts import agent_message_probe
+                from scripts.agent_message_bus import MessageBus
+                self._send({"agents": agent_message_probe.list_peers(MessageBus())});return
+            if parsed.path == "/api/messages/probe":
+                from scripts import agent_message_probe
+                from scripts.agent_message_bus import MessageBus
+                raw_ids = parse_query(parsed.query).get("ids", [""])[0]
+                ids = [value.strip() for value in raw_ids.split(",") if value.strip()]
+                self._send(agent_message_probe.probe_status(MessageBus(), ids));return
             if parsed.path == "/api/login-status":
                 provider_id = parse_query(parsed.query).get("id", [""])[0]
                 item = next((x for x in config.get("web_providers", []) if isinstance(x, dict) and x.get("id") == provider_id), {})
@@ -1936,6 +1960,12 @@ def run_web_configurator() -> None:
             try:
                 if self.path == "/api/close": stopped.set();self._send({"ok":True});return
                 data=self._body()
+                if self.path == "/api/messages/probe":
+                    from scripts import agent_message_probe
+                    from scripts.agent_message_bus import MessageBus
+                    self._send(agent_message_probe.start_probe(
+                        MessageBus(), str(data.get("sender") or ""), data.get("targets")
+                    ));return
                 if self.path == "/api/environment":
                     configured_path = str((config.get("commander") or {}).get("terminal_path") or "").strip()
                     terminal_ok, terminal_detail = commander_terminal_status(configured_path)
@@ -2200,7 +2230,9 @@ def main(argv=None) -> int:
         install_and_verify_chromium()
         selected = set(target_ids or selected_targets)
         installing_codex = not interactive_config or "codex" in selected
-        if installing_codex and target_ids:
+        if interactive_config and target_action == "web":
+            pass
+        elif installing_codex and target_ids:
             install_files()
             merge_hooks_json()
         elif selected:
@@ -2230,6 +2262,9 @@ def main(argv=None) -> int:
             save_config(config, CODEX_HOME)
         elif interactive_config:
             # 用户输入 web/0 选择只开网页：完全不打扰安装流程
+            config, save_config = _load_local_config()
+            config["install_targets"] = selected_targets
+            save_config(config, CODEX_HOME)
             print("\n已跳过 Agent 安装，直接打开网页配置。")
         elif not args.no_menu and argv is None:
             print("\n[提示] 当前 stdin 不是交互终端，未打开配置网页。")

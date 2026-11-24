@@ -137,6 +137,8 @@ class AdapterTests(unittest.TestCase):
             "codex:sender",
             "pi:receiver",
             "queued for pi",
+            review_action="new",
+            review_reason="Verify queued adapter delivery semantics",
             push=True,
         )
         self.assertEqual(message["status"], "queued")

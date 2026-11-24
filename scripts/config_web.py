@@ -218,6 +218,134 @@ async function saveFusion(){
     return page
 
 
+def _apply_message_probe_ui(page: str) -> str:
+    css = r"""
+.message-probe-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.message-peer-option{display:flex;align-items:flex-start;gap:10px;min-width:0;padding:11px 12px;border:1px solid var(--line);border-radius:6px;cursor:pointer}.message-peer-option input{flex:0 0 16px;width:16px;height:16px;min-height:16px;margin:3px 0 0;padding:0;accent-color:var(--teal)}.message-peer-option>span{flex:1 1 0;min-width:0}.message-peer-option strong,.message-peer-option small{display:block;overflow-wrap:anywhere}.message-peer-option strong{font-size:12.5px}.message-peer-option small{margin-top:3px;color:var(--muted);font-size:11px;line-height:1.5}.message-probe-result{margin-top:10px;padding:11px 12px;border-left:3px solid var(--line-strong);background:var(--surface-2);overflow-wrap:anywhere}.message-probe-result.connected{border-left-color:var(--teal)}.message-probe-result.wait{border-left-color:var(--amber)}.message-probe-result.failed{border-left-color:var(--red)}.message-probe-result strong,.message-probe-result small{display:block}.message-probe-result small{margin-top:3px;color:var(--muted);line-height:1.55}.message-probe-summary{margin-bottom:10px;font-weight:650}#message-probe-start:disabled{opacity:.48;cursor:not-allowed;transform:none;box-shadow:none}@media(max-width:640px){.message-probe-grid{grid-template-columns:1fr}}
+"""
+    section = r"""<section class="section-block" id="message-probe"><div class="section-head"><div><span class="section-code">SESSION BUS // CORRELATED REPLY</span><h2>Agent 会话连通检测</h2></div><p class="hint">仅显示近期有真实心跳的注册会话。已投递不等于已回复。</p></div><div class="card"><div class="form"><div class="field full"><label for="message-probe-sender">发起会话</label><select id="message-probe-sender" onchange="renderMessagePeers()"></select></div><div class="field full"><label>接收会话（1–8 个）</label><div class="message-probe-grid" id="message-probe-targets"></div><p class="hint" id="message-probe-availability"></p></div></div><div class="toolbar"><button class="btn" type="button" onclick="refreshMessagePeers()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></svg><span>刷新会话</span></button><button class="btn primary" id="message-probe-start" type="button" onclick="startMessageProbe()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg><span>开始检测</span></button></div><div id="message-probe-results" class="check-result" role="status" aria-live="polite"></div></div></section>"""
+    javascript = r"""
+let messagePeers=Array.isArray(state.message_agents)?state.message_agents:[];
+let messageProbeTimer=null;
+let messageProbeDeadline=0;
+let messageProbeBusy=false;
+let messageProbePolling=false;
+function setMessageProbeBusy(value){
+  messageProbeBusy=value;
+  const button=$('message-probe-start');
+  if(button)button.disabled=value||messagePeers.length<2;
+}
+function renderMessagePeers(){
+  const select=$('message-probe-sender');
+  if(!select)return;
+  const previousSender=select.value;
+  const selected=new Set([...document.querySelectorAll('.message-probe-target:checked')].map(box=>box.value));
+  select.innerHTML=messagePeers.length?messagePeers.map(peer=>`<option value="${esc(peer.address)}">${esc(peer.name||peer.address)} · ${esc(peer.host)}</option>`).join(''):'<option value="">暂无在线会话</option>';
+  if(messagePeers.some(peer=>peer.address===previousSender))select.value=previousSender;
+  const sender=select.value;
+  const targets=$('message-probe-targets');
+  const recipients=messagePeers.filter(peer=>peer.address!==sender);
+  targets.innerHTML=recipients.map(peer=>{
+    const detail=[peer.address,peer.workspace||''].filter(Boolean).join(' · ');
+    return `<label class="message-peer-option"><input class="message-probe-target" type="checkbox" value="${esc(peer.address)}" ${selected.has(peer.address)?'checked':''}><span><strong>${esc(peer.name||peer.address)}</strong><small>${esc(detail)}</small></span></label>`;
+  }).join('')||'<div class="empty">还需要另一个在线会话。</div>';
+  const availability=$('message-probe-availability');
+  const initialError=state.message_agents_error||'';
+  availability.textContent=initialError||(messagePeers.length<2?'至少需要两个近期有心跳的会话；程序已安装但未注册时不会出现在这里。':`发现 ${messagePeers.length} 个可检测会话，检测等待上限为 20 秒。`);
+  setMessageProbeBusy(messageProbeBusy);
+}
+async function refreshMessagePeers(){
+  try{
+    const data=await api('/api/messages/peers');
+    messagePeers=Array.isArray(data.agents)?data.agents:[];
+    state.message_agents=messagePeers;
+    state.message_agents_error='';
+    renderMessagePeers();
+  }catch(error){toast(error.message)}
+}
+function messageProbeStatus(item,timedOut){
+  const labels={queued:'等待宿主接收',sending:'正在投递',dispatched:'已写入宿主入口，等待回复',delivered:'已投递，等待回复',read:'已读，等待回复',replied:'已回复，连通',failed:'失败',expired:'已过期'};
+  const pending=['queued','sending','dispatched','delivered','read'].includes(item.status);
+  if(timedOut&&pending)return '等待关联回复超时 · 最后状态：'+(labels[item.status]||item.status);
+  return labels[item.status]||item.status||'未知状态';
+}
+function renderMessageProbeResults(data,timedOut=false){
+  const probes=Array.isArray(data.probes)?data.probes:[];
+  const connected=probes.filter(item=>item.connected===true&&item.status==='replied').length;
+  const waiting=probes.some(item=>['queued','sending','dispatched','delivered','read'].includes(item.status));
+  const summary=timedOut&&waiting?`${connected}/${probes.length} 个会话已回复；其余会话等待超时，未判定连通。`:`${connected}/${probes.length} 个会话已回复${waiting?'，正在等待其余关联回复…':'。'}`;
+  $('message-probe-results').innerHTML=`<div class="message-probe-summary">${esc(summary)}</div>`+probes.map(item=>{
+    const ok=item.connected===true&&item.status==='replied';
+    const failed=['failed','expired'].includes(item.status);
+    const peer=messagePeers.find(candidate=>candidate.address===item.to)||{};
+    const error=item.last_error?`<small>${esc(item.last_error)}</small>`:'';
+    return `<div class="message-probe-result ${ok?'connected':failed?'failed':'wait'}"><strong>${esc(peer.name||item.to)} · ${esc(messageProbeStatus(item,timedOut))}</strong><small>${esc(item.to)} · ${esc(item.message_id)}</small>${error}</div>`;
+  }).join('');
+}
+function finishMessageProbe(){
+  clearInterval(messageProbeTimer);
+  messageProbeTimer=null;
+  messageProbeDeadline=0;
+  setMessageProbeBusy(false);
+}
+async function pollMessageProbe(messageIds){
+  if(messageProbePolling)return;
+  messageProbePolling=true;
+  try{
+    const data=await api('/api/messages/probe?ids='+encodeURIComponent(messageIds.join(',')));
+    const timedOut=Date.now()>=messageProbeDeadline;
+    renderMessageProbeResults(data,timedOut);
+    const waiting=(data.probes||[]).some(item=>['queued','sending','dispatched','delivered','read'].includes(item.status));
+    if(!waiting||timedOut)finishMessageProbe();
+  }catch(error){
+    finishMessageProbe();
+    $('message-probe-results').textContent='检测状态读取失败：'+error.message;
+  }finally{messageProbePolling=false}
+}
+async function startMessageProbe(){
+  const sender=$('message-probe-sender').value;
+  const targets=[...document.querySelectorAll('.message-probe-target:checked')].map(box=>box.value);
+  if(!sender||targets.length<1||targets.length>8){toast('请选择一个发起会话和 1–8 个接收会话');return}
+  clearInterval(messageProbeTimer);
+  setMessageProbeBusy(true);
+  $('message-probe-results').textContent=`正在向 ${targets.length} 个会话发送关联探测…`;
+  try{
+    const data=await api('/api/messages/probe',{method:'POST',body:JSON.stringify({sender,targets})});
+    const messageIds=(data.probes||[]).map(item=>item.message_id);
+    if(!messageIds.length)throw Error('消息总线没有返回探测 ID');
+    renderMessageProbeResults(data,false);
+    messageProbeDeadline=Date.now()+20000;
+    const waiting=(data.probes||[]).some(item=>['queued','sending','dispatched','delivered','read'].includes(item.status));
+    if(!waiting){finishMessageProbe();return}
+    messageProbeTimer=setInterval(()=>pollMessageProbe(messageIds),1500);
+  }catch(error){
+    finishMessageProbe();
+    $('message-probe-results').textContent='无法开始检测：'+error.message;
+  }
+}
+"""
+    page = _replace_once(page, "</head>", f"<style>{css}</style></head>")
+    page = _replace_once(
+        page,
+        '<div class="card target-panel" id="targets-card"></div>',
+        section + '<div class="card target-panel" id="targets-card"></div>',
+    )
+    page = _replace_once(
+        page,
+        "const saved=state.install_targets||['codex'];",
+        "const saved=Array.isArray(state.install_targets)?state.install_targets:[];",
+    )
+    page = _replace_once(
+        page,
+        "async function applyTargets()",
+        javascript + "\nasync function applyTargets()",
+    )
+    return _replace_once(
+        page,
+        "initTheme();render();",
+        "initTheme();render();renderMessagePeers();",
+    )
+
+
 def build_config_page(config: dict[str, Any]) -> str:
     state = json.dumps(config, ensure_ascii=False).replace("</", "<\\/")
     page = r"""<!doctype html>
@@ -709,4 +837,5 @@ async function testProvider(kind,id){try{const data=await api('/api/test',{metho
 async function scanLocal(){try{const data=await api('/api/scan-local');const box=$('local-scan');box.style.display='block';box.innerHTML=data.found.length?'检测到本地服务：'+data.found.map(x=>`<button class="btn" onclick="useLocal('${esc(x.endpoint)}','${esc(x.models[0]||'')}')">${esc(x.name)} · ${esc(x.endpoint)} · ${esc(x.models.join('、')||'未返回模型')}</button>`).join(' '):'没有发现 Ollama、LM Studio、vLLM 或 llama.cpp。llama.cpp 默认常见端口为 8080；请确认它启动了 OpenAI 兼容服务器（/v1/models）。';toast(data.found.length?'扫描完成':'未发现兼容本地服务')}catch(error){toast(error.message)}}function useLocal(endpoint,model){showForm('local');$('f-endpoint').value=endpoint;$('f-model').value=model}
 async function checkEnvironment(){try{const data=await api('/api/environment');const fail=data.checks.filter(x=>!x.ok);$('environment').innerHTML='<strong>环境检查检查的是安装链路，不检查模型登录。</strong><br>'+data.checks.map(x=>`${x.ok?'✓':'!'} ${esc(x.name)}：${esc(x.detail)}（${esc(x.reason)}）`).join('<br>');toast(fail.length?'未找到：'+fail.map(x=>x.name).join('、'):'环境检查通过')}catch(error){toast(error.message)}}async function initializeFiles(){try{const data=await api('/api/initialize',{method:'POST'});toast(data.message)}catch(error){toast(error.message)}}async function closeApp(){try{await api('/api/close',{method:'POST'});document.body.innerHTML='<main class="app"><div class="card"><h1>配置已完成</h1><p>本地配置服务已关闭，可以安全关闭这个页面。</p></div></main>'}catch(error){toast(error.message)}}initTheme();render();
 </script></body></html>"""
-    return _apply_fusion_ui(page).replace("__CONFIG__", state)
+    page = _apply_message_probe_ui(_apply_fusion_ui(page))
+    return page.replace("__CONFIG__", state)

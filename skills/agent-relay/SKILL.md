@@ -58,6 +58,16 @@ gstack 式重流程复制到每个普通任务。
 在线 peer、仅为闲聊或形式化协作时不调用。自主委派默认只读，写入和命令执行仍须属于用户已经
 批准的范围。完整选择、投递和回执条件见 `references/agent-messages.md`。
 
+每个非回复消息在发送前必须先用 `agent_message_bus.py history --agent "<发送方>"` 查看当前发送方
+的相关任务摘要，比较目标、接收方、工作区和状态，再显式选择 `--review-action`：
+`new` 表示确有必要的新任务，`follow_up` 配合 `--related-task-id` 补充原任务，`skip` 表示重复或
+没有必要而不发送。三种选择都必须写简短 `--review-reason`。不要只按文本相似度判断，也不要把
+已完成的旧任务机械重发；出现新错误或新信息时才续办。`reply_to` 的直接回复沿用原任务，不重复
+创建审核。总线在同一 SQLite 事务内预留新任务，防止并发重复占用。
+
+Claude 会话不得用原生 `SendMessage` 绕过这套审核；启用消息总线时 Hook 会拒绝该入口并提示改走
+总线。总线投递仍优先使用官方 Claude messaging socket，不会重复调用两条发送通道。
+
 简单小改由 Hook 自动记录 `light`，不显示用户卡，也不要求主 Agent 或用户再运行选档命令。
 最低档为 `standard` 或更高时，主 Agent 才需要在首次写入前选档；需要用户批准的任务则在
 `resolve-intent --decision approve` 中带 `--work-profile`。工作档不得低于 Hook 给出的

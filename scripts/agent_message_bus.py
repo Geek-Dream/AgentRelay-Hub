@@ -30,9 +30,12 @@ AGENT_STATES = {"idle", "busy", "offline"}
 MESSAGE_KINDS = {"message", "task", "reply"}
 DELIVERY_MODES = {"safe_boundary", "when_idle"}
 CONTEXT_MODES = {"current", "isolated"}
+REVIEW_ACTIONS = {"new", "follow_up", "skip"}
 ADAPTERS = {"pull", "claude_socket", "opencode_http"}
 ACTIVE_MESSAGE_STATES = {"queued", "sending", "dispatched", "delivered", "read"}
 MAX_BODY_CHARS = 65536
+MAX_TASK_ID_CHARS = 160
+MAX_REVIEW_REASON_CHARS = 500
 STALE_AFTER_SECONDS = 300.0
 
 
@@ -70,6 +73,13 @@ def validate_address(address: str) -> str:
     if not ADDRESS_RE.fullmatch(value):
         raise MessageBusError(f"Invalid agent address: {value!r}")
     return value
+
+
+def validate_task_id(value: str, *, field: str = "task_id") -> str:
+    task_id = str(value or "").strip()
+    if len(task_id) > MAX_TASK_ID_CHARS:
+        raise MessageBusError(f"{field} exceeds {MAX_TASK_ID_CHARS} characters")
+    return task_id
 
 
 def render_envelope(message: Mapping[str, Any]) -> str:
@@ -155,6 +165,35 @@ class MessageBus:
                     ON messages(recipient, status, created_at);
                 CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id, created_at);
 
+                CREATE TABLE IF NOT EXISTS collaboration_tasks (
+                    task_id TEXT NOT NULL,
+                    sender TEXT NOT NULL,
+                    recipient TEXT NOT NULL,
+                    objective TEXT NOT NULL,
+                    workspace TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(task_id, sender, recipient),
+                    FOREIGN KEY(sender) REFERENCES agents(address),
+                    FOREIGN KEY(recipient) REFERENCES agents(address)
+                );
+                CREATE INDEX IF NOT EXISTS idx_tasks_sender_activity
+                    ON collaboration_tasks(sender, updated_at, created_at);
+
+                CREATE TABLE IF NOT EXISTS send_reviews (
+                    review_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    sender TEXT NOT NULL,
+                    recipient TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(sender) REFERENCES agents(address),
+                    FOREIGN KEY(recipient) REFERENCES agents(address)
+                );
+                CREATE INDEX IF NOT EXISTS idx_reviews_task
+                    ON send_reviews(sender, recipient, task_id, created_at);
+
                 CREATE TABLE IF NOT EXISTS delivery_attempts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     message_id TEXT NOT NULL,
@@ -164,6 +203,22 @@ class MessageBus:
                     detail TEXT NOT NULL DEFAULT '',
                     FOREIGN KEY(message_id) REFERENCES messages(message_id)
                 );
+                """
+            )
+            # Existing databases keep their history and become eligible for
+            # follow-up review without rewriting the original messages.
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO collaboration_tasks(
+                    task_id, sender, recipient, objective, workspace,
+                    created_at, updated_at
+                )
+                SELECT m.task_id, m.sender, m.recipient, MIN(m.body),
+                       COALESCE(a.workspace, ''), MIN(m.created_at), MAX(m.updated_at)
+                FROM messages m
+                LEFT JOIN agents a ON a.address=m.sender
+                WHERE m.reply_to IS NULL
+                GROUP BY m.task_id, m.sender, m.recipient
                 """
             )
         try:
@@ -394,6 +449,109 @@ class MessageBus:
         with self._connection() as connection:
             return self._public_message(self._message(connection, message_id), envelope=True)
 
+    def _record_review(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        task_id: str,
+        sender: str,
+        recipient: str,
+        action: str,
+        reason: str,
+        now: float,
+    ) -> dict[str, Any]:
+        review = {
+            "review_id": "review_" + uuid.uuid4().hex,
+            "task_id": task_id,
+            "action": action,
+            "reason": reason,
+            "created_at": now,
+        }
+        connection.execute(
+            """
+            INSERT INTO send_reviews(
+                review_id, task_id, sender, recipient, action, reason, created_at
+            ) VALUES(?,?,?,?,?,?,?)
+            """,
+            (
+                review["review_id"], task_id, sender, recipient,
+                action, reason, now,
+            ),
+        )
+        return review
+
+    def task_history(
+        self,
+        agent: str,
+        *,
+        recipient: str = "",
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Return bounded task summaries for an agent's pre-send review."""
+        address = validate_address(agent)
+        count = max(1, min(int(limit), 50))
+        with self._connection() as connection, self._transaction(connection):
+            self._expire(connection, self.now())
+            self._agent(connection, address)
+            parameters: list[Any] = [address]
+            query = "SELECT * FROM collaboration_tasks WHERE sender=?"
+            if recipient:
+                query += " AND recipient=?"
+                parameters.append(self._resolve(connection, recipient))
+            query += " ORDER BY updated_at DESC, created_at DESC LIMIT ?"
+            parameters.append(count)
+            tasks = connection.execute(query, parameters).fetchall()
+            results = []
+            for task in tasks:
+                messages = connection.execute(
+                    """
+                    SELECT * FROM messages
+                    WHERE task_id=? AND (
+                        (sender=? AND recipient=?) OR (sender=? AND recipient=?)
+                    )
+                    ORDER BY created_at, message_id
+                    """,
+                    (
+                        task["task_id"], task["sender"], task["recipient"],
+                        task["recipient"], task["sender"],
+                    ),
+                ).fetchall()
+                if not messages:
+                    continue
+                latest = messages[-1]
+                if latest["kind"] == "reply":
+                    status = "replied"
+                elif latest["status"] in ACTIVE_MESSAGE_STATES:
+                    status = "active"
+                else:
+                    status = str(latest["status"])
+                reviews = connection.execute(
+                    """
+                    SELECT action, reason, created_at FROM send_reviews
+                    WHERE sender=? AND recipient=? AND task_id=?
+                    ORDER BY created_at DESC, review_id DESC LIMIT 5
+                    """,
+                    (task["sender"], task["recipient"], task["task_id"]),
+                ).fetchall()
+                objective = str(task["objective"])
+                results.append({
+                    "task_id": task["task_id"],
+                    "from": task["sender"],
+                    "to": task["recipient"],
+                    "workspace": task["workspace"],
+                    "objective": objective[:500],
+                    "objective_truncated": len(objective) > 500,
+                    "status": status,
+                    "last_status": latest["status"],
+                    "last_message_id": latest["message_id"],
+                    "last_message_kind": latest["kind"],
+                    "message_count": len(messages),
+                    "created_at": float(task["created_at"]),
+                    "updated_at": max(float(item["updated_at"]) for item in messages),
+                    "reviews": [dict(review) for review in reviews],
+                })
+            return results
+
     def send(
         self,
         sender: str,
@@ -405,12 +563,21 @@ class MessageBus:
         context_mode: str = "current",
         reply_to: str = "",
         task_id: str = "",
+        related_task_id: str = "",
+        review_action: str = "",
+        review_reason: str = "",
         ttl: int | float = 3600,
         idempotency_key: str = "",
         max_hops: int = 8,
         push: bool = True,
     ) -> dict[str, Any]:
         source = validate_address(sender)
+        task_id = validate_task_id(task_id)
+        related_task_id = validate_task_id(
+            related_task_id,
+            field="related_task_id",
+        )
+        review_reason = str(review_reason or "").strip()
         if kind not in MESSAGE_KINDS:
             raise MessageBusError(f"Invalid message kind: {kind}")
         if delivery not in DELIVERY_MODES:
@@ -422,15 +589,39 @@ class MessageBus:
             raise MessageBusError("Message body cannot be empty")
         if len(text) > MAX_BODY_CHARS:
             raise MessageBusError(f"Message body exceeds {MAX_BODY_CHARS} characters")
+        if len(review_reason) > MAX_REVIEW_REASON_CHARS:
+            raise MessageBusError(
+                f"review_reason exceeds {MAX_REVIEW_REASON_CHARS} characters"
+            )
+        if kind == "reply" and not reply_to:
+            raise MessageBusError("kind=reply requires reply_to")
+        if reply_to:
+            if review_action or related_task_id or review_reason:
+                raise MessageBusError("Replies use reply_to without a separate send review")
+        else:
+            if review_action not in REVIEW_ACTIONS:
+                raise MessageBusError(
+                    "Non-reply sends require review_action=new, follow_up, or skip"
+                )
+            if not review_reason:
+                raise MessageBusError("A short review_reason is required before sending")
+            if review_action == "new" and related_task_id:
+                raise MessageBusError("new uses task_id; related_task_id is for follow_up or skip")
+            if review_action == "follow_up" and not related_task_id:
+                raise MessageBusError("follow_up requires related_task_id")
+            if review_action == "follow_up" and task_id and task_id != related_task_id:
+                raise MessageBusError("task_id and related_task_id must match for follow_up")
         ttl_seconds = max(1.0, min(float(ttl), 86400.0))
         hop_budget = max(1, min(int(max_hops), 32))
         now = self.now()
         message_id = "msg_" + uuid.uuid4().hex
         duplicate = False
+        skipped = False
+        review = None
 
         with self._connection() as connection, self._transaction(connection):
             self._expire(connection, now)
-            self._agent(connection, source)
+            source_agent = self._agent(connection, source)
             if idempotency_key:
                 existing = connection.execute(
                     "SELECT * FROM messages WHERE sender=? AND idempotency_key=?",
@@ -464,35 +655,148 @@ class MessageBus:
                 else:
                     destination = self._resolve(connection, recipient)
                     hops = 0
-                    task_id = str(task_id or message_id)
+                    if review_action == "follow_up":
+                        task_id = related_task_id
+                        existing_task = connection.execute(
+                            """
+                            SELECT 1 FROM collaboration_tasks
+                            WHERE task_id=? AND sender=? AND recipient=?
+                            """,
+                            (task_id, source, destination),
+                        ).fetchone()
+                        if existing_task is None:
+                            raise MessageBusError(
+                                "follow_up must reference an existing task for this recipient"
+                            )
+                    else:
+                        task_id = task_id or (
+                            related_task_id if review_action == "skip" else message_id
+                        )
                     expires_at = now + ttl_seconds
 
-                connection.execute(
-                    """
-                    INSERT INTO messages(
-                        message_id, idempotency_key, task_id, sender, recipient,
-                        kind, delivery, context_mode, body, reply_to, status,
-                        hops, max_hops, created_at, updated_at, expires_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)
-                    """,
-                    (
-                        message_id, idempotency_key or None, task_id, source, destination,
-                        kind, delivery, context_mode, text, reply_to or None,
-                        hops, hop_budget, now, now, expires_at,
-                    ),
-                )
+                    if review_action == "new":
+                        reserved = connection.execute(
+                            """
+                            INSERT INTO collaboration_tasks(
+                                task_id, sender, recipient, objective, workspace,
+                                created_at, updated_at
+                            ) VALUES(?,?,?,?,?,?,?)
+                            ON CONFLICT DO NOTHING
+                            """,
+                            (
+                                task_id, source, destination, text,
+                                source_agent["workspace"], now, now,
+                            ),
+                        )
+                        if reserved.rowcount == 0:
+                            existing = connection.execute(
+                                """
+                                SELECT * FROM messages
+                                WHERE task_id=? AND sender=? AND recipient=?
+                                  AND reply_to IS NULL
+                                ORDER BY created_at, message_id LIMIT 1
+                                """,
+                                (task_id, source, destination),
+                            ).fetchone()
+                            if existing is None:
+                                raise MessageBusError("The reviewed task has no original message")
+                            result = self._public_message(existing, envelope=True)
+                            duplicate = True
+
+                    if review_action == "skip":
+                        skipped = True
+                        review = self._record_review(
+                            connection,
+                            task_id=task_id,
+                            sender=source,
+                            recipient=destination,
+                            action=review_action,
+                            reason=review_reason,
+                            now=now,
+                        )
+                        result = {
+                            "message_id": "",
+                            "task_id": task_id,
+                            "from": source,
+                            "to": destination,
+                            "kind": kind,
+                            "status": "skipped",
+                            "skipped": True,
+                            "review": review,
+                        }
+
+                if not skipped and not duplicate:
+                    connection.execute(
+                        """
+                        INSERT INTO messages(
+                            message_id, idempotency_key, task_id, sender, recipient,
+                            kind, delivery, context_mode, body, reply_to, status,
+                            hops, max_hops, created_at, updated_at, expires_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)
+                        """,
+                        (
+                            message_id, idempotency_key or None, task_id, source, destination,
+                            kind, delivery, context_mode, text, reply_to or None,
+                            hops, hop_budget, now, now, expires_at,
+                        ),
+                    )
+                    if parent is None:
+                        connection.execute(
+                            """
+                            UPDATE collaboration_tasks SET updated_at=?
+                            WHERE task_id=? AND sender=? AND recipient=?
+                            """,
+                            (now, task_id, source, destination),
+                        )
+                        review = self._record_review(
+                            connection,
+                            task_id=task_id,
+                            sender=source,
+                            recipient=destination,
+                            action=review_action,
+                            reason=review_reason,
+                            now=now,
+                        )
+                    else:
+                        connection.execute(
+                            """
+                            UPDATE collaboration_tasks SET updated_at=?
+                            WHERE task_id=? AND (
+                                (sender=? AND recipient=?) OR (sender=? AND recipient=?)
+                            )
+                            """,
+                            (now, task_id, source, destination, destination, source),
+                        )
+                elif parent is None and not skipped:
+                    review = self._record_review(
+                        connection,
+                        task_id=task_id,
+                        sender=source,
+                        recipient=destination,
+                        action=review_action,
+                        reason=review_reason,
+                        now=now,
+                    )
                 if parent is not None:
                     connection.execute(
                         "UPDATE messages SET status='replied', replied_at=?, updated_at=? "
                         "WHERE message_id=? AND status IN ('queued','dispatched','delivered','read')",
                         (now, now, reply_to),
                     )
-                result = self._public_message(self._message(connection, message_id), envelope=True)
+                if not skipped and not duplicate:
+                    result = self._public_message(
+                        self._message(connection, message_id),
+                        envelope=True,
+                    )
 
+        if skipped:
+            return result
         if push and not duplicate:
-            return self.dispatch(result["message_id"])
+            result = self.dispatch(result["message_id"])
         if duplicate:
             result["duplicate"] = True
+        if review is not None:
+            result["review"] = review
         return result
 
     def dispatch(self, message_id: str) -> dict[str, Any]:
@@ -684,6 +988,11 @@ def _parser() -> argparse.ArgumentParser:
     heartbeat.add_argument("--state", choices=sorted(AGENT_STATES))
     heartbeat.add_argument("--endpoint", default="")
 
+    history = commands.add_parser("history")
+    history.add_argument("--agent", required=True)
+    history.add_argument("--to", dest="recipient", default="")
+    history.add_argument("--limit", type=int, default=20)
+
     send = commands.add_parser("send")
     send.add_argument("--from", dest="sender", required=True)
     send.add_argument("--to", dest="recipient", default="")
@@ -693,6 +1002,9 @@ def _parser() -> argparse.ArgumentParser:
     send.add_argument("--context-mode", choices=sorted(CONTEXT_MODES), default="current")
     send.add_argument("--reply-to", default="")
     send.add_argument("--task-id", default="")
+    send.add_argument("--related-task-id", default="")
+    send.add_argument("--review-action", choices=sorted(REVIEW_ACTIONS), default="")
+    send.add_argument("--review-reason", default="")
     send.add_argument("--ttl", type=float, default=3600)
     send.add_argument("--idempotency-key", default="")
     send.add_argument("--max-hops", type=int, default=8)
@@ -753,6 +1065,14 @@ def main(argv: list[str] | None = None) -> int:
                 state=args.state,
                 endpoint=_endpoint(args.endpoint) if args.endpoint else None,
             )
+        elif args.command == "history":
+            result = {
+                "tasks": bus.task_history(
+                    args.agent,
+                    recipient=args.recipient,
+                    limit=args.limit,
+                )
+            }
         elif args.command == "send":
             body = args.body
             if not body and not sys.stdin.isatty():
@@ -766,6 +1086,9 @@ def main(argv: list[str] | None = None) -> int:
                 context_mode=args.context_mode,
                 reply_to=args.reply_to,
                 task_id=args.task_id,
+                related_task_id=args.related_task_id,
+                review_action=args.review_action,
+                review_reason=args.review_reason,
                 ttl=args.ttl,
                 idempotency_key=args.idempotency_key,
                 max_hops=args.max_hops,

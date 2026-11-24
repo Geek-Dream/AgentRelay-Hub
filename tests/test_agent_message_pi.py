@@ -34,6 +34,8 @@ class PiMessageExtensionTests(unittest.TestCase):
                 "codex:sender",
                 "pi:installed-pi",
                 "PING-INSTALLED-PI",
+                review_action="new",
+                review_reason="Verify the installed Pi messaging extension",
                 push=False,
             )
 
@@ -46,7 +48,7 @@ class PiMessageExtensionTests(unittest.TestCase):
             (typebox / "index.js").write_text(
                 "const schema = () => ({});\n"
                 "export const Type = {\n"
-                "  Object: schema, String: schema, Boolean: schema,\n"
+                "  Object: schema, String: schema, Boolean: schema, Number: schema,\n"
                 "  Optional: schema, Union: schema, Literal: schema,\n"
                 "};\n",
                 encoding="utf-8",
@@ -81,6 +83,7 @@ class PiMessageExtensionTests(unittest.TestCase):
                 "}\n"
                 "if (sent.length !== 1) throw new Error('installed Pi extension did not poll');\n"
                 "const listed = await tools.get('agentrelay_list_agents').execute('list', {});\n"
+                "const history = await tools.get('agentrelay_task_history').execute('history', {});\n"
                 "const reply = await tools.get('agentrelay_send_message').execute(\n"
                 "  'reply',\n"
                 "  { reply_to: " + json.dumps(original["message_id"]) + ", body: 'PONG-INSTALLED-PI' },\n"
@@ -88,7 +91,7 @@ class PiMessageExtensionTests(unittest.TestCase):
                 ");\n"
                 "await emit('session_shutdown');\n"
                 "console.log(JSON.stringify({\n"
-                "  sent, listed, reply,\n"
+                "  sent, listed, history, reply,\n"
                 "  hasAckTool: tools.has('agentrelay_ack_message'),\n"
                 "}));\n",
                 encoding="utf-8",
@@ -116,6 +119,7 @@ class PiMessageExtensionTests(unittest.TestCase):
             self.assertEqual(evidence["sent"][0]["options"]["deliverAs"], "followUp")
             self.assertTrue(evidence["sent"][0]["options"]["triggerTurn"])
             self.assertTrue(evidence["hasAckTool"])
+            self.assertIn("[]", evidence["history"]["content"][0]["text"])
             self.assertIn("codex:sender", evidence["listed"]["content"][0]["text"])
             self.assertEqual(bus.get(original["message_id"])["status"], "replied")
             replies = bus.inbox("codex:sender")

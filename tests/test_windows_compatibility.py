@@ -4,7 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -91,7 +91,10 @@ class WindowsCompatibilityTests(unittest.TestCase):
         from unittest.mock import patch, MagicMock
         tty = MagicMock()
         tty.isatty.return_value = True
+        config = {}
+        save_config = MagicMock()
         with patch.object(install.sys, "stdin", tty), \
+                patch.object(install.sys, "argv", ["install.py"]), \
                 patch.object(install, "choose_install_targets", return_value=(["claude"], "web")), \
                 patch.object(install, "validate_publish_tree"), \
                 patch.object(install, "check_base_environment"), \
@@ -101,12 +104,15 @@ class WindowsCompatibilityTests(unittest.TestCase):
                 patch.object(install, "install_files") as install_files, \
                 patch.object(install, "merge_hooks_json") as merge_hooks, \
                 patch.object(install, "apply_target_selection") as apply, \
+                patch.object(install, "_load_local_config", return_value=(config, save_config)), \
                 patch.object(install, "run_web_configurator"), \
                 patch.object(install, "print_next_steps"):
-            self.assertEqual(install.main([]), 0)
+            self.assertEqual(install.main(None), 0)
         install_files.assert_not_called()
         merge_hooks.assert_not_called()
         apply.assert_not_called()
+        self.assertEqual(config["install_targets"], ["claude"])
+        save_config.assert_called_once_with(config, install.CODEX_HOME)
 
     def test_empty_interactive_choice_uninstalls_without_reinstalling(self):
         import install
@@ -152,10 +158,29 @@ class WindowsCompatibilityTests(unittest.TestCase):
         with patch.object(agent_targets, "agent_targets", return_value=registry), \
                 patch.object(agent_targets, "detect_agents", return_value={"codex": True, "claude": True}), \
                 patch.object(agent_targets, "relay_installed", side_effect=lambda target, meta: target == "claude"), \
+                patch.object(install, "_load_local_config", return_value=({}, MagicMock())), \
                 patch("builtins.input", return_value=""):
             selected, action = install.choose_install_targets()
         self.assertEqual(selected, ["claude"])
         self.assertEqual(action, "install")
+
+    def test_checklist_prefers_saved_targets_over_detected_installation(self):
+        import install
+
+        registry = {
+            "codex": {"level": "full", "label": "Codex"},
+            "claude": {"level": "full", "label": "Claude"},
+            "pi": {"level": "full", "label": "Pi"},
+        }
+        with patch.object(agent_targets, "agent_targets", return_value=registry), \
+                patch.object(agent_targets, "detect_agents", return_value=dict.fromkeys(registry, True)), \
+                patch.object(agent_targets, "relay_installed", return_value=True), \
+                patch.object(install, "_load_local_config", return_value=({"install_targets": ["pi"]}, MagicMock())), \
+                patch("builtins.input", return_value="web"):
+            selected, action = install.choose_install_targets()
+
+        self.assertEqual(selected, ["pi"])
+        self.assertEqual(action, "web")
 
     def test_commander_child_command_uses_each_host_background_mode(self):
         from scripts.research_commander import commander_child_command

@@ -98,6 +98,35 @@ class FusionConfigWebTests(unittest.TestCase):
         )
         self.assertNotIn("</script><script>alert(1)</script>", page)
 
+    def test_message_probe_has_live_peer_controls_and_strict_reply_semantics(self):
+        page = build_config_page(self.page_config())
+        self.assertIn('id="message-probe"', page)
+        self.assertIn('id="message-probe-sender"', page)
+        self.assertIn('id="message-probe-targets"', page)
+        self.assertIn('id="message-probe-results"', page)
+        self.assertIn("refreshMessagePeers()", page)
+        self.assertIn("startMessageProbe()", page)
+        self.assertIn("/api/messages/peers", page)
+        self.assertIn("/api/messages/probe", page)
+        self.assertIn("status==='replied'", page)
+        self.assertIn("已投递不等于已回复", page)
+
+    def test_saved_target_ids_are_the_only_initial_checkbox_source(self):
+        config = self.page_config()
+        config["install_targets"] = ["pi"]
+        config["agents"] = {
+            target: {
+                "id": target,
+                "label": target.title(),
+                "level_note": "full",
+                "detected": True,
+                "relay_installed": True,
+            }
+            for target in ("codex", "claude", "pi")
+        }
+        page = build_config_page(config)
+        self.assertIn("const saved=Array.isArray(state.install_targets)?state.install_targets:[];", page)
+
 
 if __name__ == "__main__":
     unittest.main()

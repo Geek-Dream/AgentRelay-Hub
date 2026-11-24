@@ -5,7 +5,9 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -43,9 +45,14 @@ class MessageBusTests(unittest.TestCase):
             "sender": "codex:one",
             "recipient": "pi:two",
             "body": "Please review the schema",
+            "review_action": "new",
+            "review_reason": "Independent schema review is needed",
             "push": False,
         }
         values.update(kwargs)
+        if values.get("reply_to"):
+            values.pop("review_action", None)
+            values.pop("review_reason", None)
         return self.bus.send(**values)
 
     def test_cross_host_message_and_reply_preserve_task_correlation(self):
@@ -62,6 +69,7 @@ class MessageBusTests(unittest.TestCase):
         self.assertTrue(envelope["handling"]["not_user_authorization"])
         self.assertTrue(envelope["handling"]["keep_existing_permissions"])
 
+        self.now += 1
         reply = self.send(
             sender="pi:two",
             recipient="",
@@ -73,6 +81,79 @@ class MessageBusTests(unittest.TestCase):
         self.assertEqual(reply["reply_to"], original["message_id"])
         self.assertEqual(self.bus.get(original["message_id"])["status"], "replied")
         self.assertEqual(self.bus.inbox("codex:one")[0]["body"], "Review complete")
+        self.assertEqual(
+            self.bus.task_history("codex:one")[0]["status"],
+            "replied",
+        )
+
+    def test_non_reply_send_requires_an_explicit_necessity_review(self):
+        with self.assertRaisesRegex(bus_module.MessageBusError, "review_action"):
+            self.bus.send("codex:one", "pi:two", "Unreviewed", push=False)
+        with self.assertRaisesRegex(bus_module.MessageBusError, "review_reason"):
+            self.bus.send(
+                "codex:one",
+                "pi:two",
+                "Unreviewed",
+                review_action="new",
+                push=False,
+            )
+        self.assertEqual(self.bus.inbox("pi:two", peek=True), [])
+
+    def test_history_supports_skip_and_follow_up_without_losing_correlation(self):
+        original = self.send(task_id="task-config", body="Review message config")
+        history = self.bus.task_history("codex:one", recipient="pi:two")
+        self.assertEqual(history[0]["task_id"], "task-config")
+        self.assertEqual(history[0]["status"], "active")
+        self.assertEqual(history[0]["objective"], "Review message config")
+
+        self.now += 1
+        skipped = self.send(
+            body="Check why message config cannot connect",
+            related_task_id="task-config",
+            review_action="skip",
+            review_reason="The same config review is already active",
+        )
+        self.assertEqual(skipped["status"], "skipped")
+        self.assertTrue(skipped["skipped"])
+        self.assertEqual(len(self.bus.inbox("pi:two", peek=True)), 1)
+
+        self.now += 1
+        follow_up = self.send(
+            body="Additional schema logs are available",
+            related_task_id="task-config",
+            review_action="follow_up",
+            review_reason="New logs supplement the active review",
+        )
+        self.assertEqual(follow_up["task_id"], original["task_id"])
+        self.assertEqual(len(self.bus.inbox("pi:two", peek=True)), 2)
+        history = self.bus.task_history("codex:one")
+        self.assertEqual(history[0]["message_count"], 2)
+        self.assertEqual(history[0]["reviews"][0]["action"], "follow_up")
+
+    def test_same_new_task_is_reserved_atomically_across_connections(self):
+        buses = [
+            bus_module.MessageBus(self.bus.path, now=lambda: self.now)
+            for _ in range(2)
+        ]
+        barrier = threading.Barrier(2)
+
+        def reserve(bus):
+            barrier.wait(timeout=5)
+            return bus.send(
+                "codex:one",
+                "pi:two",
+                "Review the same task",
+                task_id="shared-task",
+                review_action="new",
+                review_reason="One owner is needed for this review",
+                push=False,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(reserve, buses))
+        self.assertEqual(sum(not item.get("duplicate", False) for item in results), 1)
+        self.assertEqual(sum(bool(item.get("duplicate")) for item in results), 1)
+        self.assertEqual(len(self.bus.inbox("pi:two", peek=True)), 1)
 
     def test_idempotency_key_returns_original_without_duplicating(self):
         first = self.send(idempotency_key="request-42")
@@ -173,6 +254,60 @@ class MessageBusTests(unittest.TestCase):
         addresses = {item["address"] for item in json.loads(result.stdout)["agents"]}
         self.assertIn("codex:one", addresses)
         self.assertIn("pi:two", addresses)
+
+    def test_cli_history_and_review_actions(self):
+        env = dict(os.environ)
+        env["AGENTRELAY_MESSAGE_DB"] = str(self.bus.path)
+
+        def run(*args):
+            return subprocess.run(
+                [sys.executable, str(SCRIPTS / "agent_message_bus.py"), *args],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        sent = run(
+            "send", "--from", "codex:one", "--to", "pi:two",
+            "--body", "Review the CLI contract", "--task-id", "cli-task",
+            "--review-action", "new", "--review-reason", "Independent CLI review",
+            "--no-push",
+        )
+        self.assertEqual(sent.returncode, 0, sent.stderr)
+        history = run("history", "--agent", "codex:one", "--to", "pi:two")
+        self.assertEqual(history.returncode, 0, history.stderr)
+        tasks = json.loads(history.stdout)["tasks"]
+        self.assertEqual(tasks[0]["task_id"], "cli-task")
+        self.assertEqual(tasks[0]["reviews"][0]["action"], "new")
+
+        skipped = run(
+            "send", "--from", "codex:one", "--to", "pi:two",
+            "--body", "Check the CLI contract again", "--related-task-id", "cli-task",
+            "--review-action", "skip", "--review-reason", "Already being reviewed",
+        )
+        self.assertEqual(skipped.returncode, 0, skipped.stderr)
+        self.assertEqual(json.loads(skipped.stdout)["status"], "skipped")
+        self.assertEqual(len(self.bus.inbox("pi:two", peek=True)), 1)
+
+    def test_existing_message_history_is_backfilled_for_follow_up_review(self):
+        original = self.send(task_id="legacy-task", body="Existing task")
+        with sqlite3.connect(self.bus.path) as connection:
+            connection.execute("DELETE FROM collaboration_tasks")
+        reopened = bus_module.MessageBus(self.bus.path, now=lambda: self.now)
+        history = reopened.task_history("codex:one")
+        self.assertEqual(history[0]["task_id"], original["task_id"])
+        self.assertEqual(history[0]["objective"], "Existing task")
+        follow_up = reopened.send(
+            "codex:one",
+            "pi:two",
+            "New information for the existing task",
+            related_task_id="legacy-task",
+            review_action="follow_up",
+            review_reason="New information is available",
+            push=False,
+        )
+        self.assertEqual(follow_up["task_id"], original["task_id"])
 
     def test_cli_can_derive_a_safe_host_session_address(self):
         env = dict(os.environ)
