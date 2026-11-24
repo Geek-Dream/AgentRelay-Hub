@@ -206,6 +206,63 @@ class WindowsCompatibilityTests(unittest.TestCase):
                 # save_config is the production path that normalizes commander availability.
                 config_manager.save_config(saved, home)
                 self.assertEqual(config_manager.load_config(home)["commander"]["enabled"], expected)
+
+    def test_commander_default_never_comes_from_web_provider(self):
+        from scripts import config_manager
+
+        cases = (
+            ({}, None),
+            ({"local_providers": [{
+                "id": "local", "endpoint": "http://localhost/v1", "model": "local",
+            }]}, "local-llm"),
+            ({
+                "local_providers": [{
+                    "id": "local", "endpoint": "http://localhost/v1", "model": "local",
+                }],
+                "api_providers": [{
+                    "id": "my-api", "endpoint": "https://api.example/v1",
+                    "model": "api", "api_key": "secret",
+                }],
+            }, "my-api"),
+        )
+        for providers, expected in cases:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                config = config_manager.default_config()
+                config.update(providers)
+                config["web_providers"] = [{
+                    "id": "deepseek-web", "base_url": "https://chat.deepseek.com/",
+                    "enabled": True,
+                }]
+                config_manager.save_config(config, home)
+                with patch.dict(os.environ, {}, clear=True):
+                    config_manager.apply_config_to_environment(home)
+                    self.assertEqual(
+                        os.environ.get("AGENTRELAY_COMMANDER_DEFAULT_PROVIDER"),
+                        expected,
+                    )
+                    self.assertIsNone(os.environ.get("AGENT_RELAY_PROVIDER"))
+
+    def test_beta_web_environment_is_opt_in(self):
+        from scripts import config_manager
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            config = config_manager.default_config()
+            config["web_assist"] = {"enabled": True}
+            config["web_providers"] = [{
+                "id": "deepseek-web", "base_url": "https://chat.deepseek.com/",
+                "enabled": True,
+            }]
+            config_manager.save_config(config, home)
+            with patch.dict(os.environ, {}, clear=True):
+                config_manager.apply_config_to_environment(home)
+                self.assertEqual(os.environ.get("AGENT_RELAY_PROVIDER"), "deepseek")
+                self.assertEqual(os.environ.get("AGENTRELAY_DEEPSEEK_ENABLED"), "1")
+                config["web_assist"] = {"enabled": False}
+                config_manager.save_config(config, home)
+                config_manager.apply_config_to_environment(home)
+                self.assertEqual(os.environ.get("AGENTRELAY_DEEPSEEK_ENABLED"), "0")
+
     def test_commander_non_chat_api_uses_protocol_router(self):
         from scripts import commander_provider_call as bridge
         from scripts import config_manager

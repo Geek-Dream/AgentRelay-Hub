@@ -2864,6 +2864,7 @@ def run_provider(
             find_web_provider,
             load_config,
             provider_concurrency_defaults,
+            web_assist_enabled,
         )
     except ImportError:
         from config_manager import (
@@ -2871,8 +2872,14 @@ def run_provider(
             find_web_provider,
             load_config,
             provider_concurrency_defaults,
+            web_assist_enabled,
         )
-    apply_config_to_environment()
+    config = apply_config_to_environment()
+    if not web_assist_enabled(config):
+        raise RuntimeError(
+            "WEB_ASSIST_BETA_DISABLED: 网页协助默认关闭；"
+            "请在配置中心显式开启“Beta 网页测试协助”后再调用。"
+        )
     provider_name = provider_name or os.environ.get("AGENT_RELAY_PROVIDER", DEFAULT_PROVIDER)
 
     from playwright.sync_api import (
@@ -3338,9 +3345,17 @@ def run_provider(
 
 def main():
     try:
-        from .config_manager import apply_config_to_environment, resolve_conversation_mode
+        from .config_manager import (
+            apply_config_to_environment,
+            resolve_conversation_mode,
+            web_assist_enabled,
+        )
     except ImportError:
-        from config_manager import apply_config_to_environment, resolve_conversation_mode
+        from config_manager import (
+            apply_config_to_environment,
+            resolve_conversation_mode,
+            web_assist_enabled,
+        )
     apply_config_to_environment()
     parser = argparse.ArgumentParser(
         description="AgentRelay 在线专家模型中继"
@@ -3416,10 +3431,22 @@ def main():
             from .config_manager import apply_config_to_environment
         except ImportError:
             from config_manager import apply_config_to_environment
-        apply_config_to_environment()
+        config = apply_config_to_environment()
         provider_name = normalize_provider_name(args.provider or os.environ.get("AGENT_RELAY_PROVIDER", DEFAULT_PROVIDER))
         if provider_name.endswith("-web") and provider_name[:-4] in ProviderRegistry().names:
             provider_name = provider_name[:-4]
+        if not web_assist_enabled(config):
+            message = (
+                "WEB_ASSIST_BETA_DISABLED：网页协助默认关闭，本次未检查登录、"
+                "未打开浏览器。请在配置中心显式开启“Beta 网页测试协助”后再调用。"
+            )
+            print(message)
+            print("AGENT_RELAY_RESULT=" + json.dumps({
+                "status": "rejected",
+                "error": "WEB_ASSIST_BETA_DISABLED",
+                "message": message,
+            }, ensure_ascii=False))
+            return 2
         provider_adapter = ProviderRegistry().create(provider_name)
     except ValueError as exc:
         parser.error(str(exc))
@@ -3627,4 +3654,4 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

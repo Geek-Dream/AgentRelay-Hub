@@ -35,6 +35,10 @@ def _parse_structured_content(content: str) -> Any:
 
 
 class AgentProvider(ABC):
+    # Only tool-capable local/API providers may supply structured edit plans.
+    supports_edit_plans = False
+    provider_kind = ""
+
     @abstractmethod
     def analyze(self, task_context: Any) -> Any: ...
 
@@ -47,6 +51,8 @@ class AgentProvider(ABC):
 
 class LocalAgentProvider(AgentProvider):
     """Rule-based provider; deliberately independent of external models."""
+    provider_kind = "local"
+
     def analyze(self, task_context):
         try: from .task_scheduler import TaskAnalyzer
         except ImportError: from task_scheduler import TaskAnalyzer
@@ -76,6 +82,8 @@ class LocalAgentProvider(AgentProvider):
 
 class LocalLLMProvider(AgentProvider):
     """Optional local model provider; rules remain the fallback."""
+    supports_edit_plans = True
+    provider_kind = "local"
     _slot_condition = threading.Condition(threading.Lock())
     _slot_busy = False
     _slot_waiting = False
@@ -152,10 +160,14 @@ class LocalLLMProvider(AgentProvider):
 
 class OpenAIAPIProvider(LocalLLMProvider):
     """Optional GPT/other OpenAI-compatible API provider; never default-on."""
+    provider_kind = "api"
     pass
 
 
 class DeepSeekProvider(AgentProvider):
+    """Read-only web advisor; its text is never an executable edit plan."""
+    provider_kind = "web"
+
     def __init__(self, adapter=None, fallback=None):
         try: from .agent_adapter import DeepSeekAdapter, PromptTemplate
         except ImportError: from agent_adapter import DeepSeekAdapter, PromptTemplate
@@ -183,7 +195,7 @@ class DeepSeekProvider(AgentProvider):
                                  f"DeepSeek fallback: {exc}")
 
     def analyze(self, task_context): return self._call("analyze_requirement", task_context, "analyze")
-    def plan(self, task_context): return self._call("plan_change", task_context, "plan")
+    def plan(self, task_context): return self._call("advise_task", task_context, "plan")
     def explain(self, task_context): return self._call("explain_result", task_context, "explain")
 
 

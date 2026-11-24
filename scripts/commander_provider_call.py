@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Controlled model call for a Commander child.
+"""Controlled API/local model call for a Commander child.
 
-The controlled bridge permits one API provider, one local model, or one
-authenticated web conversation at a time. Keys stay in the parent-controlled
-process and are never copied into child environments.
+Keys stay in the parent-controlled process and are never copied into child
+environments. Web providers remain outside Commander execution.
 """
 from __future__ import annotations
 

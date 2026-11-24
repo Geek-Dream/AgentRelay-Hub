@@ -1,6 +1,6 @@
 ---
 name: agent-image
-description: "AgentRelay 图片识别中继。仅当用户显式调用本 skill 时运行——@agent-image（或 Codex 的 $agent-image 提及、以及明确说“让别的模型/在线模型看这张图”）——把用户提供的图片文件发给当前已配置、支持识图的在线模型 Provider（默认 DeepSeek），由它详细描述图片内容。两种用法：用户问“这是什么”时把描述转述给用户；用户让 Agent“自己看图、按图改 bug”时由 Agent 消化描述后继续任务，不必全文转述。仅用于当前 Agent 模型确实不支持图片识别、且用户明确要求借线上模型识图的场景；当前模型自己能看图时不要绕道。不做 Hook 自动触发，不凭“识别图片”等普通措辞自动启用。"
+description: "AgentRelay 图片识别中继。仅当用户显式调用本 skill 时运行——@agent-image（或 Codex 的 $agent-image 提及、以及明确说“让别的模型/在线模型看这张图”）——把用户提供的图片文件发给当前已配置、支持识图的本地视觉模型；网页模型只有在 Beta 网页测试协助开启后才作最后辅助。两种用法：用户问“这是什么”时把描述转述给用户；用户让 Agent“自己看图、按图改 bug”时由 Agent 消化描述后继续任务，不必全文转述。仅用于当前 Agent 模型确实不支持图片识别、且用户明确要求借其他模型识图的场景；当前模型自己能看图时不要绕道。不做 Hook 自动触发，不凭“识别图片”等普通措辞自动启用。"
 ---
 
 # AgentImage
@@ -10,8 +10,8 @@ description: "AgentRelay 图片识别中继。仅当用户显式调用本 skill 
 > 不把普通图片任务自动转发。无 Provider 时先完成非视觉检查并请用户复查，随后清理截图。
 
 
-AgentImage 是 AgentRelay 的图片识别中继：把本地图片发给已配置好、支持识图的
-线上模型 Provider，拿回详细描述。核心价值：**即使本地 Agent 模型（或 Commander
+AgentImage 是 AgentRelay 的图片识别中继：优先把本地图片发给已配置好、支持识图的
+本地视觉 Provider；Beta 网页模型只作最后辅助。核心价值：**即使本地 Agent 模型（或 Commander
 的本地 9B 辅助模型）不支持识图，也能借线上模型理解图片，避免把识图压力放在
 主模型上浪费资源。**
 
@@ -66,8 +66,8 @@ AgentImage 是 AgentRelay 的图片识别中继：把本地图片发给已配置
    & $PYTHON $IMAGE_AGENT C:\path\to\image1.png C:\path\to\image2.jpg
    ```
 
-   - 可选 `--provider <id>` 优先使用某个网页 Provider；失败后脚本会自动切换
-     其他候选。
+   - 可选 `--provider <id>` 匹配某个本地或网页 Provider；网页始终排在本地之后，
+     且必须显式开启 Beta 网页测试协助。
    - 可选 `--question "额外要求"` 追加用户的特殊描述要求（例如"重点读图中的文字"）。
    - 可选 `--no-cache` 强制重新识别（默认同一张图 7 天内命中缓存直接返回）。
 3. **处理结果**：
@@ -86,10 +86,10 @@ AgentImage 是 AgentRelay 的图片识别中继：把本地图片发给已配置
 
 ## Provider 选择顺序（脚本自动处理，Agent 不需干预）
 
-1. 显式 `--provider` 指定、且支持识图的网页 Provider；
-2. 默认网页 Provider（当前配置下支持识图时，例如 DeepSeek 混合模式）；
-3. 其他已启用且支持识图的网页 Provider（前一个失败时自动切换）；
-4. 配置时确认/探测为支持识图（vision=true）的本地模型（OpenAI 兼容接口直接调用）；
+1. 显式 `--provider` 指定、且支持识图的本地 Provider；
+2. 其他已启用且支持识图（vision=true）的本地模型；
+3. Beta 开关开启后，显式指定或默认的网页 Provider，再尝试其他网页 Provider；
+4. Beta 关闭时不检查网页登录、不启动浏览器；
 5. 全部失败：注入 `【AgentImage 注】` 说明并正常退出，由主 Agent 转述并引导
    用户重新配置。
 

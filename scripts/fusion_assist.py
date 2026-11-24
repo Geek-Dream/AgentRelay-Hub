@@ -91,7 +91,7 @@ def reminder(home: Path, session_id: str, prompt: str, *, stage: str,
 
 SKIP_FAILURES = {"FUSION_PROVIDER_NOT_CONFIGURED", "FUSION_DISABLED", "COMMANDER_ACTIVE",
                  "COMMANDER_CHILD", "FUSION_CHILD", "FUSION_PROVIDER_NOT_FOUND",
-                 "FUSION_RECOVERY_REQUIRED"}
+                 "FUSION_RECOVERY_REQUIRED", "WEB_ASSIST_BETA_DISABLED"}
 
 
 def _clear_provider_circuit(state: dict[str, Any]) -> None:

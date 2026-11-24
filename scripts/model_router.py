@@ -199,18 +199,13 @@ class ModelRouter:
     def choose(self, task_type: str, difficulty: int, *, needs_web=False,
                request: str = "") -> ModelChoice:
         preferred = self.route_memory.preferred(request) if request else None
-        if preferred and self.available(preferred):
+        if (preferred and self.available(preferred)
+                and (needs_web or self._provider_kind(preferred) != "web")):
             return ModelChoice(preferred, "命中已验证的相似问题 Provider", score=9.0)
         if needs_web:
             choices = self._available_by_kind("web")
             if choices:
                 return ModelChoice(choices[0], "需要联网研究", score=8.0)
-        # Difficulty 2 is the ordinary technical-problem tier. Any configured
-        # web model is eligible; DeepSeek is only a backwards-compatible name.
-        if difficulty == 2:
-            choices = self._available_by_kind("web")
-            if choices:
-                return ModelChoice(choices[0], "普通技术问题优先已配置网页模型咨询", score=7.5)
         if difficulty <= 1:
             choices = self._available_by_kind("local")
             if choices:
@@ -241,22 +236,31 @@ class ModelRouter:
         provider = value.get("provider") if isinstance(value, dict) else value
         return not hasattr(provider, "check_available") or bool(provider.check_available())
 
+    def _provider_kind(self, name: str) -> str:
+        value = self.providers.get(name)
+        metadata = value if isinstance(value, dict) else {}
+        configured_kind = str(metadata.get("kind", "")).lower()
+        if configured_kind:
+            return configured_kind
+        provider = metadata.get("provider") if isinstance(value, dict) else value
+        configured_kind = str(getattr(provider, "provider_kind", "")).lower()
+        if configured_kind:
+            return configured_kind
+        # Existing integrations passed provider objects directly. Infer a kind
+        # for their stable legacy names without consulting a web default.
+        lower = name.lower()
+        if name in {"deepseek", "deepseek-web", "web"} or lower.endswith("-web"):
+            return "web"
+        if name in {"local", "local-llm", "local-model"} or lower.startswith("local-"):
+            return "local"
+        if name in {"api", "gpt-api"} or lower.endswith("-api"):
+            return "api"
+        return ""
+
     def _available_by_kind(self, kind: str) -> list[str]:
         matches = []
-        for name, value in self.providers.items():
-            metadata = value if isinstance(value, dict) else {}
-            configured_kind = str(metadata.get("kind", "")).lower()
-            # Existing integrations passed provider objects directly. Infer a
-            # kind for them so old DeepSeek/local/gpt configuration still works.
-            if not configured_kind:
-                lower = name.lower()
-                if name in {"deepseek", "deepseek-web", "web"} or lower.endswith("-web"):
-                    configured_kind = "web"
-                elif name in {"local", "local-llm", "local-model"} or lower.startswith("local-"):
-                    configured_kind = "local"
-                elif name in {"api", "gpt-api"} or lower.endswith("-api"):
-                    configured_kind = "api"
-            if configured_kind == kind and self.available(name):
+        for name in self.providers:
+            if self._provider_kind(name) == kind and self.available(name):
                 matches.append(name)
         # Prefer a concrete configured provider over the built-in generic
         # local fallback. This preserves the low-risk local-model route.

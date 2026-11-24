@@ -70,6 +70,7 @@ class DeepSeekAdapter(AgentAdapter):
 class PromptTemplate:
     analyze_requirement = "请分析以下任务的复杂度、影响模块、风险和验收标准：\n{request}"
     plan_change = "请为以下任务生成最小修改计划。若确实需要改文件，只返回 JSON {{\"edits\":{{\"相对路径\":\"完整文件内容\"}}}}，不要 Markdown、shell 或解释；否则返回普通文字建议：\n{request}"
+    advise_task = "请以只读外援身份分析以下任务，给出风险、排查步骤和修改建议；不要生成可直接写入的文件内容：\n{request}"
     explain_result = "请用大白话解释以下任务结果：\n{result}"
 
     @classmethod

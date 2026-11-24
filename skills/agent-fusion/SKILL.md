@@ -5,9 +5,10 @@ description: "Delegate bulky or isolated execution work to AgentRelay Fusion's p
 
 # AgentFusion
 
-AgentFusion 是 AgentRelay 的持久协助 Agent：默认开启，但只有用户显式配置 Provider 后才可
-调用。它拥有自己的会话、上下文和工具循环，可并行承担耗时的调查、批量阅读和用户明确委派
-的实现工作；主 Agent 仍负责需求判断、规划、最终审查和验收。
+AgentFusion 是 AgentRelay 的持久协助 Agent：默认开启，本机存在可用 Provider 时才可调用。
+未显式选择 Provider 时按 `API → 本地` 自动选择。它拥有自己的会话、上下文和工具循环，
+可并行承担耗时的调查、批量阅读和用户明确委派的实现工作；主 Agent 仍负责需求判断、规划、
+最终审查和验收。
 
 Fusion 永不启动另一个 Fusion，也永不启动 Commander。Commander 拥有最高优先级，启动时
 会接管并关闭正在运行的 Fusion 任务。
@@ -104,6 +105,7 @@ Windows PowerShell（仅 Windows 使用）：
 - `state.max_steps` 是单次委派最多允许的模型步数。
 - `FUSION_PROVIDER_NOT_CONFIGURED`：静默跳过。除非用户正在操作 Fusion，否则不要提醒，
   不要等待、探网、检查登录或尝试默认 Provider。
+- `WEB_ASSIST_BETA_DISABLED`：网页协助未获显式授权，静默跳过网页；不要检查登录或启动浏览器。
 - `COMMANDER_ACTIVE`、`COMMANDER_CHILD` 或 `FUSION_CHILD`：强制互斥，立即跳过。
 - `FUSION_DISABLED`：跳过。只有用户明确要求开启时才执行开关命令。
 - `state.degraded=true` 或 `state.fallback_reason=PROVIDER_QUEUE_ACTIVE`：Provider 已满载，
@@ -148,8 +150,12 @@ Windows PowerShell（仅 Windows 使用）：
 & $PYTHON $FUSION provider none
 ```
 
-`on` 只开启能力，不会自动选择 Provider。Fusion 永不猜测默认 Provider；必须使用
-`web:<id>`、`local:<id>` 或 `api:<id>` 精确指定。
+`on` 只开启能力。Provider 留空时自动按 `API → 本地` 选择；也可用 `local:<id>` 或
+`api:<id>` 精确指定。`provider none` 表示清除手动选择、恢复自动路由，不是关闭 Fusion。
+
+网页协助是默认关闭的 Beta 尾巴功能。只有用户在配置中心显式开启“Beta 网页测试协助”后，
+`web:<id>` 才可选；没有 API/本地模型时，网页只能作为 readonly 最后辅助。Beta 关闭时不得
+检查网页登录、启动浏览器或把网页当作失败降级路线。
 
 ### 共享并发与租约
 
@@ -184,8 +190,8 @@ coding 模式可以直接修改文件并执行命令，必须由用户明确确�
 
 ### 网页 Provider 的 advisory 边界
 
-网页 Provider 适合咨询、简单代码建议、网络搜索、数据整理，以及在显式配置支持时识图。
-它们没有 Fusion 的工具协议，因此不能获得本机文件读写或 shell 执行能力。
+开启 Beta 后，网页 Provider 适合最后辅助咨询、简单代码建议、网络搜索、数据整理，以及在
+显式配置支持时识图。它们没有 Fusion 的工具协议，因此不能获得本机文件读写或 shell 执行能力。
 
 需要实际执行本机任务时，Fusion 的合法路由顺序是 `API → 本地`。即使网页 Provider 可用、
 并发更高或排队更短，也不能用它顶替 API 或本地模型来执行 coding 任务。

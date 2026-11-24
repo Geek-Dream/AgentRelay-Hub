@@ -188,6 +188,25 @@ def provider_is_ready(provider: dict[str, Any]) -> bool:
     )
 
 
+def automatic_fusion_provider(
+    config: Mapping[str, Any],
+    *,
+    tool_mode: str = "readonly",
+) -> dict[str, Any] | None:
+    """Choose API, then local; Beta web is only a last advisory fallback."""
+    kinds = ["api", "local"]
+    if tool_mode != "coding" and config_manager.web_assist_enabled(config):
+        kinds.append("web")
+    entries = list(_provider_entries(config))
+    for kind in kinds:
+        for provider in entries:
+            if provider["kind"] != kind:
+                continue
+            if bool(provider["entry"].get("enabled", True)) and provider_is_ready(provider):
+                return provider
+    return None
+
+
 def validated_fusion_config(
     config: Mapping[str, Any],
     changes: Mapping[str, Any],
@@ -231,6 +250,15 @@ def validated_fusion_config(
                 "FUSION_PROVIDER_NOT_READY",
                 "所选 Provider 缺少必要地址或模型名称，当前不可调用。",
             )
+        if (
+            provider["kind"] == "web"
+            and provider_changed
+            and not config_manager.web_assist_enabled(config)
+        ):
+            raise FusionSettingsError(
+                "WEB_ASSIST_BETA_DISABLED",
+                "网页协助属于 Beta 测试功能，请先显式开启“Beta 网页测试协助”。",
+            )
         normalized["provider_id"] = provider["ref"]
         if normalized["tool_mode"] == "coding" and provider["kind"] == "web":
             raise FusionSettingsError(
@@ -252,10 +280,12 @@ def public_provider(provider: dict[str, Any] | None) -> dict[str, str] | None:
 
 def available_providers(config: Mapping[str, Any]) -> list[dict[str, str]]:
     """List locally configured Provider references without probing them."""
+    web_enabled = config_manager.web_assist_enabled(config)
     return [
         public_provider(provider)
         for provider in _provider_entries(config)
         if public_provider(provider) is not None
+        and (provider["kind"] != "web" or web_enabled)
     ]
 
 
@@ -414,6 +444,9 @@ def fusion_state(
         "requested_enabled": fusion["enabled"],
         "effective_enabled": fusion["enabled"] and not activity["active"],
         "provider_id": fusion["provider_id"],
+        "configured_provider_id": fusion["provider_id"],
+        "provider_auto_selected": False,
+        "web_assist_beta_enabled": config_manager.web_assist_enabled(loaded),
         "timeout": fusion["timeout"],
         "tool_mode": fusion["tool_mode"],
         "max_steps": fusion["max_steps"],
@@ -439,15 +472,28 @@ def fusion_state(
     if not fusion["enabled"]:
         state["reason"] = "FUSION_DISABLED"
         return state
-    if not fusion["provider_id"]:
-        state["reason"] = "FUSION_PROVIDER_NOT_CONFIGURED"
-        return state
-
-    provider, error = resolve_fusion_provider(loaded, fusion["provider_id"])
-    if provider is None:
-        state["reason"] = error
-        return state
+    if fusion["provider_id"]:
+        provider, error = resolve_fusion_provider(loaded, fusion["provider_id"])
+        if provider is None:
+            state["reason"] = error
+            return state
+    else:
+        provider = automatic_fusion_provider(
+            loaded,
+            tool_mode=fusion["tool_mode"],
+        )
+        if provider is None:
+            state["reason"] = "FUSION_PROVIDER_NOT_CONFIGURED"
+            return state
+        state["provider_id"] = provider["ref"]
+        state["provider_auto_selected"] = True
     state["provider"] = public_provider(provider)
+    if (
+        provider["kind"] == "web"
+        and not config_manager.web_assist_enabled(loaded)
+    ):
+        state["reason"] = "WEB_ASSIST_BETA_DISABLED"
+        return state
     state["tool_capable"] = provider["kind"] in {"local", "api"}
     state["capability_role"] = "executor" if state["tool_capable"] else "advisory"
     state["capabilities"] = list(model_router.provider_capabilities(

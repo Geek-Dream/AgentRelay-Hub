@@ -28,6 +28,8 @@ from scripts.orchestrator_core import (Orchestrator, TaskType, classify_task,
                                         SelfWorker, SelfReviewer, VerificationRunner, ConfirmationStore, FallbackExecutor,
                                         ConfirmationCard, default_compileall_command)
 from scripts.orchestrator_core import WorkflowEngine, TaskExecutionState, TaskStateMachine, TaskContext
+from scripts.agent_provider import DeepSeekProvider, LocalAgentProvider, OpenAIAPIProvider
+from scripts.model_router import ModelChoice, ModelRouter
 from scripts import commander_provider_pool, fusion_mode, orchestrator_core
 from scripts.agentrelay_console import (
     ANSI_BLUE_BOLD,
@@ -117,8 +119,153 @@ class OrchestratorTests(unittest.TestCase):
     def test_registry_routing(self):
         registry = ModelRegistry.from_json(Path(__file__).parents[1] / "scripts/model_registry.json")
         self.assertEqual(route_task(complexity=1, needs_edit=True, registry=registry).level, "direct")
-        self.assertEqual(route_task(complexity=2, needs_web=True, registry=registry).model, "deepseek-web")
+        research = route_task(complexity=2, needs_web=True, registry=registry)
+        self.assertEqual(research.level, "direct")
+        self.assertIsNone(research.model)
         self.assertEqual(route_task(complexity=5, registry=registry).level, "commander")
+
+    def test_web_route_memory_does_not_capture_simple_edit(self):
+        class FakeWebAdapter:
+            model = "deepseek-web"
+
+            def __init__(self):
+                self.calls = []
+
+            def send(self, request):
+                self.calls.append(request)
+                return {"answer": json.dumps({"edits": {"page.txt": "XP=20\n"}})}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            target = workspace / "page.txt"
+            target.write_text("XP=10\n", encoding="utf-8")
+            adapter = FakeWebAdapter()
+            engine = WorkflowEngine(
+                runtime_dir=root / "runtime",
+                provider_options={
+                    "local": LocalAgentProvider(),
+                    "deepseek": DeepSeekProvider(adapter=adapter),
+                },
+            )
+            request = "把页面XP改成20"
+            engine.route_memory.record(request, "deepseek", success=True)
+            result = engine.submit(
+                "web-route-memory", request, workspace=workspace,
+                allowed_files=("page.txt",),
+            )
+
+            self.assertEqual(result["provider_response"]["provider"], "local")
+            self.assertEqual(target.read_text(encoding="utf-8"), "XP=10\n")
+            self.assertEqual(adapter.calls, [])
+
+    def test_ordinary_task_does_not_default_to_web(self):
+        router = ModelRouter({
+            "local": LocalAgentProvider(),
+            "custom-consultant": DeepSeekProvider(adapter=object()),
+        })
+        ordinary = router.choose("CONFIRMATION_TASK", 2)
+        research = router.choose("TECHNICAL_RESEARCH", 2, needs_web=True)
+        self.assertEqual(ordinary.provider, "local")
+        self.assertEqual(research.provider, "custom-consultant")
+
+    def test_web_plan_prompt_is_advisory_not_an_edit_plan(self):
+        class FakeWebAdapter:
+            model = "deepseek-web"
+
+            def __init__(self):
+                self.prompt = ""
+
+            def send(self, request):
+                self.prompt = str(request["prompt"])
+                return {"answer": "read-only advice"}
+
+        adapter = FakeWebAdapter()
+        context = SimpleNamespace(user_request="修改配置", memory_hits=[])
+        response = DeepSeekProvider(adapter=adapter).plan(context)
+        self.assertTrue(response.success)
+        self.assertIn("只读外援", adapter.prompt)
+        self.assertNotIn("只返回 JSON", adapter.prompt)
+        self.assertNotIn("完整文件内容", adapter.prompt)
+
+    def test_web_advisory_response_cannot_supply_edits(self):
+        class FakeWebAdapter:
+            model = "deepseek-web"
+
+            def send(self, request):
+                return {"answer": json.dumps({"edits": {"page.txt": "XP=20\n"}})}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            target = workspace / "page.txt"
+            target.write_text("XP=10\n", encoding="utf-8")
+            engine = WorkflowEngine(
+                runtime_dir=root / "runtime",
+                provider_options={
+                    "local": LocalAgentProvider(),
+                    "deepseek": DeepSeekProvider(adapter=FakeWebAdapter()),
+                },
+            )
+            engine.model_router.choose = lambda *args, **kwargs: ModelChoice(
+                "deepseek", "forced advisory audit",
+            )
+            result = engine.submit(
+                "web-edit-guard", "把页面XP改成20", workspace=workspace,
+                allowed_files=("page.txt",),
+            )
+
+            self.assertEqual(result["provider_response"]["provider"], "deepseek")
+            self.assertEqual(result["result"].changed_files, ())
+            self.assertEqual(target.read_text(encoding="utf-8"), "XP=10\n")
+
+    def test_api_provider_can_still_supply_scoped_edits(self):
+        class FakeAPIAdapter:
+            def send(self, request):
+                prompt = request["messages"][0]["content"]
+                content = (
+                    json.dumps({"edits": {"page.txt": "XP=20\n"}})
+                    if "只返回 JSON" in prompt else "API analysis"
+                )
+                return {"choices": [{"message": {"content": content}}]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            target = workspace / "page.txt"
+            target.write_text("XP=10\n", encoding="utf-8")
+            engine = WorkflowEngine(
+                runtime_dir=root / "runtime",
+                provider_options={
+                    "local": LocalAgentProvider(),
+                    "kimi-api": OpenAIAPIProvider(adapter=FakeAPIAdapter()),
+                },
+            )
+            request = "把页面XP改成20"
+            engine.route_memory.record(request, "kimi-api", success=True)
+            result = engine.submit(
+                "api-edit-plan", request, workspace=workspace,
+                allowed_files=("page.txt",),
+            )
+
+            self.assertEqual(result["provider_response"]["provider"], "kimi-api")
+            self.assertEqual(result["result"].changed_files, ("page.txt",))
+            self.assertEqual(target.read_text(encoding="utf-8"), "XP=20\n")
+
+    def test_dispatch_cli_requires_an_explicit_provider(self):
+        from scripts.orchestrator_dispatch import main
+
+        output = StringIO()
+        request = json.dumps({"task_id": "no-default-web", "prompt": "分析"})
+        with redirect_stdout(output):
+            status = main(["--request", request])
+        payload = json.loads(output.getvalue())
+        self.assertEqual(status, 1)
+        self.assertEqual(payload["provider_id"], "")
+        self.assertEqual(payload["error"]["code"], "PROVIDER_NOT_CONFIGURED")
 
     def test_memory_and_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -17,13 +17,14 @@ def _apply_fusion_ui(page: str) -> str:
 """
     nav = r"""<button data-tab="fusion"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="m8.6 10.5 6.8-3M8.6 13.5l6.8 3"/></svg><span>Fusion 辅助 Agent</span></button>"""
     overview = r"""<div id="fusion-overview" class="fusion-overview"></div><div class="grid" id="stats"></div>"""
-    view = r"""<div id="fusion" class="view"><div class="head"><div><h1>Fusion 辅助 Agent</h1><p class="hint">主 Agent 负责拆解任务、审查改动和最终验收；Fusion 只承接明确的辅助调查、批量阅读和局部杂活。</p></div><button class="btn primary" onclick="saveFusion()">保存</button></div><div class="card"><div class="form"><div class="field full"><div class="switch-row"><div><label>启用 Fusion 辅助能力</label><small>开启后仍需选择 Provider 才能真正接受委派；不会自动继承默认模型。</small></div><label class="switch"><input id="fusion-enabled" type="checkbox"><span class="slider"></span></label></div></div><div class="field full"><label>Provider</label><select id="fusion-provider" onchange="updateFusionControls(true)"></select><p class="hint" id="fusion-provider-note">使用带 web/local/api 前缀的精确引用，默认留空。</p></div><div class="field"><label>工具模式</label><select id="fusion-mode" onchange="updateFusionControls(true)"><option value="readonly">只读：查阅、搜索和整理</option><option id="fusion-coding-option" value="coding">可修改：写入文件并执行命令</option></select><p class="hint" id="fusion-mode-note">只读模式不能写文件或执行命令。</p></div></div><div id="fusion-status" class="fusion-status"></div><div class="notice">Fusion 永不启动 Commander，也不会递归启动另一个 Fusion；Commander 运行时 Fusion 会自动让位。coding 模式仅支持 local 或 api Provider，保存前会再次确认。</div><div class="fusion-command"><span>会话内也可管理同一份配置</span><code>/agent-fusion</code></div></div></div>"""
+    view = r"""<div id="fusion" class="view"><div class="head"><div><h1>Fusion 辅助 Agent</h1><p class="hint">主 Agent 负责拆解任务、审查改动和最终验收；Fusion 只承接明确的辅助调查、批量阅读和局部杂活。</p></div><button class="btn primary" onclick="saveFusion()">保存</button></div><div class="card"><div class="form"><div class="field full"><div class="switch-row"><div><label>启用 Fusion 辅助能力</label><small>Provider 留空时自动按 API → 本地选择，不会继承网页默认模型。</small></div><label class="switch"><input id="fusion-enabled" type="checkbox"><span class="slider"></span></label></div></div><div class="field full"><div class="switch-row"><div><label>Beta 网页测试协助</label><small>默认关闭。显式开启后，网页外援、Hook 和网页识图才可作为最后辅助；网页不能执行本机任务。</small></div><label class="switch"><input id="web-assist-enabled" type="checkbox" onchange="updateWebAssistControls()"><span class="slider"></span></label></div></div><div class="field full"><label>Provider</label><select id="fusion-provider" onchange="updateFusionControls(true)"></select><p class="hint" id="fusion-provider-note">留空自动使用 API → 本地；也可精确指定 Provider。</p></div><div class="field"><label>工具模式</label><select id="fusion-mode" onchange="updateFusionControls(true)"><option value="readonly">只读：查阅、搜索和整理</option><option id="fusion-coding-option" value="coding">可修改：写入文件并执行命令</option></select><p class="hint" id="fusion-mode-note">只读模式不能写文件或执行命令。</p></div></div><div id="fusion-status" class="fusion-status"></div><div class="notice">正常协助只使用 API 或本地模型。Beta 网页测试协助是可选尾巴功能，不参与默认路由，也不能获得本机文件写入和 shell 能力。</div><div class="fusion-command"><span>会话内也可管理同一份配置</span><code>/agent-fusion</code></div></div></div>"""
     javascript = r"""
 function fusionReason(reason){
   const messages={
     READY:['Fusion 可用','主 Agent 可以按需分配辅助调查、批量阅读或已确认的局部修改。'],
     FUSION_DISABLED:['Fusion 已关闭','保存为开启后才会接受主 Agent 的委派。'],
-    FUSION_PROVIDER_NOT_CONFIGURED:['已开启，但尚未选择模型','当前不可调用；请选择 Provider 并保存。'],
+    FUSION_PROVIDER_NOT_CONFIGURED:['没有可用的执行模型','请配置 API 或本地模型；只有开启 Beta 后，网页才可作为最后辅助。'],
+    WEB_ASSIST_BETA_DISABLED:['Beta 网页测试协助未开启','网页 Provider 已被阻止，不会检查登录或启动浏览器；请改选 API/本地，或显式开启 Beta。'],
     FUSION_PROVIDER_NOT_FOUND:['已配置的 Provider 不存在','原 Provider 可能已被删除；请重新选择。'],
     FUSION_PROVIDER_DISABLED:['已配置的 Provider 已停用','请先启用该 Provider，或在这里重新选择。'],
     FUSION_PROVIDER_NOT_READY:['Provider 配置不完整','缺少必要地址或模型名称，当前不可调用。'],
@@ -36,9 +37,10 @@ function fusionReason(reason){
   return messages[reason]||['Fusion 暂不可用',reason||'尚未完成配置'];
 }
 function fusionProviderOptions(selected){
-  const groups=[['线上网页模型','web'],['本地模型','local'],['API 模型','api']];
+  const groups=[['API 模型','api'],['本地模型','local'],['Beta 网页模型（最后辅助）','web']];
+  const webEnabled=$('web-assist-enabled').checked;
   let known=false;
-  let html='<option value="">未选择（开启后也不可调用）</option>';
+  let html=`<option value="">自动：API → 本地${webEnabled?' → Beta 网页':''}</option>`;
   groups.forEach(([label,kind])=>{
     const items=providers(kind);
     if(!items.length)return;
@@ -46,8 +48,9 @@ function fusionProviderOptions(selected){
     items.forEach(p=>{
       const ref=kind+':'+p.id;
       if(ref===selected)known=true;
-      const disabled=p.enabled===false?' disabled':'';
-      const state=p.enabled===false?'（已停用）':'';
+      const unavailable=p.enabled===false||(kind==='web'&&!webEnabled);
+      const disabled=unavailable?' disabled':'';
+      const state=p.enabled===false?'（已停用）':(kind==='web'&&!webEnabled?'（Beta 已关闭）':'');
       html+=`<option value="${esc(ref)}"${disabled}>${esc(p.name||p.id)} · ${esc(ref)}${state}</option>`;
     });
     html+='</optgroup>';
@@ -60,22 +63,33 @@ function updateFusionControls(announce=false){
   const mode=$('fusion-mode');
   const coding=$('fusion-coding-option');
   const isWeb=provider.startsWith('web:');
+  const webEnabled=$('web-assist-enabled').checked;
   coding.disabled=isWeb;
   if(isWeb&&mode.value==='coding'){
     mode.value='readonly';
     if(announce)toast('网页 Provider 只能使用只读模式，已切换为 readonly');
   }
+  $('fusion-provider-note').textContent=isWeb&&!webEnabled?'该网页 Provider 已保留，但调用会被阻止；开启 Beta 或改选 API/本地。':'留空自动使用 API → 本地；也可精确指定 Provider。';
   $('fusion-mode-note').textContent=isWeb?'网页 Provider 不具备工具协议，只能只读协作。':(mode.value==='coding'?'可修改模式允许 Fusion 写入工作区并执行命令。':'只读模式不能写文件或执行命令。');
+}
+function updateWebAssistControls(){
+  const provider=$('fusion-provider');
+  const selected=provider.value;
+  provider.innerHTML=fusionProviderOptions(selected);
+  provider.value=selected;
+  updateFusionControls(false);
 }
 function renderFusion(){
   const fusion=state.fusion||{};
   const fusionState=state.fusion_state||{};
   const enabled=fusion.enabled!==false;
+  const webEnabled=(state.web_assist||{}).enabled===true;
   const selected=String(fusion.provider_id||'');
   const reason=fusionState.reason||(enabled?(selected?'FUSION_PROVIDER_NOT_READY':'FUSION_PROVIDER_NOT_CONFIGURED'):'FUSION_DISABLED');
   const ready=!!fusionState.delegable;
   const [title,detail]=fusionReason(reason);
   $('fusion-enabled').checked=enabled;
+  $('web-assist-enabled').checked=webEnabled;
   $('fusion-provider').innerHTML=fusionProviderOptions(selected);
   $('fusion-provider').value=selected;
   $('fusion-mode').value=fusion.tool_mode||'readonly';
@@ -94,7 +108,7 @@ async function saveFusion(){
     const currentMode=(state.fusion||{}).tool_mode||'readonly';
     const enteringCoding=toolMode==='coding'&&currentMode!=='coding';
     if(enteringCoding&&!confirm('允许 Fusion 修改工作区文件并执行 shell 命令？主 Agent 仍会审查并重新验证结果。'))return;
-    const data=await api('/api/settings',{method:'POST',body:JSON.stringify({fusion:{enabled:$('fusion-enabled').checked,provider_id:$('fusion-provider').value,tool_mode:toolMode,confirm_coding:enteringCoding}})});
+    const data=await api('/api/settings',{method:'POST',body:JSON.stringify({web_assist:{enabled:$('web-assist-enabled').checked},fusion:{enabled:$('fusion-enabled').checked,provider_id:$('fusion-provider').value,tool_mode:toolMode,confirm_coding:enteringCoding}})});
     Object.assign(state,data.config);
     render();
     toast('Fusion 配置已保存');
@@ -116,6 +130,13 @@ async function saveFusion(){
         page,
         '<div id="security" class="view">',
         view + '<div id="security" class="view">',
+    )
+    page = _replace_once(
+        page,
+        '<div class="stack" id="web-list"></div>',
+        '<div class="notice">网页协助默认不参与任务，只是可选的 Beta 最后辅助。'
+        '<button class="btn" onclick="showFusionTab()">管理 Beta 开关</button></div>'
+        '<div class="stack" id="web-list"></div>',
     )
     page = _replace_once(
         page,
@@ -559,7 +580,7 @@ function titleStem(alias){const known={deepseek:'DeepSeek',qianwen:'Qianwen',kim
 function autoTitles(alias){const root='AgentRelay-'+titleStem(alias);return {flash:root+'-Flash',expert:root+'-Expert',hybrid:root}}
 function providers(kind){return state[kind+'_providers']||[]}
 function available(){return providers('api').some(p=>p.enabled!==false)||providers('local').some(p=>p.enabled!==false)}
-function providerStatus(kind,p){const fmtMap={chat:'Chat',responses:'Responses',anthropic:'Anthropic Messages'};const limit=` · 并发 ${p.max_concurrency||(kind==='api'?10:1)} · 排队 ${p.queue_timeout||30} 秒`;if(kind==='web'){const modes=' · 模式：'+modeSummary(p);if(p.adapter==='deepseek')return '<b>DeepSeek 已接通</b>：专属适配器，可自动发送问题并读取回复'+modes+limit;if(p.adapter==='generic')return '<b>通用兜底适配器</b>：会尝试自动对话；个别网站不稳定时可再补专属适配器'+modes+limit;return '<span class="wait">已保存网页登录配置</span>：目前还不能自动操作这个网站的对话页面'+modes+limit}if(kind==='local')return '<b>协作模型</b>：本地执行任务按 API → 本地路由'+limit;return `<b>协作模型 · 消息格式 ${fmtMap[p.format]||'Chat'}</b>${limit}`}
+function providerStatus(kind,p){const fmtMap={chat:'Chat',responses:'Responses',anthropic:'Anthropic Messages'};const limit=` · 并发 ${p.max_concurrency||(kind==='api'?10:1)} · 排队 ${p.queue_timeout||30} 秒`;if(kind==='web'){const modes=' · 模式：'+modeSummary(p);if((state.web_assist||{}).enabled!==true)return '<span class="wait">Beta 网页测试协助已关闭</span>：不会自动调用或参与默认路由'+modes+limit;if(p.adapter==='deepseek')return '<b>Beta · DeepSeek 已接通</b>：仅作最后辅助'+modes+limit;if(p.adapter==='generic')return '<b>Beta · 通用兜底适配器</b>：仅作最后辅助，网站操作稳定性需要实测'+modes+limit;return '<span class="wait">已保存网页登录配置</span>：目前还不能自动操作这个网站的对话页面'+modes+limit}if(kind==='local')return '<b>协作模型</b>：本地执行任务按 API → 本地路由'+limit;return `<b>协作模型 · 消息格式 ${fmtMap[p.format]||'Chat'}</b>${limit}`}
 function card(kind,p,actions=true){const checkLabel=kind==='web'?'就绪检查':'测试';const dot=p.enabled!==false?'<span class="dot on"></span>':'<span class="dot off"></span>';const status=p.enabled!==false?'启用':'已停用';const glyph=kind==='web'?'W':kind==='local'?'L':'A';return `<article class="card provider provider-${kind}"><div><span class="provider-glyph" aria-hidden="true">${glyph}</span><div class="ptitle"><strong>${esc(p.name||p.id)}</strong>${p.id===state.default_provider?'<span class="stag def">默认</span>':''}</div><div class="meta">${esc(p.id)} · ${esc(p.base_url||p.endpoint||'')}</div><div class="state">${providerStatus(kind,p)}</div></div>${actions?`<div class="actions"><span class="status">${dot}${status}</span><button class="btn" onclick="testProvider('${kind}','${esc(p.id)}')">${checkLabel}</button><button class="btn" onclick="showForm('${kind}','${esc(p.id)}')">编辑</button><button class="btn" onclick="toggleProvider('${kind}','${esc(p.id)}')">${p.enabled!==false?'停用':'启用'}</button>${kind==='web'?`<button class="btn" onclick="setDefault('${esc(p.id)}')">设为默认</button>`:''}<button class="btn danger" onclick="deleteProvider('${kind}','${esc(p.id)}')">删除</button></div>`:`<div class="actions"><span class="status">${dot}${status}</span></div>`}</article>`}
 function render(){const c=state.commander||{};$('mode').textContent=c.enabled?'Commander 已启用':'离线基础模式';$('config-path').textContent=state.config_path||'本机加密目录';const ok=available();$('commander-enabled').checked=!!c.enabled;$('commander-enabled').disabled=!ok;$('commander-note').textContent=ok?'已检测到 API 或本地模型，默认启用；可手动关闭。':'尚未配置 API 或本地模型，暂时无法开启。';$('terminal-path').value=c.terminal_path||c.terminal||'codex';$('max-agents').value=c.max_agents||5;if($('router-port'))$('router-port').value=(state.api_router||{}).port||15731;const types=[['线上模型','WEB NODES',providers('web').length],['本地模型','LOCAL NODES',providers('local').length],['API 模型','API LINKS',providers('api').length]];$('stats').innerHTML=types.map(([name,code,count],i)=>`<article class="card stat-card"><div class="stat-top"><span class="label">${name}</span><span class="stat-code">0${i+1} / ${code}</span></div><div class="stat">${String(count).padStart(2,'0')}</div><div class="stat-track"><i style="width:${count?Math.min(100,28+count*24):8}%"></i></div></article>`).join('');const list=[['web',providers('web')],['local',providers('local')],['api',providers('api')]].flatMap(([kind,items])=>items.map(p=>card(kind,p,false)));$('overview-list').innerHTML=list.join('')||'<div class="empty">还没有 Provider，离线基础能力仍可使用。</div>';['web','local','api'].forEach(kind=>$(kind+'-list').innerHTML=providers(kind).map(p=>card(kind,p)).join('')||'<div class="empty">暂无配置。</div>');renderTargets();stagger()}
 function stagger(){document.querySelectorAll('.stack').forEach(stack=>{[...stack.children].forEach((el,i)=>{if(el.classList&&el.classList.contains('card'))el.style.animationDelay=Math.min(i*55,440)+'ms'})})}

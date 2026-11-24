@@ -376,6 +376,9 @@ class PiExtensionTests(unittest.TestCase):
         self.assertIn("AGENTRELAY_SHIM", content)
         self.assertIn("AGENTRELAY_FUSION", content)
         self.assertIn('import { Type } from "typebox"', content)
+        self.assertIn('import agentRelayMessages from "./agent-message.ts";', content)
+        self.assertIn("agentRelayMessages(pi);", content)
+        self.assertTrue(extension.with_name("agent-message.ts").is_file())
         self.assertIn('pi.on("tool_call"', content)
         self.assertIn('pi.on("tool_result"', content)
         self.assertIn('pi.on("message_end"', content)
@@ -413,6 +416,28 @@ class PiExtensionTests(unittest.TestCase):
         self.assertFalse(targets.write_pi_extension(
             extension, Path("/venv/bin/python"), Path("/skill/scripts/agentrelay_hook_shim.py"),
         ))
+
+    def test_pi_uninstall_removes_only_managed_message_extension(self):
+        tmp = Path(tempfile.mkdtemp(prefix="agentrelay-pi-uninstall-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        extension = tmp / "extensions" / "agent-relay.ts"
+        unrelated = extension.with_name("unrelated.ts")
+        targets.write_pi_extension(
+            extension,
+            Path("/venv/bin/python"),
+            Path("/skill/scripts/agentrelay_hook_shim.py"),
+        )
+        unrelated.write_text("export default function unrelated() {}\n", encoding="utf-8")
+        meta = {"skill_dir": tmp / "skills" / "agent-relay", "config_path": extension}
+
+        changes = targets.unregister_agent_relay("pi", meta)
+
+        self.assertFalse(extension.exists())
+        self.assertFalse(extension.with_name("agent-message.ts").exists())
+        self.assertTrue(unrelated.is_file())
+        backups = list(tmp.glob("**/*.before-agentrelay-uninstall.*"))
+        self.assertEqual(len(backups), 2)
+        self.assertIn(str(extension), changes)
 
     def test_registration_requires_explicit_pi_target(self):
         tmp = Path(tempfile.mkdtemp(prefix="agentrelay-pi-registration-"))

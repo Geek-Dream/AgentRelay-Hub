@@ -15,7 +15,7 @@ AgentRelay 候选求援状态追踪器
 
 注意：
 - 本文件只负责记录和计算
-- 不直接启动 AgentRelay
+- 只在升级阶梯末端启动 AgentRelay，且启动前必须检测到网页 Provider
 - 不修改 AgentRelay Playwright 程序
 - failed_tool_call_count != retry_count
 """
@@ -5018,7 +5018,9 @@ def get_trigger_conditions(state):
         and not already_triggered
         and not explicit_candidate
         and signal_count >= 1
-        and state.get("relay_force_state") is None
+        and state.get("relay_force_state") in {
+            None, "provider_not_configured", "web_assist_disabled",
+        }
     ):
         last_signal_at = state.get("relay_last_signal_at")
         wait_seconds = RELAY_ESCALATION_WAIT_SECONDS.get(
@@ -5219,6 +5221,81 @@ def find_relay_python():
     return sys.executable
 
 
+def load_forced_relay_config_manager():
+    """Load the same local encrypted-config reader used by AgentRelay."""
+
+    candidates = (
+        Path(os.environ["AGENTRELAY_SCRIPTS"]) / "config_manager.py"
+        if os.environ.get("AGENTRELAY_SCRIPTS") else None,
+        Path(__file__).resolve().parent.parent / "scripts" / "config_manager.py",
+        CODEX_DIR / "skills" / "agent-relay" / "scripts" / "config_manager.py",
+        HOME / ".agents" / "skills" / "agent-relay" / "scripts" / "config_manager.py",
+    )
+    for candidate in candidates:
+        if candidate is None or not candidate.is_file():
+            continue
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "agentrelay_forced_relay_config", candidate,
+            )
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        except Exception:
+            continue
+    return None
+
+
+def forced_relay_provider_status():
+    """Return (Provider ID, unavailable reason) without opening a browser."""
+
+    manager = load_forced_relay_config_manager()
+    if manager is None:
+        return "", "provider_not_configured"
+    try:
+        # Match run_provider(): a legacy DeepSeek login is migrated before use.
+        config, _ = manager.migrate_legacy_deepseek_config(CODEX_DIR)
+    except Exception as exc:
+        log_event(
+            "relay_provider_check_failed",
+            {"error_type": type(exc).__name__},
+        )
+        return "", "provider_not_configured"
+
+    entries = [
+        item for item in config.get("web_providers", [])
+        if isinstance(item, dict)
+        and item.get("enabled", True)
+        and str(item.get("base_url") or item.get("url") or "").strip()
+    ]
+    if not entries:
+        return "", "provider_not_configured"
+
+    if not manager.web_assist_enabled(config):
+        return "", "web_assist_disabled"
+
+    available = {"web_providers": entries}
+    requested = str(os.environ.get("AGENT_RELAY_PROVIDER") or "").strip()
+    selected = None
+    if requested:
+        selected = manager.find_web_provider(available, requested)
+    else:
+        preferred = str(config.get("default_provider") or "").strip()
+        if preferred:
+            selected = manager.find_web_provider(available, preferred)
+        if selected is None:
+            selected = entries[0]
+    return (str(selected.get("id") or "") if selected else ""), (
+        "" if selected else "provider_not_configured"
+    )
+
+
+def configured_forced_relay_provider():
+    """Return the exact enabled Beta web Provider that a forced call would use."""
+    return forced_relay_provider_status()[0]
+
+
 def pid_alive(pid):
     if os.name == "nt":
         return windows_pid_alive(pid)
@@ -5311,6 +5388,31 @@ def launch_forced_relay(state):
     返回要展示给 Agent 的通知文本；启动失败时返回失败说明。
     """
 
+    provider_id, unavailable_reason = forced_relay_provider_status()
+    if not provider_id:
+        first_notice = state.get("relay_force_state") != unavailable_reason
+        state["relay_force_state"] = unavailable_reason
+        if not first_notice:
+            return None
+        log_event(
+            "relay_forced_provider_missing",
+            {
+                "problem_id": state.get("problem_id") or "unknown",
+                "reason": unavailable_reason,
+            },
+        )
+        if unavailable_reason == "web_assist_disabled":
+            return (
+                "AgentRelay 强制执行暂缓：Beta 网页测试协助默认关闭，"
+                "本次不会启动浏览器或调用在线模型。如确需网页最后辅助，"
+                "请在配置中心显式开启；开启后，满足原强制条件时会自动继续。"
+            )
+        return (
+            "AgentRelay 强制执行暂缓：未配置已启用的网页 Provider，"
+            "本次不会启动浏览器或调用在线模型。请先在 AgentRelay 配置中心"
+            "添加网页 Provider；配置完成后，满足原强制条件时会自动继续。"
+        )
+
     problem_id = state.get("problem_id") or "unknown"
     out_file, pid_file = forced_relay_artifacts(
         problem_id
@@ -5342,6 +5444,8 @@ def launch_forced_relay(state):
                     "utf8",
                     str(script),
                     question,
+                    "--provider",
+                    provider_id,
                 ],
                 stdout=out_handle,
                 stderr=subprocess.STDOUT,
@@ -5500,7 +5604,9 @@ def emit_relay_trigger(state, hook_event_name="PostToolUse"):
     # 第 3 次提醒后等待期满仍无响应：直接强制执行。
     if (
         conditions.get("force_due")
-        and state.get("relay_force_state") is None
+        and state.get("relay_force_state") in {
+            None, "provider_not_configured", "web_assist_disabled",
+        }
     ):
         launch_notice = launch_forced_relay(state)
         if launch_notice:

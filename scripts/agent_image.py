@@ -222,6 +222,8 @@ def web_provider_supports_images(provider_id: str, entry: Mapping[str, Any]) -> 
 
 
 def image_capable_web_providers(config: Mapping[str, Any]) -> list[dict[str, Any]]:
+    if not config_manager.web_assist_enabled(config):
+        return []
     providers = [
         item for item in config.get("web_providers", []) or []
         if isinstance(item, dict) and item.get("enabled", True)
@@ -396,12 +398,12 @@ def print_failure_report(failures: list[tuple[str, str]]) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="AgentRelay 图片识别中继：把图片发给支持识图的在线模型并输出描述。"
+        description="AgentRelay 图片识别中继：本地视觉模型优先，Beta 网页模型最后辅助。"
     )
     parser.add_argument("images", nargs="+", help="图片文件路径，最多 5 张。")
     parser.add_argument(
         "--provider", default="",
-        help="优先使用指定网页 Provider（如 deepseek）；失败后仍会自动切换其他候选。",
+        help="匹配指定的本地或网页 Provider；本地始终优先，网页需要开启 Beta。",
     )
     parser.add_argument(
         "--question", default="",
@@ -452,6 +454,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"🗜️ {image.name} 已压缩后再发送（超过 {MAX_IMAGE_BYTES // 1024 // 1024}MB 或边长超过 {MAX_IMAGE_DIMENSION}px）。")
         prepared.append(send_path)
 
+    web_assist_enabled = config_manager.web_assist_enabled(config)
     web_candidates = image_capable_web_providers(config)
     requested = (args.provider or "").strip().lower()
     requested_note = ""
@@ -460,7 +463,9 @@ def main(argv: list[str] | None = None) -> int:
         match = next((item for item in web_candidates
                       if str(item.get("id", "")).strip().lower() in aliases), None)
         entry = config_manager.find_web_provider(config, requested)
-        if match is not None:
+        if entry is not None and not web_assist_enabled:
+            requested_note = "Beta 网页测试协助未开启，已忽略指定的网页 Provider。"
+        elif match is not None:
             web_candidates = [match] + [item for item in web_candidates if item is not match]
         elif entry is not None:
             requested_note = f"指定的 Provider（{requested}）不支持图片，已改用其他支持识图的 Provider。"
@@ -480,28 +485,13 @@ def main(argv: list[str] | None = None) -> int:
     if not web_candidates and not local_candidates:
         print(
             "⚠️ 当前没有任何支持图片识别的模型可用：\n"
-            "  - 网页模型需要在配置中心启用支持图片的对话模式（DeepSeek 混合模式默认支持；\n"
-            "    GPT 网页识图限时限量，默认不启用）；\n"
             "  - 本地模型需要在配置时确认支持图片识别（vision）。\n"
+            "  - 网页模型仅是最后辅助，需先开启“Beta 网页测试协助”，并启用支持图片的对话模式。\n"
             "  请先在配置中心完成配置后再试；本次图片未被发送。"
         )
         return 0
 
     failures: list[tuple[str, str]] = []
-    for entry in web_candidates:
-        provider_id = str(entry.get("id", "deepseek-web"))
-        label = str(entry.get("name", provider_id))
-        print(f"[Provider] 使用网页模型 {label} 识别图片。", flush=True)
-        ok, output, reason = run_web_provider_attempt(provider_id, prompt, prepared)
-        if ok:
-            print(output)
-            answer = _extract_answer(output)
-            if not args.no_cache:
-                cache_store(digest, label, answer)
-            return 0
-        print(f"[Provider] {label} 失败（{reason}），切换下一个候选。", flush=True)
-        failures.append((label, reason))
-
     for entry in local_candidates:
         label = f"本地模型 {entry.get('name', entry.get('id'))}"
         print(f"[Provider] 使用 {label} 识别图片。", flush=True)
@@ -512,6 +502,20 @@ def main(argv: list[str] | None = None) -> int:
                 cache_store(digest, label, answer)
             return 0
         print(f"[Provider] {label} 失败（{reason}），切换下一个候选。", flush=True)
+        failures.append((label, reason))
+
+    for entry in web_candidates:
+        provider_id = str(entry.get("id", "deepseek-web"))
+        label = str(entry.get("name", provider_id))
+        print(f"[Provider] 使用 Beta 网页模型 {label} 进行最后辅助识图。", flush=True)
+        ok, output, reason = run_web_provider_attempt(provider_id, prompt, prepared)
+        if ok:
+            print(output)
+            answer = _extract_answer(output)
+            if not args.no_cache:
+                cache_store(digest, label, answer)
+            return 0
+        print(f"[Provider] {label} 失败（{reason}），没有更多候选。", flush=True)
         failures.append((label, reason))
 
     print_failure_report(failures)

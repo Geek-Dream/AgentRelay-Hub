@@ -37,8 +37,12 @@ class DeepSeekWebProvider:
     def check_available(self) -> bool:
         try:
             from .agent_relay_runtime import provider_state_file, resolve_codex_home
+            from .config_manager import load_config, web_assist_enabled
         except ImportError:
             from agent_relay_runtime import provider_state_file, resolve_codex_home
+            from config_manager import load_config, web_assist_enabled
+        if not web_assist_enabled(load_config(resolve_codex_home())):
+            return False
         state_path = provider_state_file(self.provider_id, resolve_codex_home(), os.environ)
         return Path(state_path).is_file()
 

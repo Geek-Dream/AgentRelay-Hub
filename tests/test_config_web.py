@@ -29,6 +29,7 @@ class FusionConfigWebTests(unittest.TestCase):
                 "delegable": False,
                 "reason": "FUSION_PROVIDER_NOT_CONFIGURED",
             },
+            "web_assist": {"enabled": False},
             "commander": {
                 "enabled": False,
                 "terminal_path": "codex",
@@ -58,13 +59,17 @@ class FusionConfigWebTests(unittest.TestCase):
         self.assertIn('id="fusion-enabled"', page)
         self.assertIn('id="fusion-provider"', page)
         self.assertIn('id="fusion-mode"', page)
+        self.assertIn('id="web-assist-enabled"', page)
+        self.assertIn("Beta 网页测试协助", page)
+        self.assertIn("自动：API → 本地", page)
         self.assertIn("/agent-fusion", page)
 
     def test_unconfigured_provider_state_is_visible_and_explained(self):
         page = build_config_page(self.page_config())
         self.assertIn("FUSION_PROVIDER_NOT_CONFIGURED", page)
-        self.assertIn("已开启，但尚未选择模型", page)
-        self.assertIn("当前不可调用", page)
+        self.assertIn("没有可用的执行模型", page)
+        self.assertIn("请配置 API 或本地模型", page)
+        self.assertIn("WEB_ASSIST_BETA_DISABLED", page)
         self.assertIn('id="fusion-overview"', page)
 
     def test_state_is_embedded_without_breaking_script_tags(self):

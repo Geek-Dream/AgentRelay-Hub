@@ -375,7 +375,8 @@ def _call_provider_model(
 def _delegate_error_messages() -> dict[str, str]:
     return {
         "FUSION_DISABLED": "Fusion 当前已关闭",
-        "FUSION_PROVIDER_NOT_CONFIGURED": "Fusion 尚未配置 Provider",
+        "FUSION_PROVIDER_NOT_CONFIGURED": "Fusion 没有可用的 API 或本地 Provider",
+        "WEB_ASSIST_BETA_DISABLED": "Beta 网页测试协助未开启，网页 Provider 不会参与 Fusion",
         "FUSION_PROVIDER_NOT_FOUND": "Fusion 配置的 Provider 已不存在",
         "FUSION_PROVIDER_DISABLED": "Fusion 配置的 Provider 已停用",
         "FUSION_PROVIDER_NOT_READY": "Fusion 配置的 Provider 缺少必要地址或模型名称",
@@ -609,6 +610,13 @@ def _provider_command(reference: str, home: Path | None) -> tuple[dict[str, Any]
             error,
             "没有找到完全匹配的 Provider",
             available_providers=fusion_mode.available_providers(config),
+        ), 2
+    if provider["kind"] == "web" and not config_manager.web_assist_enabled(config):
+        return _error(
+            "rejected",
+            "WEB_ASSIST_BETA_DISABLED",
+            "网页协助默认关闭；请先在配置中心显式开启 Beta 网页测试协助",
+            provider=fusion_mode.public_provider(provider),
         ), 2
     if not bool(provider["entry"].get("enabled", True)):
         return _error(

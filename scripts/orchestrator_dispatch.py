@@ -20,10 +20,10 @@ except ImportError:
     from orchestrator_store import DispatchRequest
 
 
-def main() -> int:
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Agent Orchestrator Dispatcher")
     parser.add_argument("--request", help="JSON 工作单；不提供时从 stdin 读取")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     raw = args.request if args.request is not None else sys.stdin.read()
     try:
         value = json.loads(raw)
@@ -33,7 +33,7 @@ def main() -> int:
             task_id=str(value["task_id"]),
             request_id=value.get("request_id"),
             level=str(value.get("mode", value.get("level", "expert"))),
-            model=value.get("provider_id", value.get("model", "deepseek-web")),
+            model=value.get("provider_id", value.get("model", "")) or "",
             title=str(value.get("title", "")),
             prompt=str(value["prompt"]),
             workspace=value.get("workspace"),

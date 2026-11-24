@@ -59,6 +59,19 @@ class RelayEscalationTests(unittest.TestCase):
             )
         return emitted, output.getvalue()
 
+    def configure_web_provider(self, enable_beta=True):
+        manager = self.tracker.load_forced_relay_config_manager()
+        self.assertIsNotNone(manager)
+        manager.save_config({
+            "web_assist": {"enabled": enable_beta},
+            "default_provider": "deepseek-web",
+            "web_providers": [{
+                "id": "deepseek-web",
+                "base_url": "https://chat.deepseek.com/",
+                "enabled": True,
+            }],
+        }, self.root)
+
     def test_first_signal_emitted_at_threshold(self):
         state = self.make_state()
         emitted, raw = self.emit(state, now=1000)
@@ -126,6 +139,7 @@ class RelayEscalationTests(unittest.TestCase):
             relay_last_signal_at=1000 - 300,
             relay_signal_retry_count=8,
         )
+        self.configure_web_provider()
 
         script = (
             self.root
@@ -225,6 +239,7 @@ class RelayEscalationTests(unittest.TestCase):
             relay_last_signal_at=1000 - 300,
             relay_signal_retry_count=8,
         )
+        self.configure_web_provider()
         script = (
             self.root
             / "skills" / "agent-relay" / "scripts" / "agent_relay.py"
@@ -241,6 +256,58 @@ class RelayEscalationTests(unittest.TestCase):
         payload = json.loads(raw)
         self.assertEqual(payload["decision"], "block")
         self.assertIn("强制执行已启动", payload["reason"])
+
+    def test_force_waits_for_provider_and_notifies_only_once(self):
+        state = self.make_state(
+            retry_count=12,
+            relay_signal_count=3,
+            relay_last_signal_at=1000 - 300,
+            relay_signal_retry_count=8,
+        )
+        with patch.object(self.tracker.subprocess, "Popen") as popen:
+            emitted, raw = self.emit(state, now=1000)
+            self.assertTrue(emitted)
+            self.assertIn("未配置", raw)
+            self.assertEqual(state["relay_force_state"], "provider_not_configured")
+            self.assertFalse(popen.called)
+
+            emitted_again, _ = self.emit(state, now=1001)
+            self.assertFalse(emitted_again)
+            self.assertFalse(popen.called)
+
+            self.configure_web_provider()
+            script = (
+                self.root / "skills" / "agent-relay" / "scripts" / "agent_relay.py"
+            )
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.write_text("# fake relay script\n", encoding="utf-8")
+            process = unittest.mock.Mock()
+            process.pid = 4545
+            popen.return_value = process
+            emitted_after_config, raw_after_config = self.emit(state, now=1002)
+
+        self.assertTrue(emitted_after_config)
+        self.assertIn("强制执行已启动", raw_after_config)
+        self.assertEqual(state["relay_force_state"], "launched")
+        self.assertTrue(popen.called)
+        command = popen.call_args.args[0]
+        self.assertIn("--provider", command)
+        self.assertIn("deepseek-web", command)
+
+    def test_force_respects_beta_opt_in(self):
+        self.configure_web_provider(enable_beta=False)
+        state = self.make_state(
+            retry_count=12,
+            relay_signal_count=3,
+            relay_last_signal_at=1000 - 300,
+            relay_signal_retry_count=8,
+        )
+        with patch.object(self.tracker.subprocess, "Popen") as popen:
+            emitted, raw = self.emit(state, now=1000)
+        self.assertTrue(emitted)
+        self.assertIn("Beta 网页测试协助默认关闭", raw)
+        self.assertEqual(state["relay_force_state"], "web_assist_disabled")
+        self.assertFalse(popen.called)
 
 
 if __name__ == "__main__":

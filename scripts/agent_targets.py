@@ -541,13 +541,19 @@ def unregister_agent_relay(target_id: str, target: dict) -> list[str]:
     if config_path is None:
         return [str(path) for path in changes]
     path = Path(config_path)
+    if target_id == "pi":
+        for managed_path in (path, path.with_name("agent-message.ts")):
+            if managed_path.is_symlink():
+                raise TargetError(f"拒绝卸载符号链接 Pi 扩展：{managed_path}")
+            if managed_path.is_file():
+                backup_file(managed_path, "before-agentrelay-uninstall")
+                managed_path.unlink()
+                changes.append(managed_path)
+        return [str(item) for item in changes]
     if not path.is_file():
         return [str(path) for path in changes]
     backup_file(path, "before-agentrelay-uninstall")
-    if target_id == "pi":
-        path.unlink()
-        changes.append(path)
-    elif target_id in {"codex", "claude"}:
+    if target_id in {"codex", "claude"}:
         config = json.loads(path.read_text(encoding="utf-8"))
         hooks = config.get("hooks") or {}
         for event, entries in list(hooks.items()):
@@ -718,6 +724,7 @@ def register_hermes(config_path: Path, venv_python: Path, shim_path: Path) -> bo
 
 
 PI_EXTENSION_TEMPLATE = """// AgentRelay 上下文注入扩展（由 AgentRelay 安装器生成，重新安装会覆盖此文件）
+import agentRelayMessages from "./agent-message.ts";
 import {{ execFile, spawnSync }} from "node:child_process";
 import {{ existsSync }} from "node:fs";
 import {{ homedir }} from "node:os";
@@ -1109,7 +1116,8 @@ function fusionEvidence(result) {{
 
 const FUSION_REASONS = {{
   FUSION_DISABLED: "Fusion 已关闭",
-  FUSION_PROVIDER_NOT_CONFIGURED: "尚未选择 Provider",
+  FUSION_PROVIDER_NOT_CONFIGURED: "没有可用的 API 或本地 Provider",
+  WEB_ASSIST_BETA_DISABLED: "Beta 网页测试协助未开启，网页 Provider 已阻止",
   FUSION_PROVIDER_NOT_FOUND: "配置的 Provider 已不存在",
   FUSION_PROVIDER_DISABLED: "配置的 Provider 已停用",
   FUSION_PROVIDER_NOT_READY: "Provider 缺少必要地址或模型名称",
@@ -1151,7 +1159,7 @@ function fusionMenuChoice(items, selected) {{
 }}
 
 function fusionProviderDescription(kind) {{
-  if (kind === "web") return "网页 Provider，沿用现有登录会话，不切换默认网站";
+  if (kind === "web") return "Beta 网页最后辅助；仅列出已显式开启 Beta 的可用项";
   if (kind === "local") return "本地模型 Provider，只调用本机配置，不访问云端";
   if (kind === "api") return "API Provider，使用已配置的接口、协议和模型";
   return "已配置的外部模型 Provider";
@@ -1180,7 +1188,7 @@ async function fusionProviderMenu(ctx) {{
   const selected = await ctx.ui.select(
     providers.length > 0
       ? "选择 Agent Fusion Provider（只列出本机已配置项，不探测登录）"
-      : "尚未配置 Provider，请先在 AgentRelay 配置中心添加网页、本地或 API Provider",
+      : "没有可用 Provider，请先配置 API/本地；网页还需显式开启 Beta",
     items.map(fusionMenuText),
   );
   const item = fusionMenuChoice(items, selected);
@@ -1233,7 +1241,7 @@ async function fusionMenu(ctx) {{
     {{
       id: "provider",
       label: "选择 Provider",
-      description: "从本机已配置的网页、本地或 API Provider 中选择独立会话使用的模型",
+      description: "选择 API、本地或已开启 Beta 的网页 Provider；留空配置会自动 API → 本地",
     }},
     {{
       id: "mode-readonly",
@@ -1252,8 +1260,8 @@ async function fusionMenu(ctx) {{
     }},
     {{
       id: "clear-provider",
-      label: "清除 Provider",
-      description: "保留 Fusion 开关，但立即停止外部模型调用",
+      label: "恢复自动 Provider",
+      description: "清除手动选择，恢复 API → 本地自动路由；网页仍受 Beta 开关限制",
     }},
   ];
   const selected = await ctx.ui.select("Agent Fusion 设置\\n" + current, items.map(fusionMenuText));
@@ -1348,6 +1356,8 @@ async function fusionCommand(args, ctx) {{
 }}
 
 export default function agentRelay(pi) {{
+  agentRelayMessages(pi);
+
   let lastReplyText = "";
   let finalStopEmitted = false;
   let agentSettledSupported = false;
@@ -1721,9 +1731,13 @@ def write_pi_extension(
     compatibility. The generated extension resolves them again at runtime.
     """
     _ = venv_python, shim_path, fusion_path
+    message_changed = install_managed_file(
+        Path(__file__).resolve().with_name("agent_message_pi.ts"),
+        extension_path.with_name("agent-message.ts"),
+    )
     content = PI_EXTENSION_TEMPLATE.format()
     if extension_path.is_file() and extension_path.read_text(encoding="utf-8") == content:
-        return False
+        return message_changed
     backup_file(extension_path, "before-agentrelay-update")
     extension_path.parent.mkdir(parents=True, exist_ok=True)
     extension_path.write_text(content, encoding="utf-8")
@@ -1807,6 +1821,9 @@ def registered_in_config(target_id: str, meta: dict, venv_python: Path, shim_pat
     if target_id == "pi":
         if not path.is_file():
             return False, f"扩展文件不存在：{path}"
+        message_extension = path.with_name("agent-message.ts")
+        if not message_extension.is_file():
+            return False, f"Pi 跨 Agent 消息扩展不存在：{message_extension}"
         text = path.read_text(encoding="utf-8")
         if "agentrelay_hook_shim.py" not in text or not command_has_target(text, "pi"):
             return False, "Pi 扩展未显式调用 agentrelay_hook_shim.py --target pi"

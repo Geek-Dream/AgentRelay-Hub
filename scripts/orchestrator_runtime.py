@@ -29,7 +29,7 @@ class RouteDecision:
 class ModelRegistry:
     def __init__(self, models: Iterable[ModelSpec] = ()):
         self.models = {model.name: model for model in models if model.enabled}
-        self.default_provider = "deepseek-web"
+        self.default_provider = None
 
     def suitable(self, required: Iterable[str]) -> list[ModelSpec]:
         required_set = set(required)
@@ -44,7 +44,7 @@ class ModelRegistry:
                                     capabilities=frozenset(item.get("capabilities", [])),
                                     scores=item.get("scores", {}), enabled=item.get("enabled", True)))
         registry = cls(models)
-        registry.default_provider = value.get("default_provider", "deepseek-web")
+        registry.default_provider = value.get("default_provider") or None
         return registry
 
     def best(self, required: Iterable[str], prefer_kinds: Iterable[str] = ()) -> ModelSpec | None:
@@ -68,7 +68,9 @@ def route_task(*, complexity: int, needs_web: bool = False, needs_edit: bool = F
         return RouteDecision("direct", None, "未配置本地 Worker，由 Codex 直接处理")
     if needs_web:
         model = registry.best(("web_search",), ("web", "api", "local"))
-        return RouteDecision("expert", model.name if model else registry.default_provider, "需要联网检索")
+        if model:
+            return RouteDecision("expert", model.name, "需要联网检索")
+        return RouteDecision("direct", None, "未配置联网研究 Provider，由主 Agent 直接处理")
     if complexity >= 4:
         return RouteDecision("commander", None, "跨模块或高复杂度任务")
     return RouteDecision("direct", None, "由 Codex 直接处理")

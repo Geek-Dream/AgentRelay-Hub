@@ -58,6 +58,7 @@ FUSION_SCRIPT_FILES = (
     "fusion_assist.py",
     "fusion_runner.py",
     "fusion_trace.py",
+    "stdio_encoding.py",
 )
 SCRIPT_FILES = (
     "subprocess_compat.py",
@@ -96,6 +97,9 @@ SCRIPT_FILES = (
     "approval_policy.py",
     "deletion_policy.py",
     "delivery_audit.py",
+    "agent_message_bus.py",
+    "agent_message_adapters.py",
+    "agent_message_pi.ts",
     "app_close_policy.py",
     "change_contract.py",
     "page_verification.py",
@@ -119,6 +123,7 @@ REFERENCE_FILES = (
     "work-profiles.md",
     "confirmation-card.md",
     "red-green-review.md",
+    "agent-messages.md",
 )
 TRACKED_EVENTS = (
     "SessionStart",
@@ -1984,6 +1989,11 @@ def run_web_configurator() -> None:
                     self._send({"results":results,"errors":errors,"config":public_config()});return
                 if self.path == "/api/scan-local": self._send({"found":_scan_local_services()});return
                 if self.path == "/api/settings":
+                    web_assist_incoming=data.get("web_assist",{})
+                    if isinstance(web_assist_incoming,dict) and "enabled" in web_assist_incoming:
+                        config["web_assist"]={
+                            "enabled":bool(web_assist_incoming.get("enabled")),
+                        }
                     fusion_incoming=data.get("fusion",{})
                     if isinstance(fusion_incoming,dict):
                         from scripts import fusion_mode

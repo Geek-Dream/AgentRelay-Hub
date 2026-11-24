@@ -49,6 +49,7 @@ class FusionTestBase(unittest.TestCase):
 
     def configure_ready_fusion(self):
         config_manager.save_config({
+            "web_assist": {"enabled": True},
             "fusion": {
                 "enabled": True,
                 "provider_id": "web:deepseek-web",
@@ -87,6 +88,7 @@ class FusionConfigTests(FusionTestBase):
             "tool_mode": "readonly",
             "max_steps": 8,
         })
+        self.assertEqual(loaded["web_assist"], {"enabled": False})
 
     def test_empty_provider_is_immediately_not_delegable(self):
         state = fusion_mode.fusion_state(home=self.home, lock_dir=self.lock_dir)
@@ -103,6 +105,34 @@ class FusionConfigTests(FusionTestBase):
         self.assertEqual(result["status"], "rejected")
         self.assertEqual(result["error"], "FUSION_PROVIDER_NOT_CONFIGURED")
         run_sidekick.assert_not_called()
+
+    def test_delegate_uses_automatic_api_provider(self):
+        config_manager.save_config({
+            "fusion": {"enabled": True, "provider_id": ""},
+            "local_providers": [{
+                "id": "local", "endpoint": "http://127.0.0.1:11434/v1",
+                "model": "local-model",
+            }],
+            "api_providers": [{
+                "id": "api", "endpoint": "https://api.example.test/v1",
+                "model": "api-model",
+            }],
+        }, self.home)
+        with mock.patch.object(
+            fusion_runner, "run_sidekick",
+            return_value={"status": "success", "answer": "ok"},
+        ) as run_sidekick:
+            result = agent_fusion.delegate(
+                "复核这个判断",
+                workspace=self.home,
+                home=self.home,
+                lock_dir=self.lock_dir,
+                environ={},
+            )
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(run_sidekick.call_args.kwargs["provider_ref"], "api:api")
+        self.assertEqual(result["provider"]["ref"], "api:api")
+        self.assertTrue(result["state"]["provider_auto_selected"])
 
     def test_web_provider_is_readonly_only(self):
         self.configure_ready_fusion()
@@ -154,6 +184,7 @@ class FusionConfigTests(FusionTestBase):
 
     def test_provider_selection_and_clear(self):
         config_manager.save_config({
+            "web_assist": {"enabled": True},
             "web_providers": [{
                 "id": "deepseek-web",
                 "base_url": "https://chat.deepseek.com/",
@@ -169,7 +200,25 @@ class FusionConfigTests(FusionTestBase):
 
         result, code = agent_fusion._provider_command("none", self.home)
         self.assertEqual(code, 0)
-        self.assertEqual(result["state"]["provider_id"], "")
+        self.assertEqual(result["state"]["configured_provider_id"], "")
+        self.assertTrue(result["state"]["provider_auto_selected"])
+        self.assertEqual(result["state"]["provider_id"], "web:deepseek-web")
+
+    def test_web_provider_selection_requires_beta_opt_in(self):
+        config_manager.save_config({
+            "web_providers": [{
+                "id": "deepseek-web",
+                "base_url": "https://chat.deepseek.com/",
+            }],
+        }, self.home)
+        result, code = agent_fusion._provider_command(
+            "web:deepseek-web", self.home,
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(result["error"], "WEB_ASSIST_BETA_DISABLED")
+        state = fusion_mode.fusion_state(home=self.home, environ={})
+        self.assertFalse(state["delegable"])
+        self.assertEqual(state["available_providers"], [])
 
 
 class FusionProviderResolutionTests(unittest.TestCase):
@@ -249,7 +298,7 @@ class FusionSettingsValidationTests(unittest.TestCase):
             }],
         }
 
-    def test_enabled_without_provider_is_allowed_but_not_delegable(self):
+    def test_empty_provider_automatically_prefers_api(self):
         config = self.base_config()
         result = fusion_mode.validated_fusion_config(
             config,
@@ -258,8 +307,46 @@ class FusionSettingsValidationTests(unittest.TestCase):
         config["fusion"] = result
         state = fusion_mode.fusion_state(config=config, environ={})
         self.assertEqual(result["provider_id"], "")
+        self.assertTrue(state["delegable"])
+        self.assertTrue(state["provider_auto_selected"])
+        self.assertEqual(state["provider_id"], "api:kimi-api")
+        self.assertEqual(state["configured_provider_id"], "")
+        self.assertEqual(state["reason"], "READY")
+        self.assertNotIn(
+            "web:deepseek-web",
+            {item["ref"] for item in state["available_providers"]},
+        )
+
+    def test_automatic_provider_uses_local_then_beta_web_as_last_resort(self):
+        config = self.base_config()
+        config["api_providers"] = []
+        state = fusion_mode.fusion_state(config=config, environ={})
+        self.assertEqual(state["provider_id"], "local:qwen-local")
+        self.assertTrue(state["tool_capable"])
+
+        config["local_providers"] = []
+        state = fusion_mode.fusion_state(config=config, environ={})
         self.assertFalse(state["delegable"])
         self.assertEqual(state["reason"], "FUSION_PROVIDER_NOT_CONFIGURED")
+
+        config["web_assist"] = {"enabled": True}
+        state = fusion_mode.fusion_state(config=config, environ={})
+        self.assertTrue(state["delegable"])
+        self.assertEqual(state["provider_id"], "web:deepseek-web")
+        self.assertEqual(state["capability_role"], "advisory")
+
+        config["fusion"]["tool_mode"] = "coding"
+        state = fusion_mode.fusion_state(config=config, environ={})
+        self.assertFalse(state["delegable"])
+        self.assertEqual(state["reason"], "FUSION_PROVIDER_NOT_CONFIGURED")
+
+    def test_saved_web_provider_is_blocked_while_beta_is_off(self):
+        config = self.base_config()
+        config["fusion"]["provider_id"] = "web:deepseek-web"
+        state = fusion_mode.fusion_state(config=config, environ={})
+        self.assertFalse(state["delegable"])
+        self.assertEqual(state["reason"], "WEB_ASSIST_BETA_DISABLED")
+        self.assertEqual(state["provider_id"], "web:deepseek-web")
 
     def test_exact_provider_reference_is_canonicalized(self):
         config = self.base_config()
@@ -311,6 +398,7 @@ class FusionSettingsValidationTests(unittest.TestCase):
         self.assertEqual(result["provider_id"], "local:qwen-local")
 
         with self.assertRaises(fusion_mode.FusionSettingsError) as web_coding:
+            config["web_assist"] = {"enabled": True}
             fusion_mode.validated_fusion_config(
                 config,
                 {"provider_id": "web:deepseek-web", "tool_mode": "coding"},
@@ -866,7 +954,8 @@ class FusionInstallTests(unittest.TestCase):
         self.assertIn("查看当前状态", content)
         self.assertIn("检查开关、Commander 最高优先级互斥", content)
         self.assertIn("选择 Provider", content)
-        self.assertIn("从本机已配置", content)
+        self.assertIn("API、本地或已开启 Beta", content)
+        self.assertIn("恢复自动 Provider", content)
         self.assertIn("await ctx.ui.select", content)
         self.assertNotIn(str(fusion), content)
         self.assertIn("AGENTRELAY_FUSION", content)
@@ -885,9 +974,52 @@ class FusionInstallTests(unittest.TestCase):
                 "fusion_assist.py",
                 "fusion_runner.py",
                 "fusion_trace.py",
+                "stdio_encoding.py",
             },
         )
         self.assertEqual(installer.FUSION_SKILL_FILES, ("SKILL.md",))
+
+    def test_fusion_installed_scripts_run_outside_the_source_tree(self):
+        import shutil
+
+        installer = load_module("fusion_standalone_install", PROJECT_ROOT / "install.py")
+        tmp = Path(tempfile.mkdtemp(prefix="agentrelay-fusion-standalone-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        fusion_scripts = tmp / "skills" / "agent-fusion" / "scripts"
+        relay_scripts = tmp / "skills" / "agent-relay" / "scripts"
+        fusion_scripts.mkdir(parents=True)
+        relay_scripts.mkdir(parents=True)
+        for filename in installer.FUSION_SCRIPT_FILES:
+            shutil.copy2(PROJECT_ROOT / "scripts" / filename, fusion_scripts / filename)
+        for filename in (*installer.SCRIPT_FILES, *installer.CONFIG_FILES):
+            source = PROJECT_ROOT / "scripts" / filename
+            if source.is_file():
+                shutil.copy2(source, relay_scripts / filename)
+
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(tmp)
+        env.pop("PYTHONPATH", None)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(fusion_scripts / "agent_fusion.py"),
+                "status",
+                "--json",
+            ],
+            cwd=tmp,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        line = next(
+            item for item in result.stdout.splitlines()
+            if item.startswith("AGENT_FUSION_RESULT=")
+        )
+        payload = json.loads(line.removeprefix("AGENT_FUSION_RESULT="))
+        self.assertEqual(payload["status"], "success")
+        self.assertEqual(payload["state"]["reason"], "FUSION_PROVIDER_NOT_CONFIGURED")
 
     def test_orchestrator_guards_both_commander_entry_points(self):
         auto_source = inspect.getsource(Orchestrator.run_commander_auto)

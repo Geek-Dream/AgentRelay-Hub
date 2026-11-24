@@ -1078,11 +1078,11 @@ class Orchestrator:
                 goal = agent.model_config.get("goal", "完成分配任务")
                 configured_provider = agent.model_config.get("provider")
                 if configured_provider in {"local-llm", "codex-self", ""}:
-                    default_provider = os.environ.get("AGENTRELAY_COMMANDER_DEFAULT_PROVIDER", "gpt-api")
+                    default_provider = os.environ.get("AGENTRELAY_COMMANDER_DEFAULT_PROVIDER", "codex-self")
                 elif configured_provider and configured_provider not in {"deepseek-web", "qianwen-web", "kimi-web"}:
                     default_provider = configured_provider
                 else:
-                    default_provider = os.environ.get("AGENTRELAY_COMMANDER_DEFAULT_PROVIDER", "gpt-api")
+                    default_provider = os.environ.get("AGENTRELAY_COMMANDER_DEFAULT_PROVIDER", "codex-self")
                 provider_id = agent.model_config.get("consult_provider", default_provider)
                 fallback_providers = tuple(agent.model_config.get("fallback_providers", ())) or tuple(
                     item.strip() for item in os.environ.get(
@@ -1590,14 +1590,16 @@ class WorkflowEngine:
             "plan_data": plan_response.structured_data,
             "error": decision.error or plan_response.error,
         }
-        # A local/remote provider may propose structured edits for a SIMPLE_TASK.
-        # They are accepted only inside the caller's explicit file scope; all
-        # writes still happen in SelfWorker and its checkpoint path.
+        # Only edit-capable local/API providers may propose structured edits.
+        # Web advice stays advisory even if a model returns an edits-shaped JSON.
         execution_kwargs = dict(kwargs)
         proposed = plan_response.structured_data if hasattr(plan_response, "structured_data") else None
         proposed_edits = proposed.get("edits") if isinstance(proposed, dict) else None
         allowed = set(kwargs.get("allowed_files", ()))
-        if isinstance(proposed_edits, dict) and not (set(proposed_edits) - allowed) and all(isinstance(value, str) for value in proposed_edits.values()):
+        if (getattr(selected, "supports_edit_plans", False)
+                and isinstance(proposed_edits, dict)
+                and not (set(proposed_edits) - allowed)
+                and all(isinstance(value, str) for value in proposed_edits.values())):
             execution_kwargs["edits"] = proposed_edits
         context.agent_execution_plan = {"provider": choice.provider, "reason": choice.reason,
                                         "analysis": decision.content,

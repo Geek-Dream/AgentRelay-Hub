@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -37,7 +38,7 @@ class WebCandidateTests(unittest.TestCase):
         config = _config(web_providers=[
             _web("qianwen-web", images=True),
             _web("deepseek-web", images=True),
-        ], default_provider="deepseek-web")
+        ], default_provider="deepseek-web", web_assist={"enabled": True})
         candidates = agent_image.image_capable_web_providers(config)
         self.assertEqual([item["id"] for item in candidates],
                          ["deepseek-web", "qianwen-web"])
@@ -46,12 +47,19 @@ class WebCandidateTests(unittest.TestCase):
         config = _config(web_providers=[
             _web("deepseek-web", images=False),
             _web("qianwen-web", images=True),
-        ])
+        ], web_assist={"enabled": True})
         candidates = agent_image.image_capable_web_providers(config)
         self.assertEqual([item["id"] for item in candidates], ["qianwen-web"])
 
     def test_disabled_providers_excluded(self):
-        config = _config(web_providers=[_web("deepseek-web", images=True, enabled=False)])
+        config = _config(
+            web_providers=[_web("deepseek-web", images=True, enabled=False)],
+            web_assist={"enabled": True},
+        )
+        self.assertEqual(agent_image.image_capable_web_providers(config), [])
+
+    def test_beta_off_excludes_every_web_provider(self):
+        config = _config(web_providers=[_web("deepseek-web", images=True)])
         self.assertEqual(agent_image.image_capable_web_providers(config), [])
 
 
@@ -79,6 +87,66 @@ class LocalVisionSelectionTests(unittest.TestCase):
              "model": "minicpm-v", "vision": True, "enabled": True},
         ])
         self.assertIsNone(agent_image.pick_local_provider(config, "other"))
+
+
+class ProviderOrderTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(tempfile.mkdtemp())
+        self.image = self.directory / "vision.png"
+        self.image.write_bytes(PNG_1PX)
+        self.local = {
+            "id": "vlm", "name": "Local VLM",
+            "endpoint": "http://127.0.0.1:11434/v1",
+            "model": "minicpm-v", "vision": True, "enabled": True,
+        }
+        self.web = _web("deepseek-web", images=True)
+
+    def test_local_success_never_calls_beta_web(self):
+        config = _config(
+            local_providers=[self.local], web_providers=[self.web],
+            web_assist={"enabled": True},
+        )
+        with mock.patch.object(agent_image, "load_config", return_value=config), \
+                mock.patch.object(
+                    agent_image, "run_local_provider_attempt",
+                    return_value=(True, "本地描述", ""),
+                ) as local_call, mock.patch.object(
+                    agent_image, "run_web_provider_attempt",
+                ) as web_call:
+            result = agent_image.main([str(self.image), "--no-cache"])
+        self.assertEqual(result, 0)
+        local_call.assert_called_once()
+        web_call.assert_not_called()
+
+    def test_beta_web_is_attempted_only_after_local_failure(self):
+        config = _config(
+            local_providers=[self.local], web_providers=[self.web],
+            web_assist={"enabled": True},
+        )
+        output = "💬 AI回复:\n网页描述\n" + "=" * 60
+        with mock.patch.object(agent_image, "load_config", return_value=config), \
+                mock.patch.object(
+                    agent_image, "run_local_provider_attempt",
+                    return_value=(False, "", "offline"),
+                ) as local_call, mock.patch.object(
+                    agent_image, "run_web_provider_attempt",
+                    return_value=(True, output, ""),
+                ) as web_call:
+            result = agent_image.main([str(self.image), "--no-cache"])
+        self.assertEqual(result, 0)
+        local_call.assert_called_once()
+        web_call.assert_called_once()
+
+    def test_web_only_config_does_nothing_while_beta_is_off(self):
+        config = _config(web_providers=[self.web])
+        output = io.StringIO()
+        with mock.patch.object(agent_image, "load_config", return_value=config), \
+                mock.patch.object(agent_image, "run_web_provider_attempt") as web_call, \
+                redirect_stdout(output):
+            result = agent_image.main([str(self.image), "--no-cache"])
+        self.assertEqual(result, 0)
+        self.assertIn("Beta 网页测试协助", output.getvalue())
+        web_call.assert_not_called()
 
 
 class ImageValidationTests(unittest.TestCase):

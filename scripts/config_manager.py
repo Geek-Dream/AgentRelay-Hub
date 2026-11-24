@@ -98,13 +98,24 @@ def default_config() -> dict[str, Any]:
             "max_agents": 5,
             "manual_disabled": False,
         },
+        "web_assist": {
+            "enabled": False,
+        },
         "web_providers": [],
         "local_providers": [],
         "api_providers": [],
         "api_router": {"port": 15731},
-        "default_provider": "deepseek-web",
+        "default_provider": "",
         "fallback_providers": [],
     }
+
+
+def web_assist_enabled(config: Mapping[str, Any]) -> bool:
+    """Return whether the opt-in Beta web fallback may be used."""
+    value = config.get("web_assist") if isinstance(config, Mapping) else None
+    if isinstance(value, Mapping):
+        return bool(value.get("enabled", False))
+    return bool(value) if isinstance(value, bool) else False
 
 
 PROVIDER_CONCURRENCY_DEFAULTS = {
@@ -319,8 +330,11 @@ def load_config(home: Path | None = None) -> dict[str, Any]:
         return default_config()
     merged = default_config()
     merged.update(value)
-    for section in ("fusion", "commander", "web_providers", "local_providers", "api_providers"):
-        if section in {"fusion", "commander"}:
+    for section in (
+        "fusion", "commander", "web_assist",
+        "web_providers", "local_providers", "api_providers",
+    ):
+        if section in {"fusion", "commander", "web_assist"}:
             value_section = value.get(section)
             if isinstance(value_section, dict):
                 merged[section] = {**default_config()[section], **value_section}
@@ -347,6 +361,14 @@ def load_config(home: Path | None = None) -> dict[str, Any]:
                         )
                     except (TypeError, ValueError):
                         merged[section]["max_steps"] = 8
+                elif section == "web_assist":
+                    merged[section]["enabled"] = bool(
+                        merged[section].get("enabled", False)
+                    )
+            elif section == "web_assist":
+                merged[section] = {
+                    "enabled": value_section if isinstance(value_section, bool) else False,
+                }
         elif not isinstance(merged.get(section), list):
             merged[section] = []
     merged["web_providers"] = [
@@ -452,6 +474,13 @@ def resolve_conversation_mode(
 def save_config(value: Mapping[str, Any], home: Path | None = None) -> Path:
     cipher = _fernet(home, create=True)
     normalized = dict(value)
+    web_assist = normalized.get("web_assist")
+    normalized["web_assist"] = {
+        "enabled": bool(
+            web_assist.get("enabled", False)
+            if isinstance(web_assist, Mapping) else web_assist is True
+        ),
+    }
     fusion = normalized.get("fusion")
     if isinstance(fusion, dict):
         normalized["fusion"] = {
@@ -604,7 +633,7 @@ def _selected(items: object, preferred: str = "") -> dict[str, Any] | None:
 
 
 def apply_config_to_environment(home: Path | None = None) -> dict[str, Any]:
-    """把加密配置映射到当前进程，显式环境变量优先。"""
+    """把加密配置映射到当前进程；Beta 总开关优先于网页环境变量。"""
     config, _ = migrate_legacy_deepseek_config(home)
     commander = config.get("commander", {})
     if commander.get("enabled"):
@@ -614,14 +643,19 @@ def apply_config_to_environment(home: Path | None = None) -> dict[str, Any]:
         os.environ.setdefault("AGENTRELAY_COMMANDER_TERMINAL_PATH", terminal_path)
         os.environ.setdefault("AGENTRELAY_COMMANDER_MAX_AGENTS", str(commander.get("max_agents", 5)))
 
-    web = _selected(config.get("web_providers"), str(config.get("default_provider", "")))
+    web = (
+        _selected(config.get("web_providers"), str(config.get("default_provider", "")))
+        if web_assist_enabled(config) else None
+    )
+    if not web_assist_enabled(config):
+        # The same process may apply config again after the user turns Beta off.
+        os.environ["AGENTRELAY_DEEPSEEK_ENABLED"] = "0"
     if web:
         provider_id = str(web.get("id", "deepseek-web"))
         os.environ.setdefault("AGENT_RELAY_PROVIDER", provider_id.removesuffix("-web"))
         if provider_id == "deepseek-web":
             os.environ.setdefault("AGENTRELAY_DEEPSEEK_ENABLED", "1")
             os.environ.setdefault("AGENTRELAY_DEEPSEEK_MODE", "playwright")
-        os.environ.setdefault("AGENTRELAY_COMMANDER_DEFAULT_PROVIDER", provider_id)
 
     # 每个已保存登录状态的网页 Provider 都要导出对应环境变量，
     # 否则非默认 Provider（如千问）会回落到默认 Provider 的登录状态文件。
@@ -650,10 +684,12 @@ def apply_config_to_environment(home: Path | None = None) -> dict[str, Any]:
 
     api = _first(config.get("api_providers"))
     if api and api.get("endpoint") and api.get("api_key"):
-        os.environ.setdefault("AGENTRELAY_COMMANDER_DEFAULT_PROVIDER", str(api.get("id", "gpt-api")))
         os.environ.setdefault("AGENTRELAY_API_ENDPOINT", str(api["endpoint"]))
         os.environ.setdefault("AGENTRELAY_API_KEY", str(api["api_key"]))
         os.environ.setdefault("AGENTRELAY_API_MODEL", str(api.get("model", "")))
+        os.environ.setdefault("AGENTRELAY_COMMANDER_DEFAULT_PROVIDER", str(api.get("id", "gpt-api")))
+    elif local and local.get("endpoint"):
+        os.environ.setdefault("AGENTRELAY_COMMANDER_DEFAULT_PROVIDER", "local-llm")
 
     custom_api = []
     for item in config.get("api_providers", []) if isinstance(config.get("api_providers"), list) else []:

@@ -33,6 +33,7 @@ AgentRelay 的目标不是把每个小任务都做得很重。简单问答和只
 - [什么时候会出现确认卡](#什么时候会出现确认卡)
 - [权限模式与工作档](#权限模式与工作档)
 - [AgentFusion 和 Commander](#agentfusion-和-commander)
+- [跨 Agent 消息](#跨-agent-消息)
 - [支持的 Agent](#支持的-agent)
 - [常见问题](#常见问题)
 - [安全边界](#安全边界)
@@ -48,20 +49,23 @@ AgentRelay 的目标不是把每个小任务都做得很重。简单问答和只
 | `Provider` | 外部帮手，可以是网页模型、OpenAI 兼容 API 或本地模型 |
 | `AgentFusion` | 一个持久的外援会话，适合处理大日志、大范围阅读和边界明确的局部任务 |
 | `Commander` | 临时项目组，最多启动 5 个隔离子 Agent 分工完成复杂任务 |
+| `消息总线` | 让 Codex、Claude、Pi、OpenCode 等已注册会话直接互发短消息，不共享完整上下文 |
 | `AgentImage` | 当前主模型不能识图时，把图片交给支持视觉的模型描述 |
 | `确认卡` | 真正修改前给用户看的“准备做什么、改哪里、不能碰什么、怎么验收” |
 | `工作档` | Agent 为当前写任务选择的流程深度，从轻量到完整审查 |
 
-AgentRelay 负责提供边界、证据和协作能力，最终判断仍由主 Agent 负责。网页模型给出的建议
-不能直接当答案，必须由主 Agent 结合代码和测试验证。
+AgentRelay 负责提供边界、证据和协作能力，最终判断仍由主 Agent 负责。网页协助默认关闭；
+用户显式开启 Beta 后，网页模型也只作最后辅助，其建议必须由主 Agent 结合代码和测试验证。
 
 ## 能力总览
 
 | 能力 | 能做什么 | 关键边界 |
 |---|---|---|
 | Hook 门禁 | 在提交需求、调用工具和结束时检查确认卡、写入范围、危险命令和证据 | 主 Agent 负责最终判断，Hook 不靠关键词猜批准 |
-| Fusion 外援 | 把大日志、批量阅读、跨文件搜索、独立复现和局部杂活交给持久外援会话 | 默认只读，`coding` 需明确开启；外援结果必须复核 |
+| Fusion 外援 | 把大日志、批量阅读、跨文件搜索、独立复现和局部杂活交给持久外援会话 | 自动 API → 本地；默认只读，`coding` 需明确开启 |
+| Beta 网页测试协助 | 用户显式开启后，保留网页外援、Hook 和网页识图的最后辅助能力 | 默认关闭；不能执行本机任务，不参与默认路由 |
 | Commander 审查官 | 拆成 1～5 个隔离子 Agent 并行处理，再汇总审查、批准后合并 | 只使用 API 或本地模型，API 优先；网页模型不参与代码执行 |
+| 跨 Agent 消息 | 任意已注册宿主按地址互发任务、发现和回复，支持 TTL、幂等、忙闲投递与回执 | Peer 不是用户，不能扩大权限；各宿主唤醒能力不同 |
 | Provider 配置中心 | 管理网页/API/本地模型、登录状态、测试、并发、排队和租约 | API Key 不回显，配置加密保存，登录状态不进 Git |
 | Skill 分发 | 把内置和本机 Skill 安装到 Codex、Claude、Pi、OpenCode 等宿主 | Skill 只提供指导，不替代 ArchUnit、静态检查和真实测试 |
 | 交付审计 | 核对需求覆盖、真实 diff、行为测试、视觉证据、主审和独立复核 | 未验证不能写成完成，RED→GREEN 和 scope drift 要有证据 |
@@ -228,8 +232,8 @@ python3 install.py --menu
 
 在网页里完成：
 
-1. 添加网页、API 或本地模型 Provider。
-2. 网页模型点击“打开网页登录”，由用户手动完成登录和人机验证。
+1. 添加 API 或本地模型 Provider；网页 Provider 是可选项。
+2. 确需网页最后辅助时，在 Fusion 页显式开启“Beta 网页测试协助”，再完成网页登录。
 3. 点击“测试”确认 Provider 可用。
 4. 按需设置并发上限、排队超时和租约时间。
 5. 保存并关闭。
@@ -309,6 +313,7 @@ Codex 用户可以在终端检查 Hook 是否加载：
 
 Fusion 适合测试日志、批量阅读、跨文件搜索、独立复现和边界明确的局部实现。它默认只读，
 写文件和执行命令需要明确切换到 `coding`。
+Provider 留空时自动按 API → 本地选择；网页模型不会因配置了默认网页账号而参与协助。
 
 Hook 只负责本地门禁、确认卡和修改摘要，不会主动提醒或调用 Fusion，也不会因为 Fusion
 超时阻塞本轮回复。Fusion 由主 Agent 在明确适合的任务中主动调用；一次超时后，当前会话
@@ -464,7 +469,7 @@ FUSION="${CODEX_HOME:-$HOME/.codex}/skills/agent-fusion/scripts/agent_fusion.py"
 "$PYTHON" "$FUSION" status --json
 ```
 
-Fusion 默认开启，但不会自己猜 Provider。必须明确选择，例如：
+Fusion 默认开启。Provider 留空时自动按 API → 本地选择，也可以明确指定：
 
 ```bash
 # 如果新开了一个终端，先重新执行上一段命令，设置 PYTHON 和 FUSION。
@@ -478,10 +483,64 @@ Fusion 默认开启，但不会自己猜 Provider。必须明确选择，例如�
 "$PYTHON" "$FUSION" mode coding --confirm-coding
 ```
 
-网页 Provider 只提供咨询，不能获得本机文件写入和 shell 能力。需要实际执行时只能选择 API
-或本地 Provider。
+网页 Provider 是默认关闭的 Beta 最后辅助，只有在配置中心显式开启后才提供只读咨询，不能获得
+本机文件写入和 shell 能力。需要实际执行时只能选择 API 或本地 Provider。
 
 完整说明见 [agent-fusion/SKILL.md](skills/agent-fusion/SKILL.md)。
+
+## 跨 Agent 消息
+
+消息总线直接连接本机会话，不要求 Fusion。总线本身不调用外部 Provider；接收 Agent 的回答
+仍使用它自己的模型、额度和权限：
+
+```text
+Codex ↔ Claude Code
+Codex ↔ Pi
+Pi ↔ OpenCode
+任意已注册宿主 ↔ 任意其他已注册宿主
+```
+
+启动宿主前启用功能：
+
+```bash
+export AGENTRELAY_MESSAGES=on
+PYTHON="${CODEX_HOME:-$HOME/.codex}/agentrelay-env/bin/python"
+BUS="${CODEX_HOME:-$HOME/.codex}/skills/agent-relay/scripts/agent_message_bus.py"
+```
+
+正常启动的 Codex/Claude 会通过安全 Hook 注册，Pi 会通过原生扩展注册。查看在线会话：
+
+```bash
+"$PYTHON" "$BUS" list
+"$PYTHON" "$BUS" send --from "codex:SENDER_SESSION" --to "pi:RECIPIENT_SESSION" \
+  --body "请只读检查 schema，并回复结论。"
+```
+
+接收方使用原消息的 `message_id` 回复，不需要重复填写收件人：
+
+```bash
+"$PYTHON" "$BUS" send --from "pi:RECIPIENT_SESSION" --reply-to "msg_ORIGINAL_ID" \
+  --body "检查结论"
+```
+
+Pi 提供 `agentrelay_list_agents`、`agentrelay_send_message` 和 `agentrelay_ack_message`
+原生工具；其他宿主通过同一 CLI 和 Skill 使用。Pi 忙时 steer、空闲时 followUp；Claude 有官方
+socket 环境时走原生 inbox；Codex 稳定版只在安全 Hook 边界拉取，空闲时不会被强行唤醒。
+启用后，Agent 可在任务确实需要时主动找 peer 做边界明确的独立只读调查或复核，不必每次等待
+用户点名；写入、执行命令和最终验收仍受原任务授权约束。
+
+OpenCode 走官方 `/api/session/{sessionID}/prompt` durable inbox，但需先运行 `opencode serve`
+并登记已有会话：
+
+```bash
+"$PYTHON" "$BUS" register --host opencode --session-id "ses_REPLACE" \
+  --name "opencode-worker" --adapter opencode_http \
+  --endpoint '{"base_url":"http://127.0.0.1:4096","session_id":"ses_REPLACE"}'
+```
+
+`queued`、`dispatched`、`delivered`、`read`、`replied` 是不同回执，不能把排队、socket 写入或
+HTTP 受理说成模型已经阅读。各 Agent 保留独立上下文和权限，peer 消息不是用户授权。完整命令、
+TTL、幂等和宿主限制见 [agent-messages.md](skills/agent-relay/references/agent-messages.md)。
 
 ## 支持的 Agent
 
@@ -489,10 +548,10 @@ Fusion 默认开启，但不会自己猜 Provider。必须明确选择，例如�
 |---|---|---|
 | Codex CLI | 完整 | 主路径，Hook、Skill、确认卡、Fusion 和 Commander |
 | Claude Code | 完整 | 安装器写入 `~/.claude/settings.json` 的 hooks |
-| Pi | 完整 | 安装原生扩展，提供 Fusion 菜单、工具阻断和 Stop 门禁 |
+| Pi | 完整 | 安装原生扩展，提供 Fusion、跨 Agent 消息工具、工具阻断和 Stop 门禁 |
 | Kimi Code | 完整 | 写入 `$KIMI_CODE_HOME/config.toml`，失败和 Stop Hook 可用 |
 | Hermes | 代码已接入 | `pre_llm_call`、`post_tool_call`、`subagent_stop`；真实宿主可见性仍需实测 |
-| OpenCode | 仅 Skill | 没有 Prompt 注入 Hook，自动提醒不可用 |
+| OpenCode | Skill + 消息适配器 | 无自动提醒 Hook；登记已有会话后可走官方 HTTP durable inbox |
 | DeepSeek CLI | 不支持自动接入 | 没有 Hook、插件或 Skill 机制；DeepSeek 网页可作为 Provider |
 
 多 Agent 共用一套 Provider 并发额度。网页和本地默认各 1 个并发，API 默认 10 个并发，可按
@@ -567,7 +626,8 @@ Hook、删除策略、Tracker、页面验证及 Agent 目标适配。它不代�
 关注：
 
 - `delegable=false`：当前不能委派。
-- `FUSION_PROVIDER_NOT_CONFIGURED`：还没有选择 Provider。
+- `FUSION_PROVIDER_NOT_CONFIGURED`：没有可用的 API/本地 Provider；Beta 开启时也没有可用网页后备。
+- `WEB_ASSIST_BETA_DISABLED`：网页 Provider 已保留，但 Beta 网页测试协助未开启，不会启动浏览器。
 - `FUSION_DISABLED`：Fusion 已关闭。
 - `COMMANDER_ACTIVE`：Commander 正在运行，Fusion 按设计暂停。
 - `FUSION_PROVIDER_BUSY`：Provider 满载，排队超时。
@@ -677,8 +737,8 @@ HTTP 状态码或内部函数名，除非这些内容本身就是用户要的结
 - 每个 Provider 的并发名额由所有 Agent 会话共享。
 - 满载请求进入持久化 FIFO 队列。
 - 请求持有带心跳和过期时间的租约，异常退出后可回收。
-- 网页 Provider 使用编号会话，避免不同任务混用上下文。
-- 需要本机执行时按 `API -> 本地` 路由，网页 Provider 只做 advisory。
+- Beta 网页 Provider 使用编号会话，避免不同任务混用上下文。
+- 默认按 `API -> 本地` 路由；只有显式开启 Beta 后，网页 Provider 才做最后的 readonly advisory。
 
 ### 交付审计
 
