@@ -4,6 +4,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+try:
+    from . import config_web_components
+except ImportError:
+    import config_web_components
+
 
 def _replace_once(page: str, needle: str, replacement: str) -> str:
     if page.count(needle) != 1:
@@ -13,7 +18,7 @@ def _replace_once(page: str, needle: str, replacement: str) -> str:
 
 def _apply_fusion_ui(page: str) -> str:
     css = r"""
-.fusion-status{display:flex;align-items:flex-start;gap:10px;margin-top:16px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:#f7f9fa}.fusion-status .dot{margin-top:6px}.fusion-status strong{display:block;font-size:14px}.fusion-status small{display:block;color:var(--muted);margin-top:2px}.fusion-status.ready{border-color:#bfe8d8;background:#effaf5}.fusion-status.warn{border-color:#efd39e;background:#fff8e9}.fusion-status.off{background:#f5f7f8}.fusion-overview{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:14px;padding:12px 14px;border:1px solid #efd39e;border-radius:8px;background:#fff8e9}.fusion-overview.ready{border-color:#bfe8d8;background:#effaf5}.fusion-overview strong{display:block}.fusion-overview small{display:block;color:var(--muted);margin-top:2px}.fusion-command{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px;padding:11px 12px;border:1px solid var(--line);border-radius:8px;background:#f7f9fa;font-size:13px}.fusion-command code{padding:2px 6px;border-radius:5px;background:#e8eef2;color:#34495e}@media(max-width:780px){.fusion-overview,.fusion-command{align-items:flex-start;flex-direction:column}}
+.fusion-status{display:flex;align-items:flex-start;gap:10px;margin-top:16px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:#f7f9fa}.fusion-status .dot{margin-top:6px}.fusion-status strong{display:block;font-size:14px}.fusion-status small{display:block;color:var(--muted);margin-top:2px}.fusion-status.ready{border-color:#bfe8d8;background:#effaf5}.fusion-status.warn{border-color:#efd39e;background:#fff8e9}.fusion-status.off{background:#f5f7f8}.fusion-overview{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:14px;margin-bottom:20px;padding:12px 14px;border:1px solid #efd39e;border-radius:8px;background:#fff8e9}.fusion-overview.ready{border-color:#bfe8d8;background:#effaf5}.fusion-overview strong{display:block}.fusion-overview small{display:block;color:var(--muted);margin-top:2px}.fusion-command{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px;padding:11px 12px;border:1px solid var(--line);border-radius:8px;background:#f7f9fa;font-size:13px}.fusion-command code{padding:2px 6px;border-radius:5px;background:#e8eef2;color:#34495e}@media(max-width:780px){.fusion-overview,.fusion-command{align-items:flex-start;flex-direction:column}}
 .web-vision-status{margin-top:10px;padding:10px 12px;border-left:3px solid var(--line-strong);background:var(--panel-soft);font-size:12px}.web-vision-status.ready{border-left-color:var(--teal)}.web-vision-status strong,.web-vision-status small{display:block}.web-vision-status small{margin-top:3px;color:var(--muted);line-height:1.6}
 """
     nav = r"""<button data-tab="fusion"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="m8.6 10.5 6.8-3M8.6 13.5l6.8 3"/></svg><span>Fusion 辅助 Agent</span></button>"""
@@ -140,6 +145,8 @@ function renderFusion(){
 }
 function showFusionTab(){const button=document.querySelector('[data-tab="fusion"]');if(button)button.click()}
 async function saveFusion(){
+  const button=event&&event.currentTarget;
+  await withBusy(button,async()=>{
   try{
     const toolMode=$('fusion-mode').value;
     const currentMode=(state.fusion||{}).tool_mode||'readonly';
@@ -150,13 +157,14 @@ async function saveFusion(){
     render();
     toast('Fusion 配置已保存');
   }catch(error){toast(error.message)}
+  },'保存中…');
 }
 """
     page = _replace_once(page, "</head>", f"<style>{css}</style></head>")
     page = _replace_once(
         page,
         '<span>Commander</span></button>',
-        '<span>Commander</span></button>' + nav,
+        '<span>Commander</span></button>' + nav + _COLLAB_NAV,
     )
     page = _replace_once(
         page,
@@ -166,7 +174,7 @@ async function saveFusion(){
     page = _replace_once(
         page,
         '<div id="security" class="view">',
-        view + '<div id="security" class="view">',
+        view + _COLLAB_VIEW + '<div id="security" class="view">',
     )
     page = _replace_once(
         page,
@@ -183,7 +191,7 @@ async function saveFusion(){
     page = _replace_once(
         page,
         "async function saveCommander()",
-        javascript + "\nasync function saveCommander()",
+        javascript + "\n" + _COLLAB_JS + "\nasync function saveCommander()",
     )
     page = _replace_once(
         page,
@@ -216,6 +224,95 @@ async function saveFusion(){
         "}else{p.endpoint=$('f-endpoint').value.trim();p.model=$('f-model').value.trim();p.vision=!!($('f-vision')||{}).checked}if(kind==='api')",
     )
     return page
+
+
+_COLLAB_NAV = (
+    '<button data-tab="collab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">'
+    '<path d="M17 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9.5" cy="7" r="4"/>'
+    '<path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>'
+    '</svg><span>会话协作</span></button>'
+)
+
+_COLLAB_VIEW = r"""<div id="collab" class="view"><div class="head"><div><h1>会话协作</h1><p class="hint">把本机已接入的 Agent 会话互相连通、测通、指派任务。消息走本机消息总线；投递不等于回复，只有收到关联回复才算连通。</p></div><div class="toolbar"><button class="btn" onclick="refreshCollabPeers()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></svg><span>刷新会话</span></button></div></div><div class="card"><div class="form"><div class="field full"><label for="collab-sender">发起会话</label><select id="collab-sender" onchange="renderCollabPeers()"></select></div><div class="field full"><label>接收会话（1–8 个）</label><div class="message-probe-grid" id="collab-targets"></div><p class="hint" id="collab-availability"></p></div><div class="field full"><label for="collab-body">要对方做什么</label><textarea id="collab-body" rows="4" placeholder="例如：帮我看一下 scripts/config_web.py 里 select 组件的键盘处理有没有遗漏边界情况，只读检查，不要改文件。" style="width:100%;min-height:92px;border:1px solid var(--line);border-radius:7px;padding:9px 11px;background:rgba(4,10,19,.82);color:var(--ink);font:inherit;font-size:13px;resize:vertical;outline:0"></textarea></div><div class="field"><label for="collab-review">这次指派的性质</label><select id="collab-review"><option value="new">新任务</option><option value="follow_up">延续已有任务</option><option value="skip">仅通知，不要求执行</option></select></div><div class="field"><label for="collab-reason">为什么发这条（必填，供对方判断）</label><input id="collab-reason" placeholder="例如：需要独立视角复核键盘边界"></div></div><div class="toolbar"><button class="btn primary" id="collab-send" type="button" onclick="sendCollabTask()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></svg><span>指派任务</span></button><button class="btn" id="collab-test" type="button" onclick="startMessageProbe()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg><span>仅测试连通</span></button></div><div id="collab-results" class="check-result" role="status" aria-live="polite"></div></div><div class="card target-panel"><p class="hint">没看到你的 Agent？它必须真的跑起来并注册过心跳才会出现在这里。装了 Skill 但没有启动会话的 Agent 不会冒充在线。</p></div></div>"""
+
+_COLLAB_JS = r"""
+let collabPeers=Array.isArray(state.message_agents)?state.message_agents:[];
+function collabTargets(){
+  return [...document.querySelectorAll('.collab-target:checked')].map(box=>box.value);
+}
+function renderCollabPeers(){
+  const select=$('collab-sender');
+  if(!select)return;
+  const previous=select.value;
+  const chosen=new Set(collabTargets());
+  select.innerHTML=collabPeers.length
+    ? collabPeers.map(peer=>`<option value="${esc(peer.address)}">${esc(peer.name||peer.address)} · ${esc(peer.host)}</option>`).join('')
+    : '<option value="">暂无在线会话</option>';
+  if(collabPeers.some(peer=>peer.address===previous))select.value=previous;
+  const sender=select.value;
+  const recipients=collabPeers.filter(peer=>peer.address!==sender);
+  $('collab-targets').innerHTML=recipients.map(peer=>{
+    const detail=[peer.address,peer.workspace||''].filter(Boolean).join(' · ');
+    return `<label class="message-peer-option"><input class="collab-target" type="checkbox" value="${esc(peer.address)}" ${chosen.has(peer.address)?'checked':''}><span><strong>${esc(peer.name||peer.address)}</strong><small>${esc(detail)}</small></span></label>`;
+  }).join('')||'<div class="empty">还需要另一个在线会话。</div>';
+  const error=state.message_agents_error||'';
+  $('collab-availability').textContent=error||(collabPeers.length<2
+    ? '至少需要两个近期有心跳的会话；程序已安装但未注册时不会出现在这里。'
+    : `发现 ${collabPeers.length} 个可协作会话。`);
+  const send=$('collab-send');
+  if(send)send.disabled=collabPeers.length<2;
+  const test=$('collab-test');
+  if(test)test.disabled=collabPeers.length<2;
+  const probeSelect=$('message-probe-sender');
+  if(probeSelect){
+    const keep=probeSelect.value;
+    probeSelect.innerHTML=select.innerHTML;
+    if(collabPeers.some(peer=>peer.address===keep))probeSelect.value=keep;
+  }
+}
+async function refreshCollabPeers(){
+  const button=event&&event.currentTarget;
+  await withBusy(button,async()=>{
+    try{
+      const data=await api('/api/messages/peers');
+      collabPeers=Array.isArray(data.agents)?data.agents:[];
+      state.message_agents=collabPeers;
+      state.message_agents_error='';
+      messagePeers=collabPeers;
+      renderCollabPeers();
+      renderMessagePeers();
+    }catch(error){toast(error.message)}
+  },'刷新中…');
+}
+function renderCollab(){
+  collabPeers=Array.isArray(state.message_agents)?state.message_agents:collabPeers;
+  renderCollabPeers();
+}
+async function sendCollabTask(){
+  const sender=$('collab-sender').value;
+  const targets=collabTargets();
+  const body=$('collab-body').value.trim();
+  const review=$('collab-review').value;
+  const reason=$('collab-reason').value.trim();
+  if(!sender||!targets.length||targets.length>8){toast('请选择一个发起会话和 1–8 个接收会话');return}
+  if(!body){toast('请填写要对方做什么');return}
+  if(!reason){toast('请填写这次指派的原因，对方要靠它判断');return}
+  if(!confirm(`向 ${targets.length} 个会话指派任务？对方会收到真实消息。`))return;
+  const button=$('collab-send');
+  const box=$('collab-results');
+  await withBusy(button,async()=>{
+    box.textContent=`正在向 ${targets.length} 个会话投递…`;
+    try{
+      const data=await api('/api/messages/send',{method:'POST',body:JSON.stringify({sender,targets,body,review_action:review,review_reason:reason})});
+      const sent=Array.isArray(data.sent)?data.sent:[];
+      const failed=Array.isArray(data.failed)?data.failed:[];
+      box.innerHTML=sent.map(item=>`<div class="message-probe-result wait"><strong>已投递 · ${esc(item.to)}</strong><small>${esc(item.message_id)} · 等待对方接收与回复</small></div>`).join('')
+        +failed.map(item=>`<div class="message-probe-result failed"><strong>失败 · ${esc(item.to)}</strong><small>${esc(item.error||'')}</small></div>`).join('');
+      toast(sent.length?`已投递 ${sent.length} 条`:'没有消息被投递');
+    }catch(error){box.textContent='指派失败：'+error.message}
+  },'投递中…');
+}
+"""
 
 
 def _apply_message_probe_ui(page: str) -> str:
@@ -254,6 +351,8 @@ function renderMessagePeers(){
   setMessageProbeBusy(messageProbeBusy);
 }
 async function refreshMessagePeers(){
+  const button=event&&event.currentTarget;
+  await withBusy(button,async()=>{
   try{
     const data=await api('/api/messages/peers');
     messagePeers=Array.isArray(data.agents)?data.agents:[];
@@ -261,6 +360,7 @@ async function refreshMessagePeers(){
     state.message_agents_error='';
     renderMessagePeers();
   }catch(error){toast(error.message)}
+  },'刷新中…');
 }
 function messageProbeStatus(item,timedOut){
   const labels={queued:'等待宿主接收',sending:'正在投递',dispatched:'已写入宿主入口，等待回复',delivered:'已投递，等待回复',read:'已读，等待回复',replied:'已回复，连通',failed:'失败',expired:'已过期'};
@@ -331,18 +431,13 @@ async function startMessageProbe(){
     )
     page = _replace_once(
         page,
-        "const saved=state.install_targets||['codex'];",
-        "const saved=Array.isArray(state.install_targets)?state.install_targets:[];",
-    )
-    page = _replace_once(
-        page,
         "async function applyTargets()",
         javascript + "\nasync function applyTargets()",
     )
     return _replace_once(
         page,
         "initTheme();render();",
-        "initTheme();render();renderMessagePeers();",
+        "initTheme();render();renderMessagePeers();renderCollab();",
     )
 
 
@@ -754,7 +849,7 @@ html[data-theme="light"] .notice{background:#f0f6ff;color:#57606a}html[data-them
 @media(max-width:460px){.app{padding:16px 12px 48px}.brand{font-size:22px}.brand small{font-size:10px}.brand-mark{width:36px;height:36px}.mast-actions{gap:8px}.mode-shell{padding:7px 10px}.head .toolbar{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));width:100%}.head .toolbar .btn:last-child:nth-child(odd){grid-column:1/-1}.grid{gap:8px}.stat-card{min-height:85px;padding:11px 10px}.stat{font-size:23px}.label{font-size:11px}.card{padding:16px 14px}.provider{padding:15px 13px}.provider>div:first-child{grid-template-columns:34px minmax(0,1fr);column-gap:10px}.provider-glyph{width:32px;height:32px}.actions .btn{flex:1;min-width:65px}.status{width:100%;justify-content:flex-start}.meta{white-space:normal;overflow-wrap:anywhere}.state{font-size:11px}}
 </style></head><body><main class="app"><header class="mast"><div class="brand-wrap"><span class="brand-mark" aria-hidden="true"></span><div class="brand">AgentRelay<small>Local Provider Nexus · 本机配置中心</small></div></div><div class="mast-actions"><div class="theme-switch" role="group" aria-label="界面主题"><button class="theme-btn active" type="button" data-theme-choice="light" title="浅色 GitHub 主题" aria-label="浅色 GitHub 主题" aria-pressed="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.42 1.42"/></svg></button><button class="theme-btn" type="button" data-theme-choice="dark" title="深色科幻主题" aria-label="深色科幻主题" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></button></div><div class="mode-shell"><span class="mode-dot" aria-hidden="true"></span><span class="mode-copy"><small>RUNTIME STATUS</small><span class="mode" id="mode">离线基础模式</span></span><span class="mode-meta">LOCAL</span></div></div></header><div class="layout"><nav class="nav" aria-label="配置中心导航"><button class="active" data-tab="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg><span>总览</span></button><button data-tab="commander"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg><span>Commander</span></button><button data-tab="web"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg><span>线上模型</span></button><button data-tab="local"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01"/></svg><span>本地模型</span></button><button data-tab="api"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m8 9-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"/></svg><span>API 模型</span></button><button data-tab="security"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg><span>安全与配置</span></button><div class="nav-foot">ENCRYPTED LOCAL LINK<br>127.0.0.1 · SESSION ACTIVE</div></nav><section>
 <div id="overview" class="view active"><div class="head"><div><h1>当前状态</h1><p class="hint">环境检查确认安装链路；Provider 检查确认模型配置和登录状态。</p></div><div class="toolbar"><button class="btn" onclick="checkEnvironment()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></svg><span>检查环境</span></button><button class="btn" onclick="initializeFiles()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg><span>初始化文件</span></button><button class="btn primary" onclick="closeApp()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg><span>完成并关闭</span></button></div></div><div class="grid" id="stats"></div><section class="section-block"><div class="section-head"><div><span class="section-code">PROVIDER MATRIX // LIVE</span><h2>Provider 管理</h2></div><p class="hint">网页模型能否实际自动对话，取决于是否已接入该网站的操作规则。</p></div><div class="stack" id="overview-list"></div><div id="environment" class="check-result"></div></section><div class="card target-panel" id="targets-card"></div></div>
-<div id="commander" class="view"><div class="head"><div><h1>Commander</h1><p class="hint">主 Agent 按任务实际需要启动 1 到 5 个隔离子 Agent。</p></div><button class="btn primary" onclick="saveCommander()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg><span>保存</span></button></div><div class="card"><div class="form"><div class="field full"><div class="switch-row"><div><label>启用审查官模式</label><small id="commander-note">至少需要一个 API 模型或本地模型。</small></div><label class="switch"><input id="commander-enabled" type="checkbox"><span class="slider"></span></label></div></div><div class="field full"><label>Codex 终端路径</label><input id="terminal-path" placeholder="codex 或 /路径/codex"></div><div class="field"><label>最多可启动的 Agent</label><select id="max-agents"><option value="1">1 个</option><option value="2">2 个</option><option value="3">3 个</option><option value="4">4 个</option><option value="5">5 个</option></select><p class="hint">这是上限；实际数量由主 Agent 按业务自动决定。</p></div></div><div class="notice">配置任意 API 模型或本地模型后，Commander 会自动启用。线上网页模型不参与审查官；API 通过受控入口调用，不把密钥暴露给子 Agent。</div></div></div>
+<div id="commander" class="view"><div class="head"><div><h1>Commander</h1><p class="hint">主 Agent 按任务实际需要启动 1 到 5 个隔离子 Agent。</p></div><button class="btn primary" onclick="saveCommander()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg><span>保存</span></button></div><div class="card"><div class="form"><div class="field full"><div class="switch-row"><div><label>启用审查官模式</label><small id="commander-note">至少需要一个 API 模型或本地模型。</small></div><label class="switch"><input id="commander-enabled" type="checkbox"><span class="slider"></span></label></div></div><div class="field full"><div class="switch-row"><div><label>自动化执行前先通知我</label><small>启动自动化、控制鼠标、后台启动进程、打开或关闭窗口前，先给你一条系统通知。也可以输入 <code>/agent-approval notify</code> 管理这个开关。关掉后不再发通知，但涉及前台焦点和鼠标控制的操作仍需你确认。</small></div><label class="switch"><input id="notifications-enabled" type="checkbox"><span class="slider"></span></label></div></div><div class="field full"><label>Commander 终端程序</label><select id="terminal-agent" onchange="applyTerminalAgent()"><option value="">手动填写路径</option></select><div style="display:flex;gap:8px;margin-top:2px"><input id="terminal-path" placeholder="codex 或 /路径/codex" style="flex:1 1 auto"><button class="btn" type="button" onclick="pickExecutable()" title="选择本机可执行文件">浏览…</button></div><p class="hint" id="terminal-note">自动列出本机已安装的 codex、claude、pi、opencode、hermes、kimi；也可以手动填写任意路径。</p></div><div class="field"><label>最多可启动的 Agent</label><select id="max-agents"><option value="1">1 个</option><option value="2">2 个</option><option value="3">3 个</option><option value="4">4 个</option><option value="5">5 个</option></select><p class="hint">这是上限；实际数量由主 Agent 按业务自动决定。</p></div></div><div class="notice">配置任意 API 模型或本地模型后，Commander 会自动启用。线上网页模型不参与审查官；API 通过受控入口调用，不把密钥暴露给子 Agent。</div></div></div>
 <div id="web" class="view"><div class="head"><div><h1>线上网页模型</h1><p class="hint">登录状态加密保存在本机。DeepSeek 已可自动对话；其他网页先完成配置和登录，接入操作规则后才可自动对话。</p></div><button class="btn primary" onclick="showForm('web')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新增线上模型</span></button></div><div class="stack" id="web-list"></div><div id="web-form" class="form-slot"></div></div>
 <div id="local" class="view"><div class="head"><div><h1>本地模型</h1><p class="hint">这里只配置独立的协作模型，支持 Ollama、LM Studio、vLLM、llama.cpp；不要填写正在驱动 Codex 的主模型或共用同一服务。</p></div><div class="toolbar"><button class="btn" onclick="scanLocal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg><span>扫描本机服务</span></button><button class="btn primary" onclick="showForm('local')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新增本地模型</span></button></div></div><div id="local-scan" class="notice" style="display:none"></div><div class="stack" id="local-list"></div><div id="local-form" class="form-slot"></div></div>
 <div id="api" class="view"><div class="head"><div><h1>API 模型</h1><p class="hint">这里只配置独立的协作模型；密钥不会在页面回显，只加密保存在本机。</p></div><button class="btn primary" onclick="showForm('api')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新增 API 模型</span></button></div><div class="stack" id="api-list"></div><div id="api-form" class="form-slot"></div><div class="card router-card"><h2>协议路由</h2><p class="hint">消息格式不是 Chat 的 API 模型由内置路由做协议转换（Responses/Anthropic ↔ Chat）。默认端口 15731，与本机 cc-switch 的 15721 错开；被占用时可改。</p><div class="form"><div class="field"><label>路由端口</label><input id="router-port" type="number" min="1024" max="65535" value="15731"></div></div><div class="toolbar"><button class="btn primary" onclick="saveRouter()">保存端口</button></div></div></div>
@@ -777,12 +872,12 @@ function providers(kind){return state[kind+'_providers']||[]}
 function available(){return providers('api').some(p=>p.enabled!==false)||providers('local').some(p=>p.enabled!==false)}
 function providerStatus(kind,p){const fmtMap={chat:'Chat',responses:'Responses',anthropic:'Anthropic Messages'};const limit=` · 并发 ${p.max_concurrency||(kind==='api'?10:1)} · 排队 ${p.queue_timeout||30} 秒`;if(kind==='web'){const modes=' · 模式：'+modeSummary(p);if((state.web_assist||{}).enabled!==true)return '<span class="wait">Beta 网页测试协助已关闭</span>：不会自动调用或参与默认路由'+modes+limit;if(p.adapter==='deepseek')return '<b>Beta · DeepSeek 已接通</b>：仅作最后辅助'+modes+limit;if(p.adapter==='generic')return '<b>Beta · 通用兜底适配器</b>：仅作最后辅助，网站操作稳定性需要实测'+modes+limit;return '<span class="wait">已保存网页登录配置</span>：目前还不能自动操作这个网站的对话页面'+modes+limit}if(kind==='local')return '<b>协作模型</b>：本地执行任务按 API → 本地路由'+limit;return `<b>协作模型 · 消息格式 ${fmtMap[p.format]||'Chat'}</b>${limit}`}
 function card(kind,p,actions=true){const checkLabel=kind==='web'?'就绪检查':'测试';const dot=p.enabled!==false?'<span class="dot on"></span>':'<span class="dot off"></span>';const status=p.enabled!==false?'启用':'已停用';const glyph=kind==='web'?'W':kind==='local'?'L':'A';return `<article class="card provider provider-${kind}"><div><span class="provider-glyph" aria-hidden="true">${glyph}</span><div class="ptitle"><strong>${esc(p.name||p.id)}</strong>${p.id===state.default_provider?'<span class="stag def">默认</span>':''}</div><div class="meta">${esc(p.id)} · ${esc(p.base_url||p.endpoint||'')}</div><div class="state">${providerStatus(kind,p)}</div></div>${actions?`<div class="actions"><span class="status">${dot}${status}</span><button class="btn" onclick="testProvider('${kind}','${esc(p.id)}')">${checkLabel}</button><button class="btn" onclick="showForm('${kind}','${esc(p.id)}')">编辑</button><button class="btn" onclick="toggleProvider('${kind}','${esc(p.id)}')">${p.enabled!==false?'停用':'启用'}</button>${kind==='web'?`<button class="btn" onclick="setDefault('${esc(p.id)}')">设为默认</button>`:''}<button class="btn danger" onclick="deleteProvider('${kind}','${esc(p.id)}')">删除</button></div>`:`<div class="actions"><span class="status">${dot}${status}</span></div>`}</article>`}
-function render(){const c=state.commander||{};$('mode').textContent=c.enabled?'Commander 已启用':'离线基础模式';$('config-path').textContent=state.config_path||'本机加密目录';const ok=available();$('commander-enabled').checked=!!c.enabled;$('commander-enabled').disabled=!ok;$('commander-note').textContent=ok?'已检测到 API 或本地模型，默认启用；可手动关闭。':'尚未配置 API 或本地模型，暂时无法开启。';$('terminal-path').value=c.terminal_path||c.terminal||'codex';$('max-agents').value=c.max_agents||5;if($('router-port'))$('router-port').value=(state.api_router||{}).port||15731;const types=[['线上模型','WEB NODES',providers('web').length],['本地模型','LOCAL NODES',providers('local').length],['API 模型','API LINKS',providers('api').length]];$('stats').innerHTML=types.map(([name,code,count],i)=>`<article class="card stat-card"><div class="stat-top"><span class="label">${name}</span><span class="stat-code">0${i+1} / ${code}</span></div><div class="stat">${String(count).padStart(2,'0')}</div><div class="stat-track"><i style="width:${count?Math.min(100,28+count*24):8}%"></i></div></article>`).join('');const list=[['web',providers('web')],['local',providers('local')],['api',providers('api')]].flatMap(([kind,items])=>items.map(p=>card(kind,p,false)));$('overview-list').innerHTML=list.join('')||'<div class="empty">还没有 Provider，离线基础能力仍可使用。</div>';['web','local','api'].forEach(kind=>$(kind+'-list').innerHTML=providers(kind).map(p=>card(kind,p)).join('')||'<div class="empty">暂无配置。</div>');renderTargets();stagger()}
+function render(){const c=state.commander||{};const notificationsOn=(state.notifications||{}).enabled!==false;if($('notifications-enabled'))$('notifications-enabled').checked=notificationsOn;$('mode').textContent=c.enabled?'Commander 已启用':'离线基础模式';$('config-path').textContent=state.config_path||'本机加密目录';const ok=available();$('commander-enabled').checked=!!c.enabled;$('commander-enabled').disabled=!ok;$('commander-note').textContent=ok?'已检测到 API 或本地模型，默认启用；可手动关闭。':'尚未配置 API 或本地模型，暂时无法开启。';$('terminal-path').value=c.terminal_path||c.terminal||'codex';renderTerminalAgents();$('max-agents').value=c.max_agents||5;if($('router-port'))$('router-port').value=(state.api_router||{}).port||15731;const types=[['线上模型','WEB NODES',providers('web').length],['本地模型','LOCAL NODES',providers('local').length],['API 模型','API LINKS',providers('api').length]];$('stats').innerHTML=types.map(([name,code,count],i)=>`<article class="card stat-card"><div class="stat-top"><span class="label">${name}</span><span class="stat-code">0${i+1} / ${code}</span></div><div class="stat">${String(count).padStart(2,'0')}</div><div class="stat-track"><i style="width:${count?Math.min(100,28+count*24):8}%"></i></div></article>`).join('');const list=[['web',providers('web')],['local',providers('local')],['api',providers('api')]].flatMap(([kind,items])=>items.map(p=>card(kind,p,false)));$('overview-list').innerHTML=list.join('')||'<div class="empty">还没有 Provider，离线基础能力仍可使用。</div>';['web','local','api'].forEach(kind=>$(kind+'-list').innerHTML=providers(kind).map(p=>card(kind,p)).join('')||'<div class="empty">暂无配置。</div>');renderTargets();stagger()}
 function stagger(){document.querySelectorAll('.stack').forEach(stack=>{[...stack.children].forEach((el,i)=>{if(el.classList&&el.classList.contains('card'))el.style.animationDelay=Math.min(i*55,440)+'ms'})})}
 function renderTargets(){
   const card=$('targets-card');
   if(!card)return;
-  const saved=state.install_targets||['codex'];
+  const saved=Array.isArray(state.install_targets)?state.install_targets:[];
   const rows=Object.values(state.agents||{}).map(a=>{
     const checked=saved.includes(a.id)?'checked':'';
     const cli=a.detected?'<span class="stag on">本机已装</span>':'<span class="stag off">本机未装</span>';
@@ -817,7 +912,7 @@ function renderTargets(){
   const restrictionText=restricted?`；另有 ${restricted} 个非官方 Skill 的许可证明确禁止复制，已显示但不可勾选`:'';
   card.innerHTML=`<div class="section-head"><div><span class="section-code">AGENT BRIDGE // INSTALL</span><h2>安装目标 Agent</h2></div></div><p class="hint">开关 = 是否启用该 Agent 的 AgentRelay 接入；点击“应用并验证”后按勾选安装或卸载。<br>“本机已装”指检测到你电脑上装有该 Agent 的命令行工具；“已接入 AgentRelay”指 Skill 和 Hook 已装进它——两者含义不同，别混淆。取消勾选并应用会备份后卸载 AgentRelay 自己的接入，不影响其他配置。Hook 非常驻；可选 daemon 负责周期监控和 Provider 租约状态汇总，关闭本页面不影响 Hook 或 daemon。</p><div class="stack" style="margin-top:12px">${rows}</div><section class="skill-catalog"><div class="section-head skill-head"><div><span class="section-code">DEVELOPMENT SKILLS // LOCAL + TRUSTED SOURCES</span><h2>开发 Skills</h2></div><p class="hint">自动发现 ${esc(String(catalog.installed_count||0))} 个本机已安装 Skill，默认勾选其中 ${esc(String(catalog.selectable_installed_count||0))} 个许可证明确的项目；内置 Vue.js 与 AgentRelay Browser Skill 直接随安装包提供，并由每个选中的 Agent 分别安装${officialText}${restrictionText}。许可证允许的本机项目会保留完整目录和原许可证。</p></div><div class="skill-grid">${skillRows||'<div class="empty">当前没有可选 Skill。</div>'}</div><p class="skill-meta">${skillMeta}</p></section>${unsupported}<div class="toolbar" style="margin-top:14px"><button class="btn primary" onclick="applyTargets()">应用并验证</button></div><div id="target-results" class="check-result"></div>`
 }
-async function applyTargets(){const boxes=[...document.querySelectorAll('.target-box:checked')];const targets=boxes.map(x=>x.value);const skillIds=[...document.querySelectorAll('.skill-check:checked')].map(x=>x.value);const box=$('target-results');box.innerHTML='正在按勾选安装或卸载并验证，请稍候…';try{const data=await api('/api/targets',{method:'POST',body:JSON.stringify({targets,skills:skillIds})});Object.assign(state,data.config);const sections=Object.entries(data.results||{}).map(([id,checks])=>`<strong>${esc((state.agents[id]||{}).label||id)}</strong><br>`+checks.map(c=>`${c.ok?'✓':'!'} ${esc(c.name)}：${esc(c.detail)}${c.ok?'':'（'+esc(c.reason||'')+'）'}`).join('<br>')).join('<br><br>');const errors=Object.entries(data.errors||{});box.innerHTML=sections+(errors.length?'<br><br><strong>失败目标</strong><br>'+errors.map(([k,v])=>`! ${esc(k)}：${esc(v)}`).join('<br>'):'');toast(errors.length?'部分目标失败，请查看详情':'已按勾选同步接入状态')}catch(error){box.innerHTML='';toast(error.message)}}
+async function applyTargets(){const button=event&&event.currentTarget;await withBusy(button,async()=>{const boxes=[...document.querySelectorAll('.target-box:checked')];const targets=boxes.map(x=>x.value);const skillIds=[...document.querySelectorAll('.skill-check:checked')].map(x=>x.value);const box=$('target-results');box.innerHTML='正在按勾选安装或卸载并验证，请稍候…';try{const data=await api('/api/targets',{method:'POST',body:JSON.stringify({targets,skills:skillIds})});Object.assign(state,data.config);const sections=Object.entries(data.results||{}).map(([id,checks])=>`<strong>${esc((state.agents[id]||{}).label||id)}</strong><br>`+checks.map(c=>`${c.ok?'✓':'!'} ${esc(c.name)}：${esc(c.detail)}${c.ok?'':'（'+esc(c.reason||'')+'）'}`).join('<br>')).join('<br><br>');const errors=Object.entries(data.errors||{});box.innerHTML=sections+(errors.length?'<br><br><strong>失败目标</strong><br>'+errors.map(([k,v])=>`! ${esc(k)}：${esc(v)}`).join('<br>'):'');toast(errors.length?'部分目标失败，请查看详情':'已按勾选同步接入状态')}catch(error){box.innerHTML='';toast(error.message)}},'应用中…')}
 document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>{document.querySelectorAll('[data-tab],.view').forEach(el=>el.classList.remove('active'));button.classList.add('active');const view=$(button.dataset.tab);view.classList.add('active');requestAnimationFrame(()=>animateView(view))});
 function switchRow(id,title,detail,checked,wrapId){return `<div class="switch-row"${wrapId?' id="'+wrapId+'"':''}><div><label>${title}</label><small>${detail}</small></div><label class="switch"><input id="${id}" type="checkbox" ${checked?'checked':''} onchange="updateModes()"><span class="slider"></span></label></div>`}
 function modeSummary(p){const c=p.conversation||{};const modes=Array.isArray(c.modes)&&c.modes.length?c.modes:['hybrid'];const names={flash:'极速',expert:'专家',hybrid:'混合'};const list=modes.map(m=>names[m]||m).join(' + ');const pics=(c.images&&Object.keys(c.images).some(k=>c.images[k]))?' · 可识图':'';return list+pics}
@@ -826,16 +921,98 @@ function updateModes(){const hybrid=$('f-hybrid'),flash=$('f-flash'),expert=$('f
 function setAutoTitles(){const titles=autoTitles($('f-id').value);[['flash','f-flash-title'],['expert','f-expert-title'],['hybrid','f-hybrid-title']].forEach(([mode,id])=>{const field=$(id);if(field&&(field.dataset.auto==='true'||!field.value)){field.value=titles[mode];field.dataset.auto='true'}})}
 function titleEdited(id){$(id).dataset.auto='false'}
 function limitFields(kind,p){const maxDefault=kind==='api'?10:1;return `<div class="field"><label>最大并发数</label><input id="f-max-concurrency" type="number" min="1" max="100" value="${p.max_concurrency||maxDefault}"><p class="hint">所有 Agent 共享这个上限；网页 Provider 每个编号会话占一个名额。</p></div><div class="field"><label>排队超时（秒）</label><input id="f-queue-timeout" type="number" min="1" max="3600" value="${p.queue_timeout||30}"><p class="hint">满载时先排队。等待超过这个时间会明确报错，不会静默改成网页执行。</p></div><div class="field"><label>租约回收（秒）</label><input id="f-lease-ttl" type="number" min="10" max="3600" value="${p.lease_ttl||90}"><p class="hint">进程异常退出后，超过这个时间会自动回收它占用的名额。</p></div>`}
-function showForm(kind,id=''){const p=providers(kind).find(x=>x.id===id)||{};const c=p.conversation||{};const modes=Array.isArray(c.modes)&&c.modes.length?c.modes:(c.supports_hybrid?['hybrid']:[c.supports_flash?'flash':null,c.supports_expert?'expert':null].filter(Boolean));const enabled=modes.length?modes:['hybrid'];const images=c.images||{};const automatic=mode=>!id||!c.titles||!c.titles[mode]||c.titles[mode]===names[mode]||c.titles[mode]===autoTitles('deepseek-web')[mode];const newItem=!id;const names=autoTitles(p.id);let html='';if(kind==='web'){html=`<div class="card"><h2>${id?'编辑':'新增'}线上模型</h2><div class="form"><div class="field"><label>别名</label><input id="f-id" value="${esc(p.id)}" placeholder="qianwen" oninput="setAutoTitles()"></div><div class="field"><label>显示名称</label><input id="f-name" value="${esc(p.name)}" placeholder="千问线上"></div><div class="field full"><label>对话页面网址</label><input id="f-url" value="${esc(p.base_url||p.url)}" placeholder="https://www.qianwen.com/"></div>${limitFields('web',p)}<div class="field full">${switchRow('f-hybrid','混合模式','极速和专家合并成一套会话；没有极速/专家区分的网站选这个',enabled.includes('hybrid'))}${switchRow('f-flash','极速模式','单独使用极速会话',enabled.includes('flash'))}${switchRow('f-expert','专家模式','单独使用专家会话',enabled.includes('expert'))}<div class="notice warn" id="mode-warning" style="display:none">至少要启用一种模式；保存时会按混合模式处理。</div></div><div class="field full" style="gap:8px">${switchRow('f-img-hybrid','混合模式支持图片','这个网站能不能用混合会话发图片',images.hybrid===true,'row-img-hybrid')}${switchRow('f-img-flash','极速模式支持图片','极速会话能不能发图片',images.flash===true,'row-img-flash')}${switchRow('f-img-expert','专家模式支持图片','专家会话能不能发图片',images.expert===true,'row-img-expert')}</div><div class="field" id="field-hybrid-title"><label>混合会话名称</label><input id="f-hybrid-title" data-auto="${automatic('hybrid')?'true':'false'}" oninput="titleEdited('f-hybrid-title')" value="${esc(c.titles?.hybrid||names.hybrid)}"></div><div class="field" id="field-flash-title"><label>极速会话名称</label><input id="f-flash-title" data-auto="${automatic('flash')?'true':'false'}" oninput="titleEdited('f-flash-title')" value="${esc(c.titles?.flash||names.flash)}"></div><div class="field" id="field-expert-title"><label>专家会话名称</label><input id="f-expert-title" data-auto="${automatic('expert')?'true':'false'}" oninput="titleEdited('f-expert-title')" value="${esc(c.titles?.expert||names.expert)}"></div></div><div class="notice">实际运行使用 AgentRelay-DeepSeek-1、-2、-3 这类编号会话；不同业务流程不会复用彼此的网页历史。没有空闲且未到上限时才创建新会话。</div><div class="toolbar"><button class="btn" onclick="startWebLogin()">打开网页登录</button><button class="btn primary" onclick="saveProvider('web')">保存配置</button><button class="btn" onclick="$('web-form').innerHTML=''">取消</button></div><div class="login-state" id="login-state"></div></div>`}else if(kind==='local'){html=`<div class="card"><h2>${id?'编辑':'新增'}本地模型</h2><div class="form"><div class="field"><label>别名</label><input id="f-id" value="${esc(p.id)}" placeholder="llama-local"></div><div class="field"><label>显示名称</label><input id="f-name" value="${esc(p.name)}" placeholder="我的 llama.cpp"></div><div class="field full"><label>接口地址</label><input id="f-endpoint" value="${esc(p.endpoint)}" placeholder="http://127.0.0.1:8080/v1"></div><div class="field"><label>模型名称</label><input id="f-model" value="${esc(p.model)}" placeholder="模型名称"></div>${limitFields('local',p)}</div><div class="notice warn"><strong>仅填写协作模型</strong><br>${COLLAB_PROVIDER_WARNING}</div><div class="toolbar"><button class="btn primary" onclick="saveProvider('local')">保存配置</button><button class="btn" onclick="$('local-form').innerHTML=''">取消</button></div></div>`}else{html=`<div class="card"><h2>${id?'编辑':'新增'}API 模型</h2><div class="form"><div class="field"><label>别名</label><input id="f-id" value="${esc(p.id)}" placeholder="my-api"></div><div class="field"><label>显示名称</label><input id="f-name" value="${esc(p.name)}" placeholder="我的 API 模型"></div><div class="field full"><label>API 地址</label><input id="f-endpoint" value="${esc(p.endpoint)}" placeholder="https://api.example/v1"></div><div class="field"><label>模型名称</label><input id="f-model" value="${esc(p.model)}" placeholder="模型名称"></div><div class="field"><label>请求类型</label><select id="f-type"><option value="openai-compatible">OpenAI 兼容聊天</option><option value="custom-compatible">自定义兼容接口</option></select></div><div class="field"><label>消息格式</label><select id="f-format"><option value="chat">OpenAI Chat（直连，无需路由）</option><option value="responses">OpenAI Responses（原生）</option><option value="anthropic">Anthropic Messages（走本地路由）</option></select></div><div class="field full"><label>API Key（编辑时留空即保留旧值）</label><input id="f-key" type="password"></div>${limitFields('api',p)}</div><div class="notice warn"><strong>仅填写协作模型</strong><br>${COLLAB_PROVIDER_WARNING}</div><div class="notice">非 Chat 格式由 AgentRelay 内置协议路由自动转换（默认 127.0.0.1:15731，与本机 cc-switch 的 15721 错开），端口可在 API 页底部"协议路由"卡片修改。</div><div class="toolbar"><button class="btn" onclick="testApiForm()">测试接口</button><button class="btn primary" onclick="saveProvider('api')">保存配置</button><button class="btn" onclick="$('api-form').innerHTML=''">取消</button></div></div>`}$((kind)+'-form').innerHTML=html;if(kind==='web'){setAutoTitles();updateModes()}if(kind==='api'){if(p.request_type)$('f-type').value=p.request_type;if(p.format)$('f-format').value=p.format}}
-async function saveProvider(kind){try{const p={id:$('f-id').value.trim(),name:$('f-name').value.trim(),enabled:true,max_concurrency:Number($('f-max-concurrency').value)||(kind==='api'?10:1),queue_timeout:Number($('f-queue-timeout').value)||30,lease_ttl:Number($('f-lease-ttl').value)||90};if(kind==='web'){p.base_url=$('f-url').value.trim();p.conversation=collectConversation()}else{p.endpoint=$('f-endpoint').value.trim();p.model=$('f-model').value.trim()}if(kind==='api'){p.api_key=$('f-key').value;p.request_type=$('f-type').value;p.format=$('f-format').value}const data=await api('/api/providers',{method:'POST',body:JSON.stringify({kind,provider:p})});Object.assign(state,data.config);render();toast('配置已加密保存')}catch(error){toast(error.message)}}
+function showForm(kind,id=''){const p=providers(kind).find(x=>x.id===id)||{};const c=p.conversation||{};const modes=Array.isArray(c.modes)&&c.modes.length?c.modes:(c.supports_hybrid?['hybrid']:[c.supports_flash?'flash':null,c.supports_expert?'expert':null].filter(Boolean));const enabled=modes.length?modes:['hybrid'];const images=c.images||{};const automatic=mode=>!id||!c.titles||!c.titles[mode]||c.titles[mode]===names[mode]||c.titles[mode]===autoTitles('deepseek-web')[mode];const newItem=!id;const names=autoTitles(p.id);let html='';if(kind==='web'){html=`<div class="card"><h2>${id?'编辑':'新增'}线上模型</h2><div class="form"><div class="field"><label>别名</label><input id="f-id" value="${esc(p.id)}" placeholder="qianwen" oninput="setAutoTitles()"></div><div class="field"><label>显示名称</label><input id="f-name" value="${esc(p.name)}" placeholder="千问线上"></div><div class="field full"><label>对话页面网址</label><input id="f-url" value="${esc(p.base_url||p.url)}" placeholder="https://www.qianwen.com/"></div>${limitFields('web',p)}<div class="field full">${switchRow('f-hybrid','混合模式','极速和专家合并成一套会话；没有极速/专家区分的网站选这个',enabled.includes('hybrid'))}${switchRow('f-flash','极速模式','单独使用极速会话',enabled.includes('flash'))}${switchRow('f-expert','专家模式','单独使用专家会话',enabled.includes('expert'))}<div class="notice warn" id="mode-warning" style="display:none">至少要启用一种模式；保存时会按混合模式处理。</div></div><div class="field full" style="gap:8px">${switchRow('f-img-hybrid','混合模式支持图片','这个网站能不能用混合会话发图片',images.hybrid===true,'row-img-hybrid')}${switchRow('f-img-flash','极速模式支持图片','极速会话能不能发图片',images.flash===true,'row-img-flash')}${switchRow('f-img-expert','专家模式支持图片','专家会话能不能发图片',images.expert===true,'row-img-expert')}</div><div class="field" id="field-hybrid-title"><label>混合会话名称</label><input id="f-hybrid-title" data-auto="${automatic('hybrid')?'true':'false'}" oninput="titleEdited('f-hybrid-title')" value="${esc(c.titles?.hybrid||names.hybrid)}"></div><div class="field" id="field-flash-title"><label>极速会话名称</label><input id="f-flash-title" data-auto="${automatic('flash')?'true':'false'}" oninput="titleEdited('f-flash-title')" value="${esc(c.titles?.flash||names.flash)}"></div><div class="field" id="field-expert-title"><label>专家会话名称</label><input id="f-expert-title" data-auto="${automatic('expert')?'true':'false'}" oninput="titleEdited('f-expert-title')" value="${esc(c.titles?.expert||names.expert)}"></div></div><div class="notice">实际运行使用 AgentRelay-DeepSeek-1、-2、-3 这类编号会话；不同业务流程不会复用彼此的网页历史。没有空闲且未到上限时才创建新会话。</div><div class="toolbar"><button class="btn" onclick="startWebLogin()">打开网页登录</button><button class="btn primary" onclick="saveProvider('web')">保存配置</button><button class="btn" onclick="$('web-form').innerHTML=''">取消</button></div><div class="login-state" id="login-state"></div></div>`}else if(kind==='local'){html=`<div class="card"><h2>${id?'编辑':'新增'}本地模型</h2><div class="form"><div class="field"><label>别名</label><input id="f-id" value="${esc(p.id)}" placeholder="llama-local"></div><div class="field"><label>显示名称</label><input id="f-name" value="${esc(p.name)}" placeholder="我的 llama.cpp"></div><div class="field full"><label>接口地址</label><input id="f-endpoint" value="${esc(p.endpoint)}" placeholder="http://127.0.0.1:8080/v1"></div><div class="field"><label>模型名称</label><input id="f-model" value="${esc(p.model)}" placeholder="模型名称"></div>${limitFields('local',p)}</div><div class="notice warn"><strong>仅填写协作模型</strong><br>${COLLAB_PROVIDER_WARNING}</div><div class="toolbar"><button class="btn primary" onclick="saveProvider('local')">保存配置</button><button class="btn" onclick="$('local-form').innerHTML=''">取消</button></div></div>`}else{html=`<div class="card"><h2>${id?'编辑':'新增'}API 模型</h2><div class="form"><div class="field"><label>别名</label><input id="f-id" value="${esc(p.id)}" placeholder="my-api"></div><div class="field"><label>显示名称</label><input id="f-name" value="${esc(p.name)}" placeholder="我的 API 模型"></div><div class="field full"><label>API 地址</label><input id="f-endpoint" value="${esc(p.endpoint)}" placeholder="https://api.example/v1"></div><div class="field"><label>模型名称</label><input id="f-model" value="${esc(p.model)}" placeholder="模型名称"><p class="hint">填好地址和密钥后可以先“获取模型”再选。</p></div><div class="field"><label>从接口获取的模型</label><select id="f-model-select" onchange="pickFetchedModel()" disabled><option value="">先点击下方“获取模型”</option></select></div><div class="field"><label>请求类型</label><select id="f-type"><option value="openai-compatible">OpenAI 兼容聊天</option><option value="custom-compatible">自定义兼容接口</option></select></div><div class="field"><label>消息格式</label><select id="f-format"><option value="chat">OpenAI Chat（直连，无需路由）</option><option value="responses">OpenAI Responses（原生）</option><option value="anthropic">Anthropic Messages（走本地路由）</option></select></div><div class="field full"><label>API Key${id?'（已保存，留空即保留）':''}</label><div style="display:flex;gap:8px"><input id="f-key" type="password" placeholder="${id?'•••••••• 已保存，留空则保留原密钥':'粘贴你的 API Key'}" style="flex:1 1 auto" autocomplete="off"><button class="btn" id="f-key-eye" type="button" onclick="toggleKey()" aria-pressed="false" aria-label="显示密钥" title="显示或隐藏密钥"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg></button></div></div>${limitFields('api',p)}</div><div class="notice warn"><strong>仅填写协作模型</strong><br>${COLLAB_PROVIDER_WARNING}</div><div class="notice">非 Chat 格式由 AgentRelay 内置协议路由自动转换（默认 127.0.0.1:15731，与本机 cc-switch 的 15721 错开），端口可在 API 页底部"协议路由"卡片修改。</div><div class="toolbar"><button class="btn" onclick="fetchModels()">获取模型</button><button class="btn" onclick="testApiForm()">测试接口</button><button class="btn primary" onclick="saveProvider('api')">保存配置</button><button class="btn" onclick="$('api-form').innerHTML=''">取消</button></div></div>`}$((kind)+'-form').innerHTML=html;if(kind==='web'){setAutoTitles();updateModes()}if(kind==='api'){if(p.request_type)$('f-type').value=p.request_type;if(p.format)$('f-format').value=p.format}}
+async function saveProvider(kind){try{const p={id:$('f-id').value.trim(),name:$('f-name').value.trim(),enabled:true,max_concurrency:Number($('f-max-concurrency').value)||(kind==='api'?10:1),queue_timeout:Number($('f-queue-timeout').value)||30,lease_ttl:Number($('f-lease-ttl').value)||90};if(kind==='web'){p.base_url=$('f-url').value.trim();p.conversation=collectConversation()}else{p.endpoint=$('f-endpoint').value.trim();p.model=$('f-model').value.trim()}if(kind==='api'){p.api_key=$('f-key').value;p.request_type=$('f-type').value;p.format=$('f-format').value}const data=await api('/api/providers',{method:'POST',body:JSON.stringify({kind,provider:p})});Object.assign(state,data.config);$(kind+'-form').innerHTML='';render();toast('配置已加密保存')}catch(error){toast(error.message)}}
 async function startWebLogin(){try{const p={id:$('f-id').value.trim(),name:$('f-name').value.trim(),base_url:$('f-url').value.trim(),conversation:collectConversation(),max_concurrency:Number($('f-max-concurrency').value)||1,queue_timeout:Number($('f-queue-timeout').value)||30,lease_ttl:Number($('f-lease-ttl').value)||90};const data=await api('/api/login',{method:'POST',body:JSON.stringify({provider:p})});Object.assign(state,data.config);$('login-state').textContent='浏览器已打开。登录完成后关闭这个对话标签页，页面会自动提示已保存。';watchLogin(p.id);toast('网页登录窗口已打开')}catch(error){toast(error.message)}}
 function watchLogin(id){clearInterval(loginPoll);loginPoll=setInterval(async()=>{try{const data=await api('/api/login-status?id='+encodeURIComponent(id));const node=$('login-state');if(data.saved){clearInterval(loginPoll);if(node){node.textContent='登录状态已加密保存，可以继续配置或关闭页面。';node.classList.add('ok')}toast('登录状态已保存')}else if(node)node.textContent='正在等待你登录并关闭对话标签页…'}catch(_){clearInterval(loginPoll)}},1800)}
-async function saveCommander(){try{const enabled=$('commander-enabled').checked;const data=await api('/api/settings',{method:'POST',body:JSON.stringify({commander:{enabled,manual_disabled:!enabled,terminal_path:$('terminal-path').value.trim(),max_agents:Number($('max-agents').value)||5}})});Object.assign(state,data.config);render();toast('Commander 配置已保存')}catch(error){toast(error.message)}}
+async function saveCommander(){try{const enabled=$('commander-enabled').checked;const data=await api('/api/settings',{method:'POST',body:JSON.stringify({commander:{enabled,manual_disabled:!enabled,terminal_path:$('terminal-path').value.trim(),max_agents:Number($('max-agents').value)||5},notifications:{enabled:$('notifications-enabled').checked}})});Object.assign(state,data.config);render();toast('Commander 配置已保存')}catch(error){toast(error.message)}}
 async function saveRouter(){try{const data=await api('/api/settings',{method:'POST',body:JSON.stringify({api_router:{port:Number($('router-port').value)||15731}})});Object.assign(state,data.config);render();toast('路由端口已保存')}catch(error){toast(error.message)}}
+function renderTerminalAgents(){
+  const select=$('terminal-agent');
+  if(!select)return;
+  const items=Array.isArray(state.executables)?state.executables:[];
+  const current=($('terminal-path')||{}).value||'';
+  select.innerHTML='<option value="">手动填写路径</option>'+items.map(item=>{
+    const state_=item.ok?'':'（未找到）';
+    return `<option value="${esc(item.agent)}" data-path="${esc(item.path||'')}">${esc(item.label)}${state_}</option>`;
+  }).join('');
+  const match=items.find(item=>item.path&&item.path===current)||items.find(item=>item.agent===current);
+  select.value=match?match.agent:'';
+  const note=$('terminal-note');
+  if(note){
+    const found=items.filter(item=>item.ok);
+    note.textContent=found.length?`本机已找到 ${found.map(item=>item.label).join('、')}；选择后会填入真实路径，也可以手动填写。`:'没有自动检测到命令行 Agent；请手动填写路径。';
+  }
+}
+function applyTerminalAgent(){
+  const select=$('terminal-agent');
+  if(!select||!select.value)return;
+  const option=select.options[select.selectedIndex];
+  const path=option.dataset.path||'';
+  $('terminal-path').value=path||select.value;
+  toast(path?'已填入：'+path:'未找到该程序，请手动填写路径');
+}
+async function pickExecutable(){
+  const button=document.querySelector('#commander .field.full button');
+  await withBusy(button,async()=>{
+    try{
+      const data=await api('/api/pick-executable',{method:'POST',body:JSON.stringify({initial:$('terminal-path').value.trim()})});
+      if(data.path){$('terminal-path').value=data.path;toast('已选择：'+data.path)}
+      else if(data.message)toast(data.message);
+    }catch(error){toast(error.message)}
+  },'打开中…');
+}
 async function toggleProvider(kind,id){try{const data=await api('/api/providers/action',{method:'POST',body:JSON.stringify({kind,id,action:'toggle'})});Object.assign(state,data.config);render()}catch(error){toast(error.message)}}async function setDefault(id){try{const data=await api('/api/providers/action',{method:'POST',body:JSON.stringify({kind:'web',id,action:'default'})});Object.assign(state,data.config);render();toast('默认网页模型已更新')}catch(error){toast(error.message)}}async function deleteProvider(kind,id){if(!confirm('确定删除这个 Provider？'))return;try{const data=await api('/api/providers?kind='+kind+'&id='+encodeURIComponent(id),{method:'DELETE'});Object.assign(state,data.config);render()}catch(error){toast(error.message)}}
-async function testProvider(kind,id){try{const data=await api('/api/test',{method:'POST',body:JSON.stringify({kind,id})});toast(data.message)}catch(error){toast(error.message)}}async function testApiForm(){try{const data=await api('/api/test',{method:'POST',body:JSON.stringify({kind:'api',endpoint:$('f-endpoint').value,model:$('f-model').value,api_key:$('f-key').value,format:($('f-format')||{}).value||'chat'})});toast(data.message)}catch(error){toast(error.message)}}
-async function scanLocal(){try{const data=await api('/api/scan-local');const box=$('local-scan');box.style.display='block';box.innerHTML=data.found.length?'检测到本地服务：'+data.found.map(x=>`<button class="btn" onclick="useLocal('${esc(x.endpoint)}','${esc(x.models[0]||'')}')">${esc(x.name)} · ${esc(x.endpoint)} · ${esc(x.models.join('、')||'未返回模型')}</button>`).join(' '):'没有发现 Ollama、LM Studio、vLLM 或 llama.cpp。llama.cpp 默认常见端口为 8080；请确认它启动了 OpenAI 兼容服务器（/v1/models）。';toast(data.found.length?'扫描完成':'未发现兼容本地服务')}catch(error){toast(error.message)}}function useLocal(endpoint,model){showForm('local');$('f-endpoint').value=endpoint;$('f-model').value=model}
-async function checkEnvironment(){try{const data=await api('/api/environment');const fail=data.checks.filter(x=>!x.ok);$('environment').innerHTML='<strong>环境检查检查的是安装链路，不检查模型登录。</strong><br>'+data.checks.map(x=>`${x.ok?'✓':'!'} ${esc(x.name)}：${esc(x.detail)}（${esc(x.reason)}）`).join('<br>');toast(fail.length?'未找到：'+fail.map(x=>x.name).join('、'):'环境检查通过')}catch(error){toast(error.message)}}async function initializeFiles(){try{const data=await api('/api/initialize',{method:'POST'});toast(data.message)}catch(error){toast(error.message)}}async function closeApp(){try{await api('/api/close',{method:'POST'});document.body.innerHTML='<main class="app"><div class="card"><h1>配置已完成</h1><p>本地配置服务已关闭，可以安全关闭这个页面。</p></div></main>'}catch(error){toast(error.message)}}initTheme();render();
+async function testProvider(kind,id){const button=event&&event.currentTarget;await withBusy(button,async()=>{try{const data=await api('/api/test',{method:'POST',body:JSON.stringify({kind,id})});toast(data.message)}catch(error){toast(error.message)}},'测试中…')}
+async function testApiForm(){
+  const button=document.querySelector('#api-form .toolbar .btn');
+  await withBusy(button,async()=>{
+    try{
+      const data=await api('/api/test',{method:'POST',body:JSON.stringify({kind:'api',endpoint:$('f-endpoint').value,model:$('f-model').value,api_key:$('f-key').value,format:($('f-format')||{}).value||'chat'})});
+      toast(data.message);
+    }catch(error){toast(error.message)}
+  },'测试中…');
+}
+async function fetchModels(){
+  const button=document.querySelector('#api-form .toolbar .btn');
+  const endpoint=($('f-endpoint').value||'').trim();
+  if(!endpoint){toast('请先填写 API 地址');return}
+  await withBusy(button,async()=>{
+    try{
+      const data=await api('/api/models',{method:'POST',body:JSON.stringify({endpoint,api_key:$('f-key').value,format:($('f-format')||{}).value||'chat'})});
+      const select=$('f-model-select');
+      if(data.models&&data.models.length){
+        if(select){
+          select.innerHTML='<option value="">选择已获取的模型</option>'+data.models.map(model=>`<option value="${esc(model)}">${esc(model)}</option>`).join('');
+          select.disabled=false;
+        }
+        toast(`获取到 ${data.models.length} 个模型`);
+      }else{
+        toast(data.message||'该接口没有返回模型列表，请手动填写模型名称');
+      }
+    }catch(error){toast(error.message)}
+  },'获取中…');
+}
+function pickFetchedModel(){
+  const select=$('f-model-select');
+  if(!select||!select.value)return;
+  $('f-model').value=select.value;
+  toast('已选择模型：'+select.value);
+}
+function toggleKey(){
+  const input=$('f-key');
+  const button=$('f-key-eye');
+  if(!input)return;
+  const reveal=input.type==='password';
+  input.type=reveal?'text':'password';
+  if(button){
+    button.setAttribute('aria-pressed',String(reveal));
+    button.setAttribute('aria-label',reveal?'隐藏密钥':'显示密钥');
+  }
+}
+async function scanLocal(){const button=event&&event.currentTarget;await withBusy(button,async()=>{try{const data=await api('/api/scan-local');const box=$('local-scan');box.style.display='block';box.innerHTML=data.found.length?'检测到本地服务：'+data.found.map(x=>`<button class="btn" onclick="useLocal('${esc(x.endpoint)}','${esc(x.models[0]||'')}')">${esc(x.name)} · ${esc(x.endpoint)} · ${esc(x.models.join('、')||'未返回模型')}</button>`).join(' '):'没有发现 Ollama、LM Studio、vLLM 或 llama.cpp。llama.cpp 默认常见端口为 8080；请确认它启动了 OpenAI 兼容服务器（/v1/models）。';toast(data.found.length?'扫描完成':'未发现兼容本地服务')}catch(error){toast(error.message)}},'扫描中…')}function useLocal(endpoint,model){showForm('local');$('f-endpoint').value=endpoint;$('f-model').value=model}
+async function checkEnvironment(){const button=event&&event.currentTarget;await withBusy(button,async()=>{try{const data=await api('/api/environment');const fail=data.checks.filter(x=>!x.ok);$('environment').innerHTML='<strong>环境检查检查的是安装链路，不检查模型登录。</strong><br>'+data.checks.map(x=>`${x.ok?'✓':'!'} ${esc(x.name)}：${esc(x.detail)}（${esc(x.reason)}）`).join('<br>');toast(fail.length?'未找到：'+fail.map(x=>x.name).join('、'):'环境检查通过')}catch(error){toast(error.message)}},'检查中…')}async function initializeFiles(){try{const data=await api('/api/initialize',{method:'POST'});toast(data.message)}catch(error){toast(error.message)}}async function closeApp(){try{await api('/api/close',{method:'POST'});document.body.innerHTML='<main class="app"><div class="card"><h1>配置已完成</h1><p>本地配置服务已关闭，可以安全关闭这个页面。</p></div></main>'}catch(error){toast(error.message)}}initTheme();render();
 </script></body></html>"""
     page = _apply_message_probe_ui(_apply_fusion_ui(page))
+    page = config_web_components.inject(page, _replace_once)
     return page.replace("__CONFIG__", state)

@@ -17,6 +17,7 @@ import getpass
 import re
 import threading
 import unicodedata
+import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
@@ -43,6 +44,17 @@ VENV_PYTHON = (
 )
 REQUIREMENTS = PROJECT_ROOT / "requirements.txt"
 PYTHON_UTF8_ARGS = ("-X", "utf8")
+HTTP_USER_AGENT = "AgentRelay/1.0"
+HTTP_SESSION_ID = str(uuid.uuid4())
+
+
+def provider_headers(endpoint: str) -> dict[str, str]:
+    """Outbound headers for model API calls; OpenCode Go requires a session id."""
+    headers = {"User-Agent": HTTP_USER_AGENT}
+    host = (urlparse(str(endpoint or "")).hostname or "").lower()
+    if host == "opencode.ai" or host.endswith(".opencode.ai"):
+        headers["x-opencode-session"] = HTTP_SESSION_ID
+    return headers
 
 HOOK_FILES = (
     "agent_relay_hook.py",
@@ -95,7 +107,10 @@ SCRIPT_FILES = (
     "task_scheduler.py",
     "config_manager.py",
     "config_web.py",
+    "config_web_components.py",
     "approval_policy.py",
+    "automation_consent.py",
+    "desktop_notify.py",
     "deletion_policy.py",
     "browser_interaction_policy.py",
     "delivery_audit.py",
@@ -421,10 +436,8 @@ def load_hooks_config() -> dict:
 
 
 def is_agent_relay_hook(hook) -> bool:
-    return (
-        isinstance(hook, dict)
-        and "agent_relay_hook" in str(hook.get("command", ""))
-    )
+    command = str(hook.get("command", "")) if isinstance(hook, dict) else ""
+    return "agent_relay_hook" in command or "agentrelay_hook_shim" in command
 
 
 def find_agent_relay_hook(entries: list):
@@ -876,7 +889,7 @@ def _probe_models(endpoint: str, api_key: str = "") -> tuple[bool, list[str], st
     if base.endswith("/chat/completions"):
         base = base[: -len("/chat/completions")]
     target = base + "/models"
-    headers = {"Accept": "application/json"}
+    headers = {"Accept": "application/json", **provider_headers(target)}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     try:
@@ -894,7 +907,11 @@ def _probe_chat(endpoint: str, model: str, api_key: str = "") -> tuple[bool, str
     target = endpoint.rstrip("/")
     if not target.endswith("/chat/completions"):
         target += "/chat/completions"
-    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        **provider_headers(target),
+    }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     payload = {"model": model, "messages": [{"role": "user", "content": "请只回复：测试成功"}], "max_tokens": 8}
@@ -993,6 +1010,73 @@ def commander_terminal_status(configured_path: str) -> tuple[bool, str]:
         return path.is_file(), str(path)
     resolved = shutil.which(value)
     return bool(resolved), resolved or value
+
+
+COMMANDER_AGENT_CHOICES = (
+    ("codex", "Codex CLI"),
+    ("claude", "Claude Code"),
+    ("pi", "Pi"),
+    ("opencode", "OpenCode"),
+    ("hermes", "Hermes"),
+    ("kimi", "Kimi Code"),
+)
+
+
+def detected_executables() -> list[dict]:
+    """List the CLI agents Commander can actually drive on this machine."""
+    rows = []
+    for agent, label in COMMANDER_AGENT_CHOICES:
+        resolved = shutil.which(agent)
+        rows.append({
+            "agent": agent,
+            "label": label,
+            "path": resolved or "",
+            "ok": bool(resolved),
+        })
+    return rows
+
+
+def pick_executable(initial: str = "") -> dict:
+    """Open a native file picker on the machine running the config page."""
+    start = str(initial or "").strip()
+    if start and not os.path.isabs(start):
+        start = shutil.which(start) or ""
+    if sys.platform == "darwin":
+        script = (
+            'POSIX path of (choose file with prompt "选择 Commander 要启动的 Agent 程序"'
+            + (f' default location POSIX file "{start}"' if start else "")
+            + ")"
+        )
+        command = ["osascript", "-e", script]
+    elif os.name == "nt":
+        command = [
+            "powershell", "-NoProfile", "-NonInteractive", "-Command",
+            "Add-Type -AssemblyName System.Windows.Forms;"
+            "$f=New-Object System.Windows.Forms.OpenFileDialog;"
+            + (f"$f.InitialDirectory='{start}';" if start else "")
+            + "if($f.ShowDialog() -eq 'OK'){$f.FileName}",
+        ]
+    else:
+        picker = shutil.which("zenity") or shutil.which("kdialog")
+        if picker and Path(picker).name == "zenity":
+            command = [picker, "--file-selection", "--title=选择 Agent 程序"]
+        elif picker:
+            command = [picker, "--getopenfilename", start or str(Path.home())]
+        else:
+            return {
+                "path": "",
+                "message": "这台机器没有 zenity/kdialog，无法弹出选择框；请手动填写路径。",
+            }
+    try:
+        completed = subprocess.run(
+            command, capture_output=True, text=True, timeout=180, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"path": "", "message": f"无法打开选择框：{type(exc).__name__}"}
+    chosen = (completed.stdout or "").strip()
+    if completed.returncode != 0 or not chosen:
+        return {"path": "", "message": "已取消选择"}
+    return {"path": chosen, "message": ""}
 
 
 def _load_local_config():
@@ -1124,7 +1208,11 @@ def _probe_vision(endpoint: str, model: str, api_key: str = "") -> tuple[bool, s
     target = endpoint.rstrip("/")
     if not target.endswith("/chat/completions"):
         target += "/chat/completions"
-    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        **provider_headers(target),
+    }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     payload = {
@@ -1920,6 +2008,7 @@ def test_api_provider(item: dict) -> str:
                 endpoint,
                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                 headers={"Content-Type": "application/json",
+                         **provider_headers(endpoint),
                          "Authorization":
                              f"Bearer {str(item.get('api_key') or '')}"},
                 method="POST")
@@ -1927,7 +2016,9 @@ def test_api_provider(item: dict) -> str:
                 data = json.loads(resp.read().decode("utf-8"))
             content = str((data.get("choices") or [{}])[0]
                           .get("message", {}).get("content") or "")
-            return f"接口可用：{msg}；实测对话返回 {len(content)} 字符"
+            if content:
+                return f"接口可用：{msg}；实测对话返回 {len(content)} 字符"
+            return f"接口可用：{msg}；对话接口已响应（模型未返回文本）"
         except Exception as exc:
             return f"模型列表可用，但对话接口调用失败：{exc}"
     try:
@@ -1992,6 +2083,11 @@ def run_web_configurator() -> None:
             for target_id, meta in registry.items()
         }
         result["unsupported_agents"] = list(at.UNSUPPORTED_AGENTS)
+        try:
+            result["executables"] = detected_executables()
+        except (OSError, ValueError, TypeError):
+            result["executables"] = []
+        result["notifications"] = dict(config.get("notifications") or {"enabled": True})
         result["install_targets"] = config.get("install_targets") if config.get("install_targets") is not None else []
         try:
             from scripts import agent_message_probe
@@ -2226,7 +2322,66 @@ def run_web_configurator() -> None:
                     save_config(config,CODEX_HOME)
                     self._send({"results":results,"errors":errors,"config":public_config()});return
                 if self.path == "/api/scan-local": self._send({"found":_scan_local_services()});return
+                if self.path == "/api/pick-executable":
+                    self._send(pick_executable(str(data.get("initial") or "")));return
+                if self.path == "/api/models":
+                    endpoint=str(data.get("endpoint") or "").strip()
+                    if not _valid_url(endpoint):
+                        raise ValueError("API 地址必须是 HTTP(S) 地址")
+                    ok,models,message=_probe_models(endpoint,str(data.get("api_key") or ""))
+                    self._send({
+                        "ok": ok,
+                        "models": models,
+                        "message": (
+                            f"获取到 {len(models)} 个模型" if ok and models
+                            else "接口连通但没有返回模型列表，请手动填写模型名称"
+                            if ok else f"{message}；请检查地址和密钥格式"
+                        ),
+                    });return
+                if self.path == "/api/messages/send":
+                    from scripts.agent_message_bus import MessageBus, MessageBusError
+                    from scripts.agent_message_probe import list_peers
+                    bus=MessageBus()
+                    sender=str(data.get("sender") or "").strip()
+                    targets=data.get("targets")
+                    if not isinstance(targets,list) or not 1<=len(targets)<=8:
+                        raise ValueError("接收会话必须是 1–8 个地址")
+                    body=str(data.get("body") or "").strip()
+                    if not body:
+                        raise ValueError("要对方做什么不能为空")
+                    review_action=str(data.get("review_action") or "new")
+                    review_reason=str(data.get("review_reason") or "").strip()
+                    if not review_reason:
+                        raise ValueError("必须填写这次指派的原因")
+                    live={peer["address"] for peer in list_peers(bus)}
+                    sent=[];failed=[]
+                    for target in targets:
+                        address=str(target).strip()
+                        if address not in live:
+                            failed.append({"to":address,"error":"该会话当前不在线"})
+                            continue
+                        try:
+                            message=bus.send(
+                                sender=sender,
+                                recipient=address,
+                                body=body,
+                                kind="task",
+                                delivery="safe_boundary",
+                                context_mode="current",
+                                review_action=review_action,
+                                review_reason=review_reason,
+                                ttl=3600,
+                                max_hops=4,
+                            )
+                        except MessageBusError as exc:
+                            failed.append({"to":address,"error":str(exc)})
+                            continue
+                        sent.append({"to":address,"message_id":message["message_id"]})
+                    self._send({"sent":sent,"failed":failed});return
                 if self.path == "/api/settings":
+                    notifications_incoming=data.get("notifications",{})
+                    if isinstance(notifications_incoming,dict) and "enabled" in notifications_incoming:
+                        config["notifications"]={"enabled":bool(notifications_incoming.get("enabled"))}
                     web_assist_incoming=data.get("web_assist",{})
                     if isinstance(web_assist_incoming,dict) and "enabled" in web_assist_incoming:
                         config["web_assist"]={

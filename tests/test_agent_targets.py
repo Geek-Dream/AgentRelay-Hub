@@ -439,6 +439,64 @@ class PiExtensionTests(unittest.TestCase):
         self.assertEqual(len(backups), 2)
         self.assertIn(str(extension), changes)
 
+    def test_uninstall_cleans_hook_before_moving_skill_tree(self):
+        tmp = Path(tempfile.mkdtemp(prefix="agentrelay-uninstall-order-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        target = {
+            "skill_dir": tmp / "skills" / "agent-relay",
+            "config_path": tmp / "settings.json",
+        }
+        for name in ("agent-relay", "agent-image", "agent-fusion"):
+            directory = target["skill_dir"].with_name(name)
+            directory.mkdir(parents=True)
+            (directory / "SKILL.md").write_text("owned", encoding="utf-8")
+        target["config_path"].write_text(json.dumps({
+            "hooks": {"UserPromptSubmit": [{"hooks": [{
+                "type": "command",
+                "command": "python agentrelay_hook_shim.py --target claude",
+            }]}]}
+        }), encoding="utf-8")
+
+        with patch.object(
+            targets,
+            "atomic_write_json",
+            side_effect=OSError("simulated config write failure"),
+        ):
+            with self.assertRaises(OSError):
+                targets.unregister_agent_relay("claude", target)
+
+        self.assertTrue(target["skill_dir"].is_dir())
+        self.assertTrue(target["config_path"].is_file())
+
+    def test_uninstall_preserves_symlinked_skill_tree(self):
+        tmp = Path(tempfile.mkdtemp(prefix="agentrelay-uninstall-symlink-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        real_skill = tmp / "managed" / "agent-relay"
+        real_skill.mkdir(parents=True)
+        linked_skill = tmp / "skills" / "agent-relay"
+        linked_skill.parent.mkdir(parents=True)
+        try:
+            linked_skill.symlink_to(real_skill, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"当前系统不允许创建符号链接：{exc}")
+        target = {
+            "skill_dir": linked_skill,
+            "config_path": tmp / "settings.json",
+        }
+        target["config_path"].write_text(json.dumps({
+            "hooks": {"UserPromptSubmit": [{"hooks": [{
+                "type": "command",
+                "command": "python agentrelay_hook_shim.py --target claude",
+            }]}]}
+        }), encoding="utf-8")
+
+        targets.unregister_agent_relay("claude", target)
+
+        self.assertTrue(linked_skill.is_symlink())
+        self.assertTrue(real_skill.is_dir())
+        config = json.loads(target["config_path"].read_text(encoding="utf-8"))
+        self.assertEqual(config["hooks"]["UserPromptSubmit"], [])
+
     def test_registration_requires_explicit_pi_target(self):
         tmp = Path(tempfile.mkdtemp(prefix="agentrelay-pi-registration-"))
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -827,19 +885,38 @@ class RelayPythonTests(unittest.TestCase):
         with patch.object(targets.os, "name", "nt"):
             command = targets.shim_command(venv, shim_path, "claude")
 
+        invocation = targets.shlex.join([
+            str(venv),
+            "-X",
+            "utf8",
+            str(shim_path),
+            "--target",
+            "claude",
+        ])
+        check_path = targets.shlex.quote(
+            str(shim_path).replace("\\", "/")
+        )
         self.assertEqual(
             command,
-            targets.shlex.join([
-                str(venv),
-                "-X",
-                "utf8",
-                str(shim_path),
-                "--target",
-                "claude",
-            ]),
+            f"if [ -f {check_path} ]; then exec {invocation}; fi; exit 0",
         )
         self.assertIn("'C:\\Program Files\\AgentRelay\\python.exe'", command)
         self.assertIn("-X utf8", command)
+
+    @unittest.skipIf(os.name == "nt", "POSIX shell conditional guard")
+    def test_shim_command_exits_zero_when_shim_is_missing(self):
+        with tempfile.TemporaryDirectory(prefix="agentrelay-missing-shim-") as tmp:
+            shim_path = Path(tmp) / "missing" / "agentrelay_hook_shim.py"
+            command = targets.shim_command(
+                Path(sys.executable), shim_path, "claude"
+            )
+        completed = subprocess.run(
+            ["/bin/sh", "-c", command],
+            input="{}",
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_windows_virtualenv_python_is_detected(self):
         tmp = Path(tempfile.mkdtemp(prefix="agentrelay-win-python-test-"))

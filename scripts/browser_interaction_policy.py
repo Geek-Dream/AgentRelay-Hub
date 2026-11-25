@@ -48,16 +48,32 @@ BROWSER_TOOL_MARKERS = (
 )
 DIRECT_COMMAND = re.compile(
     r"(?:"
-    r"\bpyautogui\.(?:click|doubleClick|drag|moveTo|scroll)\s*\(|"
-    r"\bcliclick\b|"
-    r"\bxdotool\b[^\n]*(?:click|mousemove|mousedown|mouseup)|"
-    r"\bydotool\b[^\n]*(?:click|mousemove)|"
-    r"\bosascript\b[^\n]*System Events[^\n]*click|"
+    r"\bpyautogui\.(?:click|doubleClick|drag|moveTo|scroll|typewrite|press|hotkey)\s*\(|"
     r"\bmouse_event\b|"
-    r"\bSendInput\s*\("
+    r"\bSendInput\s*\(|"
+    r"\bSendKeys\b"
     r")",
     re.I,
 )
+# Commands whose arguments are data, never work. A grep/echo that merely mentions
+# cliclick must not be treated as a system-pointer action.
+READONLY_TEXT_COMMANDS = {
+    "ag", "awk", "cat", "comm", "cut", "diff", "echo", "fgrep", "file",
+    "find", "grep", "head", "jq", "less", "ls", "more", "printf", "rg",
+    "sed", "sort", "stat", "tail", "tr", "uniq", "wc",
+}
+SHELL_WRAPPERS = {
+    "builtin", "command", "env", "exec", "nice", "sudo", "time",
+}
+BACKGROUND_WRAPPERS = {"nohup", "setsid"}
+POINTER_EXECUTABLES = {"cliclick", "xdotool", "ydotool"}
+OSASCRIPT_POINTER = re.compile(
+    r"System Events.*(?:click|keystroke|key code|key down|key up)",
+    re.I | re.S,
+)
+SHELL_SPLIT = re.compile(r"(?:&&|\|\||[;|\n]|(?<![&])&(?![&]))")
+TRAILING_BACKGROUND = re.compile(r"(?<![&])&(?![&])\s*$")
+HEREDOC_START = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 BROWSER_COMMAND = re.compile(
     r"(?:"
     r"\bplaywright\b[^\n]*(?:sync_playwright|chromium\.launch|"
@@ -121,22 +137,275 @@ def _is_patch_payload(command: str) -> bool:
     )
 
 
+def _strip_heredocs(command: str) -> str:
+    """Drop heredoc bodies: their text is data for a reader, not work."""
+    if "<<" not in command:
+        return command
+    output: list[str] = []
+    lines = command.split("\n")
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        output.append(line)
+        index += 1
+        for match in HEREDOC_START.finditer(line):
+            terminator = match.group(2)
+            while index < len(lines):
+                candidate = lines[index].strip()
+                index += 1
+                if candidate == terminator:
+                    break
+    return "\n".join(output)
+
+
+def _strip_comments(command: str) -> str:
+    """Remove whole-line shell comments so commented examples are not acted on."""
+    kept = [
+        line for line in command.split("\n")
+        if line.lstrip() and not line.lstrip().startswith("#")
+    ]
+    return "\n".join(kept)
+
+
+def _segments(command: str) -> list[str]:
+    """Split a shell command into segments, ignoring quoted && ; | inside quotes."""
+    segments: list[str] = []
+    current: list[str] = []
+    quote = ""
+    index = 0
+    text = command
+    while index < len(text):
+        char = text[index]
+        if quote:
+            current.append(char)
+            if char == quote and (index == 0 or text[index - 1] != "\\"):
+                quote = ""
+            index += 1
+            continue
+        if char in "\"'":
+            quote = char
+            current.append(char)
+            index += 1
+            continue
+        if text.startswith("&&", index) or text.startswith("||", index):
+            segments.append("".join(current))
+            current = []
+            index += 2
+            continue
+        if char in ";|\n":
+            segments.append("".join(current))
+            current = []
+            index += 1
+            continue
+        if char == "&":
+            # `>&`, `2>&1`, `<&`, `&>` are redirections, not background jobs.
+            previous = text[index - 1] if index else ""
+            following = text[index + 1] if index + 1 < len(text) else ""
+            if (
+                previous in "><"
+                or following in {">", "-"}
+                or following.isdigit()
+            ):
+                current.append(char)
+                index += 1
+                continue
+            # Keep the marker on the preceding segment so background detection
+            # still sees `cmd &`, then start the next segment.
+            segments.append("".join(current).rstrip() + " &")
+            current = []
+            index += 1
+            continue
+        current.append(char)
+        index += 1
+    segments.append("".join(current))
+    return [item.strip() for item in segments if item.strip()]
+
+
+def _tokens(segment: str) -> list[str]:
+    try:
+        return shlex.split(segment, posix=os.name != "nt")
+    except ValueError:
+        return segment.split()
+
+
+def _leading_command(segment: str) -> tuple[str, list[str], bool]:
+    """Return (executable name, argv, backgrounded) for one segment."""
+    backgrounded = bool(TRAILING_BACKGROUND.search(segment))
+    if backgrounded:
+        segment = TRAILING_BACKGROUND.sub("", segment).strip()
+    words = _tokens(segment)
+    while words:
+        first = words[0]
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", first):
+            words.pop(0)
+            continue
+        name = Path(first.strip("\"'")).name.lower()
+        if name in BACKGROUND_WRAPPERS:
+            return "", [], True
+        if name in SHELL_WRAPPERS:
+            words.pop(0)
+            while words and words[0].startswith("-"):
+                words.pop(0)
+            continue
+        if name in {"py", "python", "python3", "python.exe", "python3.exe"}:
+            rest = words[1:]
+            if rest[:1] == ["-c"]:
+                return "python-c", rest[1:2], backgrounded
+            return "python", rest, backgrounded
+        if name in {"sh", "bash", "zsh", "pwsh", "powershell"}:
+            rest = words[1:]
+            # `-c`, `-lc`, `-ec`, `--command` all mean "run this string".
+            for index, word in enumerate(rest):
+                lowered = word.lower()
+                is_command_flag = (
+                    lowered in {"--command", "-command"}
+                    or (
+                        lowered.startswith("-")
+                        and not lowered.startswith("--")
+                        and "c" in lowered[1:]
+                        and lowered[1:].isalpha()
+                    )
+                )
+                if is_command_flag and index + 1 < len(rest):
+                    return "shell-c", rest[index + 1:index + 2], backgrounded
+            return "shell", rest, backgrounded
+        return name, words[1:], backgrounded
+    return "", [], backgrounded
+
+
+def _readonly_text_segment(segment: str) -> bool:
+    name, _, _ = _leading_command(segment)
+    return name in READONLY_TEXT_COMMANDS
+
+
+def _data_first_payloads(command: str) -> list[str]:
+    """Return only the strings a shell would truly execute."""
+    cleaned = _strip_comments(_strip_heredocs(command))
+    payloads: list[str] = []
+    for segment in _segments(cleaned):
+        name, argv, _ = _leading_command(segment)
+        if name in {"python-c", "shell-c"} and argv:
+            payloads.append(argv[0])
+        elif name in READONLY_TEXT_COMMANDS:
+            continue
+        else:
+            payloads.append(segment)
+    return payloads
+
+
+def _executes(segment: str, executable: str) -> bool:
+    name, _, _ = _leading_command(segment)
+    return name == executable
+
+
+def _pointer_invocation(command: str) -> bool:
+    """True only when a pointer executable/osascript runs as a real command."""
+    cleaned = _strip_comments(_strip_heredocs(command))
+    for segment in _segments(cleaned):
+        name, argv, _ = _leading_command(segment)
+        if name in POINTER_EXECUTABLES:
+            return True
+        if name == "osascript":
+            if OSASCRIPT_POINTER.search(segment):
+                return True
+        if name in {"python-c", "shell-c"} and argv:
+            inner = argv[0]
+            if DIRECT_COMMAND.search(inner):
+                return True
+            if any(
+                _executes(item, pointer)
+                for item in _segments(_strip_comments(_strip_heredocs(inner)))
+                for pointer in POINTER_EXECUTABLES
+            ):
+                return True
+    return False
+
+
+def _app_launch(command: str) -> dict[str, Any] | None:
+    """Describe an app/window launch that may steal focus or linger."""
+    cleaned = _strip_comments(_strip_heredocs(command))
+    for segment in _segments(cleaned):
+        name, argv, backgrounded = _leading_command(segment)
+        if name in {"python-c", "shell-c"} and argv:
+            # `sh -c 'open -a Slack'` is still an app launch: classify what
+            # the inner shell would actually run.
+            inner = _app_launch(argv[0])
+            if inner is not None:
+                return inner
+            continue
+        if name not in {"open", "xdg-open", "start", "cmd"}:
+            continue
+        if name == "cmd" and not argv[:1] == ["/c"]:
+            continue
+        if name == "cmd":
+            argv = argv[1:]
+            if argv[:1] and argv[0].lower() == "start":
+                name, argv = "start", argv[1:]
+            else:
+                continue
+        background = backgrounded
+        target = ""
+        for word in argv:
+            lowered = word.lower()
+            if lowered in {"-g", "--background", "--no-focus"}:
+                background = True
+                continue
+            if lowered in {"/b", "/background"}:
+                background = True
+                continue
+            if lowered in {"-a", "-b", "--args", "-n"}:
+                continue
+            if word.startswith("-"):
+                continue
+            if not target:
+                target = word
+        if name == "start" and target and target.startswith(("http://", "https://")):
+            background = False
+        return {
+            "command": name,
+            "target": target[:200],
+            "background": background,
+            "affects_user": not background,
+        }
+    return None
+
+
 def _invokes_browse_script(command: str) -> bool:
     """Match an actual browse.py invocation, not grep/cat/edit text."""
     if "browse.py" not in command:
         return False
-    try:
-        tokens = shlex.split(command, posix=os.name != "nt")
-    except ValueError:
-        tokens = command.split()
-    for index, token in enumerate(tokens):
-        cleaned = token.strip("\"'")
-        if Path(cleaned).name != "browse.py":
-            continue
-        if index == 0:
+    cleaned = _strip_comments(_strip_heredocs(command))
+    for segment in _segments(cleaned):
+        name, argv, _ = _leading_command(segment)
+        if name == "browse.py":
             return True
-        previous = Path(tokens[index - 1].strip("\"'")).name.lower()
-        if previous == "py" or previous.startswith("python"):
+        candidates = [name, *argv]
+        for index, token in enumerate(candidates):
+            if Path(str(token).strip("\"'")).name != "browse.py":
+                continue
+            if index == 0:
+                return True
+            previous = Path(str(candidates[index - 1]).strip("\"'")).name.lower()
+            if previous == "py" or previous.startswith("python"):
+                return True
+    return False
+
+
+def _background_process(command: str) -> bool:
+    """A detached process that keeps running after the tool call returns."""
+    cleaned = _strip_comments(_strip_heredocs(command))
+    if "nohup" in cleaned or "setsid" in cleaned:
+        return True
+    for segment in _segments(cleaned):
+        name, argv, backgrounded = _leading_command(segment)
+        if name in {"python-c", "shell-c"} and argv:
+            # `bash -c 'python app.py &'` still leaves a process running.
+            if _background_process(argv[0]):
+                return True
+            continue
+        if backgrounded and name not in {"", "open", "xdg-open"}:
+            return True
+        if TRAILING_BACKGROUND.search(segment):
             return True
     return False
 
@@ -306,14 +575,14 @@ def _normalized_input(tool_input: Any) -> str:
 
 
 def interaction_request(tool_name: Any, tool_input: Any) -> dict[str, Any] | None:
-    """Describe one browser or system-pointer operation that needs consent."""
+    """Describe one automation operation that needs consent and prior notice."""
     normalized_tool = _tool_name(tool_name)
     command = _command_text(tool_input)
     if _is_patch_payload(command):
         return None
     action = _action_value(tool_input)
     direct = any(marker in normalized_tool for marker in DIRECT_TOOL_MARKERS)
-    direct = direct or bool(DIRECT_COMMAND.search(command))
+    direct = direct or _pointer_invocation(command)
     browser = any(marker in normalized_tool for marker in BROWSER_TOOL_MARKERS)
     browser = (
         browser
@@ -322,15 +591,28 @@ def interaction_request(tool_name: Any, tool_input: Any) -> dict[str, Any] | Non
     )
     if direct and action and action not in POINTER_ACTIONS:
         direct = False
-    if not direct and not browser:
+    launch = None if direct or browser else _app_launch(command)
+    background = (
+        False
+        if direct or browser or launch is not None
+        else _background_process(command)
+    )
+    if not direct and not browser and launch is None and not background:
         return None
 
-    kind = "direct_pointer" if direct else "browser_automation"
+    if direct:
+        kind = "direct_pointer"
+    elif browser:
+        kind = "browser_automation"
+    elif launch is not None:
+        kind = "foreground_window" if launch["affects_user"] else "background_window"
+    else:
+        kind = "background_process"
     workflow = _workflow_details(tool_name, tool_input)
     described_actions = _described_workflow_actions(tool_name, tool_input)
     interaction_count = (
         1
-        if kind == "direct_pointer"
+        if kind != "browser_automation"
         else max(
             len(described_actions),
             int(workflow["interaction_count"]),
@@ -346,7 +628,7 @@ def interaction_request(tool_name: Any, tool_input: Any) -> dict[str, Any] | Non
     request_id = hashlib.sha256(
         fingerprint_material.encode("utf-8")
     ).hexdigest()[:24]
-    return {
+    request = {
         "kind": kind,
         "mode": interaction_mode(tool_name, tool_input),
         "request_id": request_id,
@@ -355,9 +637,39 @@ def interaction_request(tool_name: Any, tool_input: Any) -> dict[str, Any] | Non
         "actions": described_actions,
         "workflow_path": workflow["workflow_path"],
         "workflow_sha256": workflow["workflow_sha256"],
-        "description": (
-            "直接操作系统鼠标/桌面指针"
-            if direct
-            else "浏览器页面操作"
+        "target": (launch or {}).get("target", ""),
+        "affects_user": (
+            True if kind == "direct_pointer"
+            else bool((launch or {}).get("affects_user", False))
         ),
+        "description": DESCRIPTIONS[kind],
     }
+    request["notice"] = notice_text(request)
+    return request
+
+
+DESCRIPTIONS = {
+    "direct_pointer": "直接操作系统鼠标/键盘",
+    "browser_automation": "浏览器页面操作",
+    "foreground_window": "打开窗口，会抢走你的前台焦点",
+    "background_window": "打开窗口但不抢焦点",
+    "background_process": "在后台常驻运行，会一直占用资源",
+}
+
+
+def notice_text(request: dict[str, Any]) -> str:
+    """Plain, non-alarmist prior notice the user must see before execution."""
+    kind = str(request.get("kind") or "")
+    target = str(request.get("target") or "").strip()
+    named = f"「{target}」" if target else "程序"
+    if kind == "direct_pointer":
+        return "即将接管系统鼠标或键盘，执行期间你的鼠标会被占用。"
+    if kind == "browser_automation":
+        return "即将启动浏览器自动化并操作页面。"
+    if kind == "foreground_window":
+        return f"即将打开{named}，窗口会跳到前台并可能打断你当前操作。"
+    if kind == "background_window":
+        return f"即将在后台打开{named}，不会抢焦点。"
+    if kind == "background_process":
+        return "即将在后台常驻运行一个进程，它会一直占用资源直到被关闭。"
+    return "即将执行自动化操作。"

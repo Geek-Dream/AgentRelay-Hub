@@ -31,7 +31,9 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
 try:
     from .stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
@@ -39,6 +41,16 @@ except ImportError:
     from stdio_encoding import configure_utf8_stdio as _configure_utf8_stdio
 
 DEFAULT_ROUTER_PORT = 15731
+UPSTREAM_USER_AGENT = "AgentRelay/1.0"
+UPSTREAM_SESSION_ID = str(uuid.uuid4())
+
+
+def _upstream_headers(endpoint: str) -> dict[str, str]:
+    headers = {"User-Agent": UPSTREAM_USER_AGENT}
+    host = (urlparse(str(endpoint or "")).hostname or "").lower()
+    if host == "opencode.ai" or host.endswith(".opencode.ai"):
+        headers["x-opencode-session"] = UPSTREAM_SESSION_ID
+    return headers
 
 # 上游消息格式
 FMT_CHAT = "chat"
@@ -832,7 +844,10 @@ def upstream_url(provider: dict) -> str:
 def call_upstream(provider: dict, payload: dict, timeout: int = 300):
     """返回 (status, content_type, raw_bytes)。抛出 urllib 异常给调用方。"""
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        **_upstream_headers(str(provider.get("endpoint") or "")),
+    }
     api_key = str(provider.get("api_key") or "")
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"

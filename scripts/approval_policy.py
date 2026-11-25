@@ -32,7 +32,10 @@ DESCRIPTIONS = {
     "standard": "默认轻量检查；单点颜色/圆角/按钮方圆等样式只验目标与边界，复杂/共享/高风险自动升级。",
     "relaxed": "小任务不做正式审计；仅大型、多文件、多目标、共享或高风险任务审计，安全底线不放宽。",
 }
-COMMAND_PATTERN = re.compile(r"^/(?:agent-approval|设置)(?:\s+(apps|forget\s+\S+|\S+))?\s*$", re.I)
+COMMAND_PATTERN = re.compile(
+    r"^/(?:agent-approval|设置)(?:\s+(notify\s+(?:on|off)|apps|notify|forget\s+\S+|\S+))?\s*$",
+    re.I,
+)
 SELECTION_PATTERN = re.compile(r"^[1-3](?:\s*[、.，,]\s*(?:严格|标准|宽松|strict|standard|relaxed))?\s*$", re.I)
 CANCEL_PATTERN = re.compile(r"^(?:0|q|取消|退出|cancel|exit)$", re.I)
 DEFAULT_MODE = "standard"
@@ -256,6 +259,59 @@ def saved_message(codex_home: Path, mode: str) -> str:
             "已回读验证；不影响当前待确认任务，也不会放宽危险命令和越界门禁。")
 
 
+def render_notification_menu() -> str:
+    """The automation-notice switch, reachable from the same slash command."""
+    lines = card_render.frame("自动化提醒设置")
+    current = _notification_enabled()
+    lines.extend(card_render.field(
+        "当前状态",
+        "开启 · 自动化执行前会先通知你" if current else "关闭 · 自动化执行前不会通知你",
+    ))
+    lines.extend(card_render.section("这个开关管什么", [
+        ("开启", "启动自动化、控制鼠标、后台启动进程、打开/关闭窗口前，"
+                 "先给你一条系统通知；影响你前台操作的还会停下来等你确认。"),
+        ("关闭", "不再发送系统通知。涉及前台焦点和鼠标控制的操作仍需你确认，"
+                 "这一条不受开关影响。"),
+    ]))
+    return card_render.finish(
+        lines, f"输入 /agent-approval notify {'off' if current else 'on'} 切换"
+    )
+
+
+def _notification_config_path(codex_home: Path) -> Path:
+    return Path(codex_home) / "agent_relay_tracker" / "notifications.json"
+
+
+def _notification_enabled(codex_home: Path | None = None) -> bool:
+    """Read the switch from the unified config, defaulting to enabled."""
+    try:
+        import config_manager
+    except ImportError:
+        return True
+    home = Path(codex_home) if codex_home else Path(
+        os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
+    )
+    try:
+        config = config_manager.load_config(home)
+    except (OSError, ValueError, TypeError):
+        return True
+    section = config.get("notifications")
+    if isinstance(section, dict):
+        return bool(section.get("enabled", True))
+    return True
+
+
+def set_notification_enabled(codex_home: Path, enabled: bool) -> dict[str, Any]:
+    """Persist the switch to the same encrypted config the web page writes."""
+    import config_manager
+    home = Path(codex_home)
+    config = config_manager.load_config(home)
+    config["notifications"] = {"enabled": bool(enabled)}
+    config_manager.save_config(config, home)
+    verified = _notification_enabled(home)
+    return {"enabled": verified, "matches": verified == bool(enabled)}
+
+
 def command_request(prompt: str, codex_home: Path, menu_pending: bool = False) -> dict[str, Any] | None:
     """Parse the portable slash menu. None means this is an ordinary prompt."""
     text = str(prompt or "").strip()
@@ -269,6 +325,20 @@ def command_request(prompt: str, codex_home: Path, menu_pending: bool = False) -
             entries = app_close_policy.load_permissions(codex_home)["applications"]
             names = "、".join(item["target"] for item in entries) or "暂无"
             return {"action": "saved", "message": f"已允许关闭的应用：{names}。撤销：/agent-approval forget <应用名>"}
+        if argument.lower() == "notify":
+            return {"action": "menu", "message": render_notification_menu()}
+        if argument.lower() in {"notify on", "notify off"}:
+            enabled = argument.lower().endswith(" on")
+            result = set_notification_enabled(codex_home, enabled)
+            if not result["matches"]:
+                return {"action": "invalid", "message": "自动化提醒开关未能写入并回读验证，请重试。"}
+            return {"action": "saved", "message": (
+                f"「AgentRelay · 自动化提醒已{'开启' if result['enabled'] else '关闭'}」\n"
+                + ("以后启动自动化、控制鼠标或后台启动进程前，会先给你系统通知。"
+                   if result["enabled"]
+                   else "不再发送系统通知；影响你前台的操作仍需你确认。")
+                + f"\n配置: {_notification_config_path(codex_home)}"
+            )}
         if argument.lower().startswith("forget "):
             import app_close_policy
             target = argument.split(" ", 1)[1]

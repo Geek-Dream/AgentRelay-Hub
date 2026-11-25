@@ -14,7 +14,9 @@ from scripts.api_format_router import (
     FMT_ANTHROPIC,
     FMT_CHAT,
     FMT_RESPONSES,
+    _upstream_headers,
     anthropic_response_to_chat,
+    call_upstream,
     chat_request_to_ir,
     chat_to_anthropic_response,
     chat_to_responses_response,
@@ -51,6 +53,7 @@ class _UpstreamHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
         self.server.last_request = body  # type: ignore[attr-defined]
+        self.server.last_headers = dict(self.headers)  # type: ignore[attr-defined]
         if self.stream:
             return self._sse()
         if self.fmt == FMT_ANTHROPIC:
@@ -125,6 +128,7 @@ def _start_upstream(fmt: str, stream: bool = False) -> ThreadingHTTPServer:
     handler = type("H", (_UpstreamHandler,), {"fmt": fmt, "stream": stream})
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     server.last_request = None  # type: ignore[attr-defined]
+    server.last_headers = {}  # type: ignore[attr-defined]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -297,6 +301,30 @@ def test_chat_to_responses_response():
 # ------------------------------------------------------------
 # 端到端：chat 入站 → 各格式上游
 # ------------------------------------------------------------
+
+def test_call_upstream_identifies_client_and_skips_opencode_session():
+    upstream = _start_upstream(FMT_CHAT)
+    try:
+        endpoint = f"http://127.0.0.1:{upstream.server_address[1]}/v1"
+        status, _ctype, _raw = call_upstream(
+            {"id": "chat-a", "endpoint": endpoint, "format": FMT_CHAT},
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]})
+        assert status == 200
+        headers = {key.lower(): value for key, value in upstream.last_headers.items()}
+        assert headers.get("user-agent") == "AgentRelay/1.0"
+        assert "x-opencode-session" not in headers
+    finally:
+        upstream.shutdown()
+
+
+def test_upstream_headers_add_stable_opencode_session():
+    first = _upstream_headers("https://opencode.ai/zen/go/v1")
+    second = _upstream_headers("https://opencode.ai/zen/go/v1")
+    assert first["User-Agent"] == "AgentRelay/1.0"
+    assert first["x-opencode-session"]
+    assert first["x-opencode-session"] == second["x-opencode-session"]
+    assert "x-opencode-session" not in _upstream_headers("https://api.example.com/v1")
+
 
 def test_chat_inbound_to_anthropic_upstream(router):
     upstream = _start_upstream(FMT_ANTHROPIC)

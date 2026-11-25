@@ -237,6 +237,53 @@ class InstallerCompatibilityTests(unittest.TestCase):
             )
             self.assertIn("-X utf8", command)
 
+    def test_merge_hooks_replaces_stale_claude_shim_with_stable_codex_hook(self):
+        installer = load_module(
+            "agent_relay_installer_stale_shim",
+            PROJECT_ROOT / "install.py",
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="agentrelay-installer-stale-hook-"
+        ) as directory:
+            root = Path(directory)
+            codex_home = root / ".codex"
+            hooks_json = codex_home / "hooks.json"
+            hooks_json.parent.mkdir(parents=True)
+            stale = (
+                "/venv/bin/python -X utf8 "
+                "/Users/test/.claude/skills/agent-relay/scripts/"
+                "agentrelay_hook_shim.py --target claude"
+            )
+            stable = "/venv/bin/python -X utf8 /Users/test/.codex/hooks/agent_relay_hook.py"
+            hooks_json.write_text(json.dumps({
+                "hooks": {
+                    "UserPromptSubmit": [
+                        {"hooks": [{"type": "command", "command": stale}]},
+                        {"hooks": [{"type": "command", "command": stable}]},
+                    ]
+                }
+            }), encoding="utf-8")
+            targets = {
+                "TARGET_HOOKS": codex_home / "hooks",
+                "HOOKS_JSON": hooks_json,
+                "VENV_PYTHON": Path("/venv/bin/python"),
+            }
+            with mock.patch.multiple(installer, **targets):
+                installer.merge_hooks_json()
+
+            config = json.loads(hooks_json.read_text(encoding="utf-8"))
+            for event in installer.TRACKED_EVENTS:
+                commands = [
+                    hook["command"]
+                    for entry in config["hooks"][event]
+                    for hook in entry["hooks"]
+                    if "agent_relay" in hook["command"]
+                    or "agentrelay_hook_shim" in hook["command"]
+                ]
+                self.assertEqual(len(commands), 1, event)
+                self.assertIn("agent_relay_hook.py", commands[0])
+                self.assertNotIn("agentrelay_hook_shim", commands[0])
+
 
 if __name__ == "__main__":
     unittest.main()

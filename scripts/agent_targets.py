@@ -223,14 +223,17 @@ def shim_command(
         parts.extend(["--event", event])
     # Agent hooks run through a POSIX shell (Git Bash on Windows), so native
     # list2cmdline quoting would let Bash consume Windows path backslashes.
-    return shlex.join(parts)
+    command = shlex.join(parts)
+    # 其他管理器可能整体搬移 Skill 目录；shim 不在时静默放行，绝不阻塞宿主。
+    exists_check = str(shim_path).replace("\\", "/") if os.name == "nt" else str(shim_path)
+    return f"if [ -f {shlex.quote(exists_check)} ]; then exec {command}; fi; exit 0"
 
 
 def command_has_target(command: str, target: str) -> bool:
     """Return whether a registered command explicitly selects the target host."""
     text = str(command).replace('"', "").replace("'", "").replace(",", " ")
     return bool(re.search(
-        rf"--target(?:=|\s+){re.escape(target)}(?=$|[\s,\]}}])",
+        "--target(?:=|\\s+)" + re.escape(target) + r"(?=$|[\s,\]]|\}|;)",
         text,
     ))
 
@@ -526,22 +529,14 @@ def remove_slash_commands(target: dict) -> list[Path]:
     return removed
 
 
-def unregister_agent_relay(target_id: str, target: dict) -> list[str]:
-    """Remove only AgentRelay-owned registrations, preserving other entries."""
-    changes = remove_slash_commands(target)
-    for skill_name in ("agent-relay", "agent-image", "agent-fusion"):
-        directory = Path(target["skill_dir"]).with_name(skill_name)
-        if directory.is_symlink():
-            raise TargetError(f"拒绝卸载符号链接 Skill：{directory}")
-        if directory.is_dir():
-            backup = directory.with_name(f"{directory.name}.before-agentrelay-uninstall.{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}")
-            os.replace(directory, backup)
-            changes.append(backup)
+def _remove_agent_relay_registration(target_id: str, target: dict) -> list[Path]:
+    """Remove host hook registrations without touching Skill directories."""
     config_path = target.get("config_path")
     if config_path is None:
-        return [str(path) for path in changes]
+        return []
     path = Path(config_path)
     if target_id == "pi":
+        changes = []
         for managed_path in (path, path.with_name("agent-message.ts")):
             if managed_path.is_symlink():
                 raise TargetError(f"拒绝卸载符号链接 Pi 扩展：{managed_path}")
@@ -549,10 +544,11 @@ def unregister_agent_relay(target_id: str, target: dict) -> list[str]:
                 backup_file(managed_path, "before-agentrelay-uninstall")
                 managed_path.unlink()
                 changes.append(managed_path)
-        return [str(item) for item in changes]
+        return changes
     if not path.is_file():
-        return [str(path) for path in changes]
+        return []
     backup_file(path, "before-agentrelay-uninstall")
+    changes = [path]
     if target_id in {"codex", "claude"}:
         config = json.loads(path.read_text(encoding="utf-8"))
         hooks = config.get("hooks") or {}
@@ -576,14 +572,12 @@ def unregister_agent_relay(target_id: str, target: dict) -> list[str]:
                     kept.append(entry)
             hooks[event] = kept
         atomic_write_json(path, config)
-        changes.append(path)
     elif target_id == "kimi":
         preamble, blocks = _split_toml_hook_blocks(path.read_text(encoding="utf-8"))
         kept = [block for block in blocks if "agentrelay_hook_shim" not in "\n".join(block)]
         sections = ["\n".join(preamble).rstrip("\n")] if preamble else []
         sections.extend("[[hooks]]\n" + "\n".join(block).rstrip("\n") for block in kept)
         path.write_text("\n\n".join(sections) + ("\n" if sections else ""), encoding="utf-8")
-        changes.append(path)
     elif target_id == "hermes":
         import yaml
         config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -591,7 +585,23 @@ def unregister_agent_relay(target_id: str, target: dict) -> list[str]:
             if isinstance(entries, list):
                 config["hooks"][event] = [item for item in entries if "agentrelay_hook_shim" not in str(item.get("command", ""))]
         path.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8")
-        changes.append(path)
+    return changes
+
+
+def unregister_agent_relay(target_id: str, target: dict) -> list[str]:
+    """Remove only AgentRelay-owned registrations, preserving other entries."""
+    # Remove hook registrations first. If config cleanup fails, the Skill files
+    # must remain so no host is left pointing at a moved shim.
+    changes = _remove_agent_relay_registration(target_id, target)
+    changes.extend(remove_slash_commands(target))
+    for skill_name in ("agent-relay", "agent-image", "agent-fusion"):
+        directory = Path(target["skill_dir"]).with_name(skill_name)
+        if directory.is_symlink():
+            continue
+        if directory.is_dir():
+            backup = directory.with_name(f"{directory.name}.before-agentrelay-uninstall.{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}")
+            os.replace(directory, backup)
+            changes.append(backup)
     return [str(path) for path in changes]
 
 

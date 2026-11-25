@@ -2,7 +2,20 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 import json
+import uuid
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+
+USER_AGENT = "AgentRelay/1.0"
+SESSION_ID = str(uuid.uuid4())
+
+
+def _headers(endpoint: str) -> dict[str, str]:
+    headers = {"User-Agent": USER_AGENT}
+    host = (urlparse(str(endpoint or "")).hostname or "").lower()
+    if host == "opencode.ai" or host.endswith(".opencode.ai"):
+        headers["x-opencode-session"] = SESSION_ID
+    return headers
 
 
 class AgentAdapter(ABC):
@@ -23,7 +36,7 @@ class OpenAICompatibleAdapter(AgentAdapter):
         # 擅自带 0.2 会被拒绝（503）。需要温控的调用方自己在 request 里传。
         payload = dict(request); payload.setdefault("model", self.model)
         data = json.dumps(payload).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", **_headers(self.endpoint)}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         target = self.endpoint if self.endpoint.endswith("/chat/completions") else self.endpoint + "/chat/completions"
@@ -60,7 +73,7 @@ class DeepSeekAdapter(AgentAdapter):
             raise RuntimeError("DeepSeek endpoint 未配置")
         payload = request if isinstance(request, dict) else {"prompt": str(request)}
         data = json.dumps(payload).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", **_headers(self.endpoint)}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         with urlopen(Request(self.endpoint, data=data, headers=headers, method="POST"), timeout=self.timeout) as response:

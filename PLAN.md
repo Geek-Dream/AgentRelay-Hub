@@ -1,3 +1,191 @@
+# PLAN — 配置页体验修复 + 自动化预告与授权 + 应用开关许可 + 通知开关（2026-11-25）
+
+> 状态：**用户已批准全部范围**（`resolve-intent --decision approve --work-profile strict`，返回
+> `ok: true`，工作档 `strict`）。
+> 本轮只改仓库，然后同步安装到 codex / claude / pi / opencode；不调用 magpie 运行时。
+
+## 用户最终确认的四条决策
+
+1. 通知 A（卡片预告）+ B（系统通知）都做，**同一个开关**控制。
+2. 开关三入口：install 里的 Web 配置中心、`/agent-approval`（`/设置`）菜单、Agent 首次遇到时询问。
+3. 询问颗粒度按会话 / 任务 / 持久三级建模，见 §P2。
+4. "换回号" = **换会话**（已确认）。持久授权用**通用卡片**告知。**通知默认开启，必须开。**
+
+## 实测到的现状（改动前基线，均为真实运行结果）
+
+用本机 `~/.codex/agentrelay-env/bin/python` 直接调用分类器：
+
+| 命令 | 改动前 |
+|---|---|
+| `open -a Slack` / `open -a Slack --background` | 放行，无预告无授权 |
+| `open https://…` / `xdg-open https://…` / `start /b app.exe` | 放行 |
+| `python app.py &` / `nohup … > log 2>&1 &` | 放行（前者连"写入"都不判） |
+| `osascript … System Events … keystroke "a"` | 放行（只识别 `click`） |
+| `killall Slack` | 既不判危险、也不可记住 |
+| `pkill -x 'Google Chrome'`（带空格 App 名） | `remember` 存成 `"'google chrome'"`，`allows()` 只对完全相同引号成立 |
+| 文本里仅**出现** `cliclick` 字样（正则/heredoc/注释） | 误拦（本次会话被拦 2 次） |
+| `launch_forced_relay()` | 先 `Popen` 点火，再返回"已代为调用（会打开浏览器）" |
+| 仓库内桌面通知能力 | 零 |
+
+magpie 侧核对：`~/.config/magpie/library.json` 有 26 条 hooks + `applied` 每宿主记录，
+但**没有任何通知 hook**；对 pi 是 commands、对 opencode 是 mcp+subagents，与 AgentRelay
+现有注册链路同构。不调用 magpie 运行时。
+
+## 八项改动（A–H）
+
+### A. 配置页忙碌态（用户第 1 项）
+- 新增 `withBusy(btn, task, label)`：禁用按钮 + 旋转指示器 + 文案替换，失败恢复。
+- 套到：测试、扫描本地服务、获取模型、应用并验证、保存。
+- 尊重 `prefers-reduced-motion`。
+
+### B. 自研 Select 组件（用户第 2 项）
+- 无依赖、键盘可达、`role=listbox/option`、`aria-*`、点击外部关闭。
+- 替换 6 个原生 `<select>`：`f-format`、`f-type`、`fusion-mode`、`fusion-provider`
+  `max-agents`、`message-probe-sender`。
+- 暗/亮双主题样式。
+
+### C. 终端路径改为 Agent 选择（用户第 3 项）
+- 检测 `codex/claude/pi/opencode/hermes/kimi` 的 `shutil.which`，给下拉 + 「浏览…」+ 手填兜底。
+- 新增 `GET /api/executables`（已安装列表 + 解析后的绝对路径）、`POST /api/pick-executable`。
+- 保留 `terminal_path` 单一语义，不新建字段。
+
+### D. API/本地模型表单（用户第 4 项）
+- 新增 `POST /api/models`：复用 `_probe_models`，返回真实模型列表与真实错误。
+- 表单加「获取模型」→ 结果进 B 的组件下拉；失败显示真实原因，不再静默。
+- 保存成功后清空对应表单容器。
+- Key 掩码：已保存显示 `•••••••• 已保存`，眼睛只切换"正在输入"的可见性（不回显已有密钥）。
+
+### E. 会话协作 tab（用户第 5 项）
+- 新增导航 tab「会话协作」：在线 peer 列表（host/workspace/状态）、每个已接入 Agent 的「测试」、
+  「指派任务」编辑器。
+- 新增 `POST /api/messages/send`：走 `bus.send`，强制 `review_action=new` + 必填理由 + 二次确认。
+- 结果区显示真实回执状态（`queued/dispatched/delivered/read/replied`）。
+- 从 `targets-card` 里把原 `#message-probe` 区块移到新 tab（不删除功能）。
+
+### F. Fusion 总览框间距（用户第 6 项）
+- `.fusion-overview{margin-bottom:14px}` + 移动端断点余量。
+
+### G. 自动化预告与门禁统一（用户第 1 条需求）
+新增识别类别，全部走**同一份一次性授权**：
+
+| kind | 触发 | 是否影响用户 |
+|---|---|---|
+| `foreground_window` | `open -a X`（无 `-g/--background`）、`open <url>`、`xdg-open`、`start X` | 是 |
+| `background_process` | 末尾 `&`、`nohup`、`setsid`、`start /b` | 否（但需告知） |
+| `direct_pointer` | `pyautogui.click(`、`cliclick`、`xdotool`、`keystroke`/`type`/`sendkeys` | 是 |
+| `browser_automation` | 既有 playwright / browse.py | 视 mode |
+
+- 顺序改为：**先发预告**（"待会会打开 X / 会抢焦点 / 会在后台常驻"）→ 再要授权 → 才执行。
+- `launch_forced_relay()` 改为先预告、确认后才点火。
+- **误报修正**：裸命令名（`cliclick`/`xdotool`/`ydotool`/`osascript`）要求出现在**命令位置**
+  （段首或 shell 分隔符后），不再全文本 `\b…\b`；heredoc 主体与 `#` 注释不参与匹配；
+  只读文本工具（grep/cat/echo/sed/awk…）的引号内容视为数据。
+  `sh -c "…"`、`python -c "…"` 属真实执行，仍然拦截。
+
+### H. 应用开关许可补全（用户第 2 条需求）
+- `app_close_policy.py` 扩展为开关双许可：条目带 `allow_close` / `allow_open` / `background_only`。
+- 补 `killall`；修带空格 App 名的引号往返（存入前归一化，比较时归一化）。
+- 区分 `open -a X`（抢焦点=影响你，必须预告+授权）与 `open -a X --background`（不抢焦点）。
+- 新增 `scripts/automation_consent.py`：会话/任务/持久三级授权记忆。
+- 新增 `scripts/desktop_notify.py`：A 卡片（既有 `systemMessage`）+ B 系统通知
+  （macOS `osascript display notification` / Linux `notify-send` / Windows Toast），
+  受 `notifications.enabled` 控制，**默认 true**。
+- 非 Codex 宿主降级：`additionalContext` 必带明确"即将/已经启动"文本，不再依赖卡片。
+
+## 授权颗粒度模型（P2）
+
+| 级别 | 触发说法 | 生命周期 | 告知 |
+|---|---|---|---|
+| 会话级 | "这次后台跑" | 当前会话内、参数未变 | 首次告知 |
+| 任务级 | "启动后调试" | 到你说"调试完成"为止；完成即失效 | 每次启动告知 |
+| 持久级 | "这个程序所有东西后台启动，无需问" | 跨会话，可 `/agent-approval forget` | **每次换会话/换功能都告知** |
+
+铁律：
+- 授权范围**严格等于点名的目标**。说启后端就只启后端，不顺手开前端或浏览器。
+- 说完成后，下次涉及该程序**重新申请**。
+- 记录进记忆仅限调试/上传等具名场景。
+
+## 验证方式（每步都要真跑）
+
+1. `~/.codex/agentrelay-env/bin/python -m compileall -q hooks scripts tests install.py`
+2. `~/.codex/agentrelay-env/bin/python -m pytest -q`（全量；失败逐条修）
+3. `~/.codex/agentrelay-env/bin/python scripts/verify_page.py --output runtime/page-verification`
+   真实 Chromium：多导航、双主题、桌面/移动视口无横向溢出、0 console 错误。
+4. 新增分类器单测：覆盖上表全部命令 + 误报用例。
+5. 安装前单独列命令给用户确认。
+
+## 执行顺序
+
+A → B → C → D → E → F → G → H → 全量验证 → 提交 → 列安装命令待确认。
+
+## 进度
+
+- [x] PLAN 写入
+- [x] G/H 后端（分类器 + 许可 + 通知 + 同意记忆）
+- [x] A/B/C/D/E/F 前端
+- [x] 全量测试
+- [x] 同步安装到 codex / claude / pi（opencode 按要求不动）
+- [ ] 提交待确认
+
+## 执行结果（真实运行证据）
+
+**分类器修复（G/H）**：`browser_interaction_policy.py`
+
+| 命令 | 改动前 | 改动后 |
+|---|---|---|
+| `python app.py &` | 放行 | `background_process` |
+| `open -a Slack` | 放行 | `foreground_window`（预告会抢焦点） |
+| `open -a Slack --background` | 放行 | `background_window` |
+| `sh -c 'open -a Slack'` | 放行 | `foreground_window`（本轮新发现的漏检） |
+| `bash -c 'python app.py &'` | 放行 | `background_process`（本轮新发现的漏检） |
+| `bash -lc '...'` / `-ec` / `--login -c` | 放行 | 正确识别组合旗标 |
+| `echo hi 2>&1` | 曾误拦 | 放行 |
+| `rg cliclick scripts/` | 曾误拦 | 放行（只读文本命令不执行参数） |
+
+同时删除了 `_background_process()` 里 `return False` 之后的 16 行不可达死代码。
+
+**新增模块**：`automation_consent.py`（三级授权 + 通知/同意分桶）、`desktop_notify.py`
+（osascript / notify-send / Toast，失败静默降级）、`config_web_components.py`
+（自绘 Select + `withBusy`）。三者都进了 `install.py` 的 `SCRIPT_FILES`。
+
+**关键设计决定**：浏览器页面自动化与系统指针控制**永远一次一授权**，不允许复用
+会话内声明；只有用户点名的程序级操作（开窗/后台进程）才按 `session/task/persistent`
+复用。`mark_announced` 与 `record_declaration` 分两个独立桶，**通知过 ≠ 同意过**。
+
+**前端（A–F）真实浏览器验证**（`runtime/check_components.py`、`runtime/check_features.py`，均 PASS）：
+
+- 4/4 个原生 `<select>` 全部被自绘 listbox 接管；键盘 ArrowDown/Enter/Escape 可用；
+  控制台 0 错误；390px 视口无横向溢出。
+- `withBusy` 实测：`aria-busy=true` + 转圈 + `disabled`，结束后 DOM 完全还原。
+- 终端路径：下拉自动列出本机 codex/claude/pi/opencode/hermes/kimi（未装的标「未找到」），
+  选 Claude 后填入 `/usr/local/bin/claude`；「浏览…」走原生选择框；保留手动填写。
+- API 表单：新增「获取模型」（走 `/api/models`，返回真实列表）；key 眼睛按钮
+  `password → text` 且 `aria-pressed=true`；保存后表单清空。
+- 会话协作（新标签页）：真实 peer 列表、指派任务（`/api/messages/send`，
+  必填原因 + 二次确认）、仅测试连通；实测投递返回 `已投递 · claude:s2`。
+- Fusion 间距：`margin-bottom` 从 0 变 20px，与下方统计卡实测间隔 20px。
+
+**测试**：780 passed、3 skipped、93 subtests passed（基线 742，新增 38 个）。
+
+**同步结果**：
+
+| 宿主 | policy sha | 目录类型 |
+|---|---|---|
+| repo | `cdc94fb4345a` | — |
+| codex | `cdc94fb4345a` | 真实目录（已脱离 magpie 软链） |
+| claude | `cdc94fb4345a` | 真实目录 |
+| pi | `cdc94fb4345a` | 真实目录（已脱离 magpie 软链） |
+| opencode | `95616326b17b` | 按要求不动，保留为修复兜底 |
+
+行为验证 9/9 通过于 repo/codex/claude/pi；opencode 保持旧行为（预期）。
+
+**magpie 范围控制**：用 `magpie library skill off-here` 只关 4 个
+（`agent-relay`、`agent-fusion`、`agent-image`、`browser-automatic`），
+其余 37 个技能完好。`bitch-skill` 的 `offHere` 是用户此前自己关的，未触碰。
+备份在 `/tmp/magpie-library-before.json`。
+
+---
+
 # PLAN — 统一 Hook 纯符号卡片（2026-11-20）
 
 - [x] 用户批准先做兼容各宿主的纯符号版本，不加入颜色或可点击假按钮。

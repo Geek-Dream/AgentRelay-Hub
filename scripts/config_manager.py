@@ -101,6 +101,9 @@ def default_config() -> dict[str, Any]:
         "web_assist": {
             "enabled": False,
         },
+        "notifications": {
+            "enabled": True,
+        },
         "web_providers": [],
         "local_providers": [],
         "api_providers": [],
@@ -479,6 +482,13 @@ def save_config(value: Mapping[str, Any], home: Path | None = None) -> Path:
         "enabled": bool(
             web_assist.get("enabled", False)
             if isinstance(web_assist, Mapping) else web_assist is True
+        ),
+    }
+    notifications = normalized.get("notifications")
+    normalized["notifications"] = {
+        "enabled": bool(
+            notifications.get("enabled", True)
+            if isinstance(notifications, Mapping) else notifications is not False
         ),
     }
     fusion = normalized.get("fusion")

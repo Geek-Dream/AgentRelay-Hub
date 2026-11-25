@@ -4293,6 +4293,92 @@ def _looks_like_browser_interaction(tool_name, tool_input):
     ))
 
 
+def _automation_notice(request, state, session_id):
+    """Send the heads-up the user asked for, before anything is executed.
+
+    Two separate obligations, kept apart on purpose:
+      * whether the user must be *told* (always, unless they turned notices off);
+      * whether the user must be *asked* (only when nothing recent covers it).
+    """
+    try:
+        consent = _shared_script_module("automation_consent")
+        notifier = _shared_script_module("desktop_notify")
+    except (ImportError, OSError, ValueError, TypeError):
+        return
+    agent = str(state.get("agent_id") or "")
+    kind = str(request.get("kind") or "")
+    target = str(request.get("target") or "")
+    now = iso_now()
+    if not consent.must_announce(state, agent, kind, target, now, session_id):
+        return
+    text = consent.announcement(request)
+    enabled = consent.notifications_enabled(_automation_notification_config())
+    notifier.notify("AgentRelay · 即将执行自动化", text, enabled=enabled)
+    consent.mark_announced(state, agent, kind, target, now, session_id)
+    write_state(state, session_id=session_id)
+
+
+def _automation_notification_config():
+    """Read the one switch from the same encrypted config the web page writes."""
+    try:
+        config_manager = _shared_script_module("config_manager")
+        return config_manager.load_config(CODEX_DIR)
+    except (ImportError, OSError, ValueError, TypeError):
+        return {"notifications": {"enabled": True}}
+
+
+# Reuse within one session only applies to program-level operations the user
+# named ("启动 xxx 后端", "调试这个程序时可以后台开"). Browser page automation
+# and system-pointer control stay one-shot: a changed selector or workflow
+# must invalidate the previous approval every single time.
+REUSABLE_AUTOMATION_KINDS = frozenset({
+    "foreground_window",
+    "background_window",
+    "background_process",
+})
+
+
+def _automation_consent_allows(state, request, session_id):
+    """Return True when a recent declaration already covers this operation."""
+    if str(request.get("kind") or "") not in REUSABLE_AUTOMATION_KINDS:
+        return False
+    if not str(request.get("target") or "").strip():
+        return False
+    try:
+        consent = _shared_script_module("automation_consent")
+    except (ImportError, OSError, ValueError, TypeError):
+        return False
+    return not consent.should_ask(
+        state,
+        str(state.get("agent_id") or ""),
+        str(request.get("kind") or ""),
+        str(request.get("target") or ""),
+        iso_now(),
+        session_id,
+    )
+
+
+def _record_automation_consent(state, request, session_id, persistent=False):
+    """Remember the user's decision so the same operation is not re-asked."""
+    if str(request.get("kind") or "") not in REUSABLE_AUTOMATION_KINDS:
+        return
+    if not str(request.get("target") or "").strip():
+        return
+    try:
+        consent = _shared_script_module("automation_consent")
+    except (ImportError, OSError, ValueError, TypeError):
+        return
+    consent.record_declaration(
+        state,
+        str(state.get("agent_id") or ""),
+        str(request.get("kind") or ""),
+        str(request.get("target") or ""),
+        iso_now(),
+        session_id,
+        persistent=persistent,
+    )
+
+
 def _browser_interaction_gate(state, tool_name, tool_input, session_id):
     """Require one explicit mode and one exact authorization per operation."""
     try:
@@ -4332,6 +4418,8 @@ def _browser_interaction_gate(state, tool_name, tool_input, session_id):
             "每次执行前重新让用户选择后台或前台。"
         )
 
+    _automation_notice(request, state, session_id)
+
     approved_id = browser.get("approved_request_id")
     approved_mode = browser.get("approved_mode")
     approved_source = browser.get("approved_source_sha256")
@@ -4364,12 +4452,20 @@ def _browser_interaction_gate(state, tool_name, tool_input, session_id):
             browser["approved_source_sha256"] = None
             browser["approved_at"] = None
             browser["pending"] = None
+            _record_automation_consent(state, request, session_id)
             write_state(state, session_id=session_id)
             return True, None
         browser["approved_request_id"] = None
         browser["approved_mode"] = None
         browser["approved_source_sha256"] = None
         browser["approved_at"] = None
+
+    # A declaration already made in this session covers the same operation:
+    # do not make the user answer the same question again.
+    if _automation_consent_allows(state, request, session_id):
+        browser["pending"] = None
+        write_state(state, session_id=session_id)
+        return True, None
 
     browser["pending"] = {
         "request_id": request_id,
