@@ -183,20 +183,33 @@ class GenericAdapterTests(unittest.TestCase):
         self.assertTrue(GenericWebAdapter._is_spa_ref(session))
         self.assertTrue(adapter.is_session_reference_valid(session))
 
-    def test_headful_defaults_and_env_override(self):
+    def test_background_default_and_explicit_mode_override(self):
         import os
-        old = os.environ.pop("AGENT_RELAY_WEB_HEADFUL", None)
+        old_headful = os.environ.pop("AGENT_RELAY_WEB_HEADFUL", None)
+        old_mode = os.environ.pop("AGENT_RELAY_WEB_INTERACTION_MODE", None)
         try:
+            self.assertFalse(GenericWebAdapter()._headed)
+            os.environ["AGENT_RELAY_WEB_INTERACTION_MODE"] = "background"
+            self.assertFalse(GenericWebAdapter()._headed)
+            os.environ["AGENT_RELAY_WEB_INTERACTION_MODE"] = "foreground"
             self.assertTrue(GenericWebAdapter()._headed)
+            os.environ["AGENT_RELAY_WEB_HEADFUL"] = "1"
+            os.environ["AGENT_RELAY_WEB_INTERACTION_MODE"] = "background"
+            self.assertFalse(GenericWebAdapter()._headed)
+            os.environ.pop("AGENT_RELAY_WEB_INTERACTION_MODE")
             os.environ["AGENT_RELAY_WEB_HEADFUL"] = "0"
             self.assertFalse(GenericWebAdapter()._headed)
             os.environ["AGENT_RELAY_WEB_HEADFUL"] = "1"
             self.assertTrue(GenericWebAdapter()._headed)
         finally:
-            if old is None:
+            if old_headful is None:
                 os.environ.pop("AGENT_RELAY_WEB_HEADFUL", None)
             else:
-                os.environ["AGENT_RELAY_WEB_HEADFUL"] = old
+                os.environ["AGENT_RELAY_WEB_HEADFUL"] = old_headful
+            if old_mode is None:
+                os.environ.pop("AGENT_RELAY_WEB_INTERACTION_MODE", None)
+            else:
+                os.environ["AGENT_RELAY_WEB_INTERACTION_MODE"] = old_mode
 
     def test_spa_discovery_and_binding_flow(self):
         from unittest import mock as _mock

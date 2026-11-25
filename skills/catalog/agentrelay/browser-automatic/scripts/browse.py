@@ -11,6 +11,17 @@ from typing import Any
 from urllib.parse import urlparse
 
 
+INTERACTION_ACTIONS = {
+    "check",
+    "click",
+    "dblclick",
+    "drag",
+    "press",
+    "select",
+    "uncheck",
+}
+
+
 def _url(value: str) -> str:
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -35,6 +46,17 @@ def _load_steps(path: Path) -> list[dict[str, Any]]:
     for index, step in enumerate(payload, 1):
         if not isinstance(step, dict) or not isinstance(step.get("action"), str):
             raise ValueError(f"step {index} must be an object with an action")
+    interactions = [
+        index
+        for index, step in enumerate(payload, 1)
+        if str(step.get("action")).lower() in INTERACTION_ACTIONS
+    ]
+    if len(interactions) > 1:
+        raise ValueError(
+            "a workflow may contain at most one page interaction; "
+            "split each click or form action into its own reviewed workflow "
+            f"(interactive steps: {interactions})"
+        )
     return payload
 
 
@@ -163,12 +185,14 @@ def _run_step(page, step: dict[str, Any], wait_until: str, timeout: int) -> Any:
     raise ValueError(f"unsupported action: {action}")
 
 
-def _launch(playwright, headed: bool):
-    return playwright.chromium.launch(headless=not headed)
+def _launch(playwright, interaction_mode: str):
+    return playwright.chromium.launch(
+        headless=interaction_mode == "background"
+    )
 
 
 def cmd_screenshot(playwright, args) -> int:
-    browser = _launch(playwright, args.headed)
+    browser = _launch(playwright, args.interaction_mode)
     try:
         page = browser.new_page(
             viewport={"width": args.width, "height": args.height}
@@ -190,6 +214,7 @@ def cmd_screenshot(playwright, args) -> int:
                     "path": str(output.resolve()),
                     "title": page.title(),
                     "url": page.url,
+                    "interaction_mode": args.interaction_mode,
                 },
                 ensure_ascii=False,
             )
@@ -200,7 +225,7 @@ def cmd_screenshot(playwright, args) -> int:
 
 
 def cmd_scrape(playwright, args) -> int:
-    browser = _launch(playwright, args.headed)
+    browser = _launch(playwright, args.interaction_mode)
     try:
         page = browser.new_page()
         response = page.goto(
@@ -227,7 +252,7 @@ def cmd_scrape(playwright, args) -> int:
 
 def cmd_run(playwright, args) -> int:
     steps = _load_steps(Path(args.script).expanduser())
-    browser = _launch(playwright, args.headed)
+    browser = _launch(playwright, args.interaction_mode)
     try:
         context = browser.new_context(
             viewport={"width": args.width, "height": args.height}
@@ -246,7 +271,11 @@ def cmd_run(playwright, args) -> int:
                         ensure_ascii=False,
                     )
                 )
-            print(json.dumps({"final_url": page.url, "title": page.title()}))
+            print(json.dumps({
+                "final_url": page.url,
+                "title": page.title(),
+                "interaction_mode": args.interaction_mode,
+            }))
         finally:
             context.close()
         return 0
@@ -258,7 +287,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Playwright browser automation for AgentRelay",
     )
-    parser.add_argument("--headed", action="store_true", help="show Chromium")
+    parser.add_argument(
+        "--interaction-mode",
+        choices=("background", "foreground"),
+        default=None,
+        help=(
+            "background (default) runs without a visible window; "
+            "foreground shows Chromium"
+        ),
+    )
+    parser.add_argument(
+        "--headed",
+        action="store_true",
+        help="legacy alias for --interaction-mode foreground",
+    )
     parser.add_argument(
         "--timeout",
         type=_positive_int,
@@ -297,8 +339,18 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    if args.headed and args.interaction_mode == "background":
+        parser.error("--headed cannot be combined with --interaction-mode background")
+    args.interaction_mode = (
+        args.interaction_mode
+        or ("foreground" if args.headed else "background")
+    )
     if getattr(args, "wait", 0) < 0:
         parser.error("--wait cannot be negative")
+    print(
+        f"browser-automatic: interaction-mode={args.interaction_mode}",
+        file=sys.stderr,
+    )
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:

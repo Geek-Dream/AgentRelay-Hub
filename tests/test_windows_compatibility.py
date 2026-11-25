@@ -14,6 +14,14 @@ from scripts import agent_targets
 
 
 class WindowsCompatibilityTests(unittest.TestCase):
+    def test_browser_interaction_policy_is_installed_cross_platform(self):
+        import install
+
+        self.assertIn("browser_interaction_policy.py", install.SCRIPT_FILES)
+        self.assertTrue(
+            (PROJECT_ROOT / "scripts" / "browser_interaction_policy.py").is_file()
+        )
+
     def test_utf8_entry_point_does_not_crash_under_gbk(self):
         env = dict(os.environ, PYTHONIOENCODING="cp936")
         env.pop("PYTHONUTF8", None)
@@ -145,24 +153,51 @@ class WindowsCompatibilityTests(unittest.TestCase):
         output = io.StringIO()
         with patch("sys.stdout", output):
             height = install.redraw_checklist(["[ ] 1. Codex", "[x] 2. Claude"], 0, interactive=True)
-            install.redraw_checklist(["[x] 1. Codex", "[x] 2. Claude"], height, interactive=True)
+            self.assertEqual(height, 3)
+            next_height = install.redraw_checklist(
+                ["[x] 1. Codex", "[x] 2. Claude"],
+                height,
+                interactive=True,
+            )
         text = output.getvalue()
-        self.assertEqual(text.count("\033[2K"), 4)
-        self.assertIn("\033[2A", text)
+        self.assertEqual(next_height, 3)
+        self.assertGreaterEqual(text.count("\033[2K"), 7)
+        self.assertIn("\033[3A", text)
         self.assertIn("\033[2K[x] 1. Codex", text)
+
+        output = io.StringIO()
+        with patch("sys.stdout", output), \
+                patch.object(
+                    install.shutil,
+                    "get_terminal_size",
+                    return_value=os.terminal_size((24, 24)),
+                ):
+            wrapped_height = install.redraw_checklist(
+                ["这是一个会自动换行的很长的安装目标说明文字"],
+                0,
+                interactive=True,
+            )
+        self.assertEqual(wrapped_height, 3)
+        self.assertEqual(output.getvalue().count("\033[2K"), 2)
 
         registry = {
             "codex": {"level": "full", "label": "Codex"},
             "claude": {"level": "full", "label": "Claude"},
         }
+        output = io.StringIO()
         with patch.object(agent_targets, "agent_targets", return_value=registry), \
                 patch.object(agent_targets, "detect_agents", return_value={"codex": True, "claude": True}), \
                 patch.object(agent_targets, "relay_installed", side_effect=lambda target, meta: target == "claude"), \
                 patch.object(install, "_load_local_config", return_value=({}, MagicMock())), \
-                patch("builtins.input", return_value=""):
+                patch("builtins.input", return_value=""), \
+                patch("sys.stdout", output):
             selected, action = install.choose_install_targets()
         self.assertEqual(selected, ["claude"])
         self.assertEqual(action, "install")
+        self.assertIn("已接入，勾选会重装", output.getvalue())
+        self.assertIn("将重装已接入项：Claude", output.getvalue())
+        self.assertIn("旧内容有变化时先备份再覆盖", output.getvalue())
+        self.assertIn("相同内容会保留", output.getvalue())
 
     def test_checklist_prefers_saved_targets_over_detected_installation(self):
         import install

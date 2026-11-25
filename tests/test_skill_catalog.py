@@ -1081,6 +1081,7 @@ class InstallerIntegrationTests(unittest.TestCase):
             "skill_catalog_install_manifest", PROJECT_ROOT / "install.py"
         )
         self.assertIn("skill_catalog.py", installer.SCRIPT_FILES)
+        self.assertIn("browser_interaction_policy.py", installer.SCRIPT_FILES)
 
     def test_terminal_skill_checklist_defaults_to_installable_items(self):
         installer = load_module(
@@ -1097,9 +1098,17 @@ class InstallerIntegrationTests(unittest.TestCase):
             catalog = catalog_module.catalog_with_installed_skills(
                 PROJECT_ROOT, {"Codex": root}
             )
-            with patch("builtins.input", return_value=""):
+            output = io.StringIO()
+            with patch("builtins.input", return_value=""), patch("sys.stdout", output):
                 selected = installer.choose_install_skills(catalog)
 
+        rendered = output.getvalue()
+        self.assertIn("Skill 是给 Agent 看的专项工作说明书", rendered)
+        self.assertIn("浏览器自动化｜打开真实网页", rendered)
+        self.assertIn("Word 文档｜创建、读取和修改", rendered)
+        self.assertIn("建议：", rendered)
+        self.assertIn("官方下载", rendered)
+        self.assertIn("内置", rendered)
         self.assertEqual(
             selected,
             [

@@ -131,8 +131,8 @@ AGENTRELAY_BUNDLED_SKILLS = {
         "license": "LICENSE",
         "license_spdx": "MIT",
         "files": 3,
-        "bytes": 15_693,
-        "sha256": "555117f28c276fc64a9695514325a5a53f9ed90da2ab58e6083572060b06f262",
+        "bytes": 18_436,
+        "sha256": "eee092ddff1028133276b38650dab0c1b32be87cebd10aa4b738d372d903d77b",
     },
 }
 AGENTRELAY_BUNDLED_SKILL_IDS = frozenset(AGENTRELAY_BUNDLED_SKILLS)

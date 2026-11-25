@@ -52,9 +52,9 @@ class GenericWebAdapter(SiteAdapter):
     """通用兜底网站适配器；registry 中作为 fallback 最后尝试。"""
 
     fallback = True
-    # 有头运行：反风控更稳，且验证弹窗可以交给用户处理。可用
-    # AGENT_RELAY_WEB_HEADFUL=0 强制无头。
-    prefer_headful = True
+    # 默认后台无窗口。只有用户明确选择前台时才允许显示浏览器；
+    # AGENT_RELAY_WEB_HEADFUL 仅保留为旧配置兼容入口。
+    prefer_headful = False
     # 对话成功后把新 Cookie 回写到登录状态文件（验证通过的凭据可以复用）。
     refresh_state = True
     # 支持人工代问模式：用户自己在浏览器输入问题，工具监听并提取回答。
@@ -132,11 +132,24 @@ class GenericWebAdapter(SiteAdapter):
             # 占位网址只用于通过 ProviderSpec 校验；调用时会明确报错。
             resolved_base = "https://invalid.example/"
         self.spec = ProviderSpec(name=name, base_url=resolved_base)
-        headful_env = os.environ.get("AGENT_RELAY_WEB_HEADFUL", "").strip().lower()
-        if headful_env:
-            self._headed = headful_env not in {"0", "false", "no", "off"}
+        interaction_mode = os.environ.get(
+            "AGENT_RELAY_WEB_INTERACTION_MODE", ""
+        ).strip().lower()
+        if interaction_mode:
+            if interaction_mode not in {"background", "foreground"}:
+                raise ValueError(
+                    "AGENT_RELAY_WEB_INTERACTION_MODE must be "
+                    "background or foreground"
+                )
+            self._headed = interaction_mode == "foreground"
         else:
-            self._headed = self.prefer_headful
+            headful_env = os.environ.get(
+                "AGENT_RELAY_WEB_HEADFUL", ""
+            ).strip().lower()
+            if headful_env:
+                self._headed = headful_env not in {"0", "false", "no", "off"}
+            else:
+                self._headed = self.prefer_headful
         self._wall_wait = int(os.environ.get("AGENT_RELAY_WEB_WALL_WAIT", "")
                               or self.WALL_WAIT_SECONDS)
         self._pre_send_text = ""
@@ -300,7 +313,8 @@ class GenericWebAdapter(SiteAdapter):
             )
         raise RuntimeError(
             "网站弹出了人机验证/风控拦截（如滑块验证），无头模式无法完成。"
-            "可：1) 设置 AGENT_RELAY_WEB_HEADFUL=1 后在弹出的浏览器里手动完成验证；"
+            "可：1) 经用户明确选择前台后设置 "
+            "AGENT_RELAY_WEB_INTERACTION_MODE=foreground，再手动完成验证；"
             "2) 稍后重试；3) 改用该网站的 API 模型"
         )
 

@@ -16,6 +16,7 @@ import base64
 import getpass
 import re
 import threading
+import unicodedata
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
@@ -96,6 +97,7 @@ SCRIPT_FILES = (
     "config_web.py",
     "approval_policy.py",
     "deletion_policy.py",
+    "browser_interaction_policy.py",
     "delivery_audit.py",
     "agent_message_bus.py",
     "agent_message_probe.py",
@@ -1280,15 +1282,64 @@ def configure_commander(config: dict) -> None:
                                  "manual_disabled": not enabled, "max_agents": max_agents})
 
 
-def redraw_checklist(lines: list[str], previous_height: int, *, interactive: bool) -> int:
-    """Redraw one checklist in place on ANSI terminals, never append duplicates."""
-    if interactive and previous_height:
+def _display_width(text: str) -> int:
+    """Approximate the terminal cell width for Chinese and plain ASCII text."""
+    width = 0
+    for char in text:
+        if unicodedata.combining(char):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
+    return width
+
+
+def _wrap_checklist_line(line: str, width: int) -> list[str]:
+    """Split a menu line at the terminal edge so redraw heights stay accurate."""
+    line = line.expandtabs(4)
+    if not line:
+        return [""]
+    rows: list[str] = []
+    current: list[str] = []
+    current_width = 0
+    for char in line:
+        char_width = _display_width(char)
+        if current and current_width + char_width > width:
+            rows.append("".join(current))
+            current = []
+            current_width = 0
+        current.append(char)
+        current_width += char_width
+    if current:
+        rows.append("".join(current))
+    return rows
+
+
+def redraw_checklist(
+    lines: list[str],
+    previous_height: int,
+    *,
+    interactive: bool,
+    trailing_rows: int = 1,
+) -> int:
+    """Redraw a checklist in place without leaving wrapped or prompt rows behind."""
+    if not interactive:
+        for line in lines:
+            print(line)
+        return len(lines)
+    columns = max(20, shutil.get_terminal_size(fallback=(80, 24)).columns - 1)
+    rendered = [
+        row
+        for line in lines
+        for row in _wrap_checklist_line(line, columns)
+    ]
+    if previous_height:
         print(f"\033[{previous_height}A", end="")
-    for line in lines:
-        print(f"\033[2K{line}" if interactive else line)
-    if interactive:
-        sys.stdout.flush()
-    return len(lines)
+        for _ in range(previous_height):
+            print("\033[2K\033[1B", end="")
+        print(f"\033[{previous_height}A", end="")
+    for line in rendered:
+        print(f"\033[2K{line}")
+    sys.stdout.flush()
+    return len(rendered) + max(0, trailing_rows)
 
 
 def choose_install_targets() -> tuple[list[str], str]:
@@ -1320,29 +1371,45 @@ def choose_install_targets() -> tuple[list[str], str]:
         checked = {target_id for target_id in ids if installed[target_id]}
 
     height = 0
+    notice = ""
     interactive = sys.stdout.isatty()
     while True:
         lines = [
-            "\n安装目标 Agent：",
-            "  输入编号切换勾选 · 回车 = 按勾选安装/卸载 · none = 全部卸载 · 0/web = 只开网页",
+            "安装目标 Agent：",
+            "  编号切换勾选 · 回车继续：勾选的已接入项会覆盖更新，旧内容有变化时先备份。",
+            "  none = 全部取消接入 · 0/web = 只打开网页配置",
         ]
         for index, target_id in enumerate(ids, 1):
             meta = registry[target_id]
             mark = "[x]" if target_id in checked else "[ ]"
             level = "完整支持" if meta["level"] == "full" else "仅装 Skill"
             cli = "已装" if detected[target_id] else "未装"
-            relay = "已接入" if installed[target_id] else "未接入"
+            relay = (
+                "已接入，勾选会重装"
+                if installed[target_id] and target_id in checked
+                else "已接入"
+                if installed[target_id]
+                else "未接入"
+            )
             lines.append(f"{mark} {index}. {meta['label']} — {level} · 本机{cli} · {relay}")
+        if notice:
+            lines.append(f"  {notice}")
         height = redraw_checklist(lines, height, interactive=interactive)
         raw = input("> ").strip().lower()
-        if interactive:
-            height += 1
+        notice = ""
         if raw in ("0", "web"):
             return [t for t in ids if t in checked], "web"
         if raw == "":
-            return [t for t in ids if t in checked], "install"
+            selected = [t for t in ids if t in checked]
+            reinstalling = [t for t in selected if installed[t]]
+            if reinstalling:
+                labels = "、".join(registry[t]["label"] for t in reinstalling)
+                print(f"将重装已接入项：{labels}")
+                print("安装时会检查 Hook、Skill 和扩展；旧内容有变化时先备份再覆盖，相同内容会保留。")
+            return selected, "install"
         if raw in {"none", "all-off"}:
             return [], "install"
+        errors = []
         for token in raw.replace("，", ",").split(","):
             token = token.strip()
             if not token:
@@ -1350,14 +1417,152 @@ def choose_install_targets() -> tuple[list[str], str]:
             try:
                 target_id = ids[int(token) - 1]
             except (ValueError, IndexError):
-                if interactive:
-                    height += 1
-                print(f"忽略无效编号：{token}")
+                errors.append(f"忽略无效编号：{token}")
                 continue
             if target_id in checked:
                 checked.discard(target_id)
             else:
                 checked.add(target_id)
+        if errors:
+            notice = " · ".join(errors)
+
+
+SKILL_PLAIN_HELP = {
+    "browser-automatic": (
+        "浏览器自动化",
+        "打开真实网页、截图、提取内容、点击按钮和填写表单",
+        "经常查网页、做页面验收或网页自动化时保留",
+    ),
+    "docx": (
+        "Word 文档",
+        "创建、读取和修改 Word 文档、报告及模板",
+        "需要处理 .docx 或 .dotx 文件时选",
+    ),
+    "pdf": (
+        "PDF 文档",
+        "读取、拆分、合并、填写和生成 PDF",
+        "经常处理 PDF 文件时选",
+    ),
+    "pptx": (
+        "PowerPoint 演示稿",
+        "创建、读取和修改 PPT 演示文稿",
+        "需要制作或修改幻灯片时选",
+    ),
+    "xlsx": (
+        "Excel 表格",
+        "读取、计算、编辑 Excel 或 CSV，并处理公式",
+        "需要处理报表和表格数据时选",
+    ),
+    "web-artifacts-builder": (
+        "网页应用构建",
+        "制作可独立运行的前端页面、小工具和交互 Demo",
+        "需要快速做网页成品时选",
+    ),
+    "mysql": (
+        "MySQL 数据库",
+        "检查表结构、索引、慢查询、事务和迁移方案",
+        "做 MySQL 开发时手动安装；本机版本许可证不明，安装器不会复制",
+    ),
+    "vue-best-practices": (
+        "Vue 3 开发规范",
+        "Composition API、TypeScript、SSR、Vite 和组件开发的最佳实践",
+        "项目使用 Vue 时保留",
+    ),
+    "create-adaptable-composable": (
+        "Vue 可复用逻辑",
+        "编写兼容 ref、getter 和普通值的 composable",
+        "只在开发 Vue 组合式函数时选",
+    ),
+    "vue-debug-guides": (
+        "Vue 调试指南",
+        "排查 Vue 报错、异步、响应式、路由和 hydration 问题",
+        "Vue 项目遇到疑难问题时选",
+    ),
+    "vue-jsx-best-practices": (
+        "Vue JSX 规范",
+        "Vue 中使用 JSX 的写法和与 React JSX 的差异",
+        "项目使用 Vue JSX 时选",
+    ),
+    "vue-options-api-best-practices": (
+        "Vue Options API 规范",
+        "维护 Options API 的数据、方法、生命周期和 this 上下文",
+        "旧 Vue 项目使用 Options API 时选",
+    ),
+    "vue-pinia-best-practices": (
+        "Pinia 状态管理",
+        "设计 Pinia store、共享状态和响应式数据流",
+        "项目使用 Pinia 时选",
+    ),
+    "vue-router-best-practices": (
+        "Vue Router 路由",
+        "处理路由守卫、参数、跳转和路由组件生命周期",
+        "项目使用 Vue Router 时选",
+    ),
+    "vue-testing-best-practices": (
+        "Vue 测试",
+        "编写 Vitest、Vue Test Utils 和 Playwright 测试",
+        "项目需要 Vue 单元或端到端测试时选",
+    ),
+    "121-java-object-oriented-design": (
+        "Java 面向对象设计",
+        "按 SOLID、封装、抽象和低重复原则组织 Java 代码",
+        "编写或评审 Java 业务代码时保留",
+    ),
+    "122-java-type-design": (
+        "Java 类型与值对象",
+        "设计不可变类型、值对象、接口和清晰的数据边界",
+        "定义 Java 领域模型时保留",
+    ),
+    "301-frameworks-spring-boot-core": (
+        "Spring Boot 基础",
+        "划分组件职责、依赖注入、配置和模块边界",
+        "项目使用 Spring Boot 时保留",
+    ),
+    "302-frameworks-spring-boot-rest": (
+        "Spring REST API",
+        "设计 DTO、HTTP 语义、错误响应和 OpenAPI 契约",
+        "开发 Spring Web API 时保留",
+    ),
+    "303-frameworks-spring-boot-validation": (
+        "Spring 参数校验",
+        "处理 Bean Validation、@Valid、校验组和统一错误响应",
+        "Spring API 需要参数校验时保留",
+    ),
+    "312-frameworks-spring-data-jdbc": (
+        "Spring Data JDBC",
+        "设计 Repository、聚合边界和 JDBC 持久化职责",
+        "项目使用 Spring Data JDBC 时选",
+    ),
+    "code-review-excellence": (
+        "通用代码审查",
+        "按架构、命名、重复代码、可维护性和风险清单审查代码",
+        "希望 Agent 认真做代码审查时保留",
+    ),
+}
+
+
+def skill_plain_help(entry: dict) -> str:
+    """Return a short Chinese explanation that does not depend on upstream docs."""
+    fallback = (
+        str(entry.get("name") or entry.get("id") or "Skill"),
+        str(entry.get("description") or "提供这项任务的专业处理规则"),
+        "只有需要这类能力时才选",
+    )
+    title, purpose, advice = SKILL_PLAIN_HELP.get(
+        str(entry.get("id") or ""),
+        fallback,
+    )
+    return f"{title}｜{purpose.rstrip('。')}。建议：{advice}。"
+
+
+def skill_help_overview() -> list[str]:
+    return [
+        "Skill 白话说明：",
+        "  Skill 是给 Agent 看的专项工作说明书，不是安装新的电脑软件，也不会平时自己运行。",
+        "  勾选后，对应 Agent 做 Word、PDF、Vue、Java 等任务时会参考这些规则。",
+        "  默认推荐项适合多数开发场景；不需要的可以取消，AgentRelay 基础功能和消息总线不受影响。",
+        "  官方下载 = 从 Anthropic 官方仓库安装；内置 = 随 AgentRelay 安装；本机 = 已存在，只有许可证允许时才复制。",
+    ]
 
 
 def choose_install_skills(
@@ -1374,13 +1579,15 @@ def choose_install_skills(
     checked = set(skill_catalog.default_skill_ids(catalog))
 
     height = 0
+    notice = ""
     interactive = sys.stdout.isatty()
     while True:
         installed_count = int(catalog.get("installed_count") or 0)
         lines = [
-            f"\n开发 Skills（本机已装 {installed_count} 个 + "
-            "Anthropic 官方下载 + AgentRelay/Vue 内置）：",
-            "  输入编号切换勾选 · 回车 = 确认 · 0/none = 不安装",
+            f"开发 Skills（本机已发现 {installed_count} 个）：",
+            "  Skill 是给 Agent 看的专项工作说明书，不是新软件，也不会平时自己运行。",
+            "  数字切换勾选 · 回车继续 · ? 查看白话说明 · 0/none = 不安装 Skills",
+            "  官方下载 = Anthropic 官方仓库 · 内置 = AgentRelay 自带 · 本机 = 现有 Skill",
         ]
         for index, entry in enumerate(entries, 1):
             installable = skill_catalog.skill_is_installable(entry)
@@ -1391,30 +1598,31 @@ def choose_install_skills(
             )
             if official:
                 hosts = "/".join(entry.get("installed_in") or [])
-                origin = (
-                    f"官方下载；本机 {hosts} 已存在，不复制"
-                    if hosts
-                    else "Anthropic 官方下载"
-                )
+                origin = f"官方下载；本机 {hosts} 已有" if hosts else "官方下载"
             elif entry.get("source_type") == skill_catalog.INSTALLED_SOURCE:
                 hosts = "/".join(entry.get("installed_in") or [])
                 origin = f"本机 {hosts}" if hosts else "本机"
             else:
                 origin = "内置"
-            version = f" v{entry['version']}" if entry.get("version") else ""
             unavailable = (
                 f" [不可复制：{entry.get('restriction') or '许可证限制'}]"
                 if not installable
                 else ""
             )
             lines.append(
-                f"{mark} {index}. {entry['name']}{version} "
-                f"[{origin}] — {entry['description']}{unavailable}"
+                f"{mark} {index}. {skill_plain_help(entry)} "
+                f"[{origin}]{unavailable}"
             )
+        if notice:
+            lines.append(f"  {notice}")
         height = redraw_checklist(lines, height, interactive=interactive)
         raw = input("> ").strip().lower()
-        if interactive:
-            height += 1
+        notice = ""
+        if raw in {"?", "help"}:
+            for line in skill_help_overview():
+                print(line)
+            height = 0
+            continue
         if raw == "":
             return [skill_id for skill_id in ids if skill_id in checked]
         if raw in {"0", "none"}:
@@ -1427,6 +1635,7 @@ def choose_install_skills(
                     skill_catalog.catalog_skill_entry(catalog, skill_id)
                 )
             ]
+        errors = []
         for token in raw.replace("，", ",").split(","):
             token = token.strip()
             if not token:
@@ -1434,21 +1643,19 @@ def choose_install_skills(
             try:
                 skill_id = ids[int(token) - 1]
             except (ValueError, IndexError):
-                if interactive:
-                    height += 1
-                print(f"忽略无效编号：{token}")
+                errors.append(f"忽略无效编号：{token}")
                 continue
             entry = skill_catalog.catalog_skill_entry(catalog, skill_id)
             if not skill_catalog.skill_is_installable(entry):
                 restriction = entry.get("restriction") or "许可证限制"
-                if interactive:
-                    height += 1
-                print(f"不能安装这个 Skill：{skill_id}（{restriction}）")
+                errors.append(f"不能安装这个 Skill：{skill_id}（{restriction}）")
                 continue
             if skill_id in checked:
                 checked.discard(skill_id)
             else:
                 checked.add(skill_id)
+        if errors:
+            notice = " · ".join(errors)
 
 
 def apply_target_selection(target_ids: list[str], skill_ids: list[str]) -> tuple[dict, dict]:

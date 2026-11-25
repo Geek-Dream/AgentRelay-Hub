@@ -781,6 +781,16 @@ def default_state(session_id=None, agent_id=None):
             "pending_commands": {},
         },
 
+        # 浏览器页面交互与直接系统鼠标操作必须逐次授权。pending 保存当前
+        # 工具调用的不可逆指纹；approved 只在完全相同的下一次调用中消费一次。
+        "browser_interaction_approval": {
+            "pending": None,
+            "approved_request_id": None,
+            "approved_mode": None,
+            "approved_source_sha256": None,
+            "approved_at": None,
+        },
+
         # 当前正在执行的工具。
         #
         # 格式：
@@ -1357,6 +1367,34 @@ def prompt_sha256(prompt):
     ).hexdigest()
 
 
+def browser_interaction_approval_state(state):
+    """Return the normalized one-shot browser interaction approval state."""
+    value = state.get("browser_interaction_approval")
+    if not isinstance(value, dict):
+        value = {}
+        state["browser_interaction_approval"] = value
+    pending = value.get("pending")
+    value["pending"] = pending if isinstance(pending, dict) else None
+    value.setdefault("approved_request_id", None)
+    value.setdefault("approved_mode", None)
+    value.setdefault("approved_source_sha256", None)
+    value.setdefault("approved_at", None)
+    return value
+
+
+def pending_browser_interaction(state):
+    """Return only a complete, fingerprintable pending browser interaction."""
+    pending = browser_interaction_approval_state(state).get("pending")
+    if not isinstance(pending, dict):
+        return None
+    request_id = pending.get("request_id")
+    if not isinstance(request_id, str) or not re.fullmatch(
+        r"[0-9a-f]{24}", request_id,
+    ):
+        return None
+    return pending
+
+
 def pending_approval_scope(state):
     """Describe only the approvals that are still pending in one session."""
 
@@ -1375,6 +1413,7 @@ def pending_approval_scope(state):
         item for item in pending_keys
         if isinstance(item, str) and item
     ]
+    browser_interaction = pending_browser_interaction(state)
     contract = state.get("change_contract")
     contract_pending = (
         isinstance(contract, dict)
@@ -1386,6 +1425,10 @@ def pending_approval_scope(state):
             gate.get("request_sha256") if task_pending else None
         ),
         "tool_keys": pending_keys,
+        "browser_interaction_request_id": (
+            browser_interaction.get("request_id")
+            if browser_interaction else None
+        ),
         "contract_sha256": (
             hashlib.sha256(
                 json.dumps(
@@ -1406,6 +1449,7 @@ def has_pending_approval(scope):
         and (
             scope.get("task_request_sha256")
             or scope.get("tool_keys")
+            or scope.get("browser_interaction_request_id")
             or scope.get("contract_sha256")
         )
     )
@@ -3328,6 +3372,9 @@ def approval_controls_snapshot(state, prompt):
     return {
         "task_gate": dict(gate) if isinstance(gate, dict) else {},
         "change_contract": dict(contract) if isinstance(contract, dict) else None,
+        "browser_interaction_approval": dict(
+            browser_interaction_approval_state(state)
+        ),
         "tool_approval": {
             "pending_keys": [
                 item for item in pending_keys
@@ -3354,6 +3401,9 @@ def restore_approval_controls(state, snapshot):
     state["task_gate"] = dict(snapshot.get("task_gate") or {})
     if isinstance(snapshot.get("change_contract"), dict):
         state["change_contract"] = dict(snapshot["change_contract"])
+    browser = snapshot.get("browser_interaction_approval")
+    if isinstance(browser, dict):
+        state["browser_interaction_approval"] = dict(browser)
     approvals = snapshot.get("tool_approval") or {}
     state["tool_approval"] = {
         "pending_keys": list(approvals.get("pending_keys") or []),
@@ -3392,10 +3442,137 @@ def _approval_scope_labels(scope):
         labels.append("当前任务方案")
     if scope.get("contract_sha256"):
         labels.append("当前 change_contract")
+    if scope.get("browser_interaction_request_id"):
+        labels.append("一次浏览器/鼠标交互")
     tool_count = len(scope.get("tool_keys") or [])
     if tool_count:
         labels.append(f"{tool_count} 个已展示的危险命令")
     return labels
+
+
+def explicit_browser_interaction_mode(prompt):
+    """Return only a mode the user named explicitly in this exact reply."""
+    text = normalize_text(prompt).lower()
+    foreground = bool(re.search(
+        r"前台|可见运行|显示窗口|打开窗口|打开页面|有头|"
+        r"\bforeground\b|\bheaded\b",
+        text,
+        re.I,
+    ))
+    background = bool(re.search(
+        r"后台|无感运行|无窗口|不要弹窗|不要弹出|无头|"
+        r"\bbackground\b|\bheadless\b",
+        text,
+        re.I,
+    ))
+    if foreground == background:
+        return ""
+    return "foreground" if foreground else "background"
+
+
+def explicit_browser_interaction_rejection(prompt):
+    """Return whether this exact reply clearly rejects the pending operation."""
+    text = normalize_text(prompt).lower()
+    return bool(re.search(
+        r"取消|拒绝|算了|不要执行|别执行|先别|暂停|停止|不授权|"
+        r"\bcancel\b|\breject\b|\bstop\b|\bdo\s+not\b|\bdon't\b",
+        text,
+        re.I,
+    ))
+
+
+def _browser_interaction_notice(
+    session_id,
+    state,
+    prompt,
+    pending,
+    source_hash,
+):
+    """Tell the main Agent how to resolve one browser interaction gate."""
+    selected_mode = explicit_browser_interaction_mode(prompt)
+    tracker_path = str(Path(__file__).resolve())
+    python_path = active_python_command()
+    session_value = str(session_id)
+    request_id = str(pending.get("request_id") or "")
+    base = [
+        python_path,
+        tracker_path,
+        "authorize-browser-interaction",
+        "--session",
+        session_value,
+        "--request-id",
+        request_id,
+        "--source-sha256",
+        source_hash,
+        "--reason",
+        "用户明确选择本次浏览器交互运行模式",
+    ]
+    foreground_command = format_command([*base, "--mode", "foreground"])
+    background_command = format_command([*base, "--mode", "background"])
+    cancel_command = format_command([
+        python_path,
+        tracker_path,
+        "authorize-browser-interaction",
+        "--session",
+        session_value,
+        "--request-id",
+        request_id,
+        "--source-sha256",
+        source_hash,
+        "--reason",
+        "用户拒绝本次浏览器或鼠标交互",
+        "--cancel",
+    ])
+    direct = pending.get("kind") == "direct_pointer"
+    selected_text = {
+        "foreground": "前台可见运行",
+        "background": "后台无感运行",
+        "": "未明确选择",
+    }[selected_mode]
+    command_text = ""
+    if not direct and not pending.get("mode"):
+        command_text = (
+            "当前请求没有声明运行模式，不能直接授权。用户选定后，主 Agent 必须"
+            "先用对应的 --interaction-mode <background|foreground> 重新发起完全相同的"
+            "浏览器工作，再为新的请求指纹取得一次性授权。\n"
+        )
+    elif selected_mode == "foreground":
+        command_text = (
+            "用户已明确选择前台，运行：\n"
+            f"{foreground_command}\n"
+        )
+    elif selected_mode == "background" and not direct:
+        command_text = (
+            "用户已明确选择后台，运行：\n"
+            f"{background_command}\n"
+        )
+    elif selected_mode == "background" and direct:
+        command_text = (
+            "直接系统鼠标工具禁止后台运行，不能执行该选择。"
+            "请用户改为前台，或明确取消本次操作。\n"
+        )
+    else:
+        command_text = (
+            "用户尚未明确选择。先询问“后台无感运行”还是“前台可见运行”，"
+            "不得自行选择，也不得运行授权命令。\n"
+        )
+    return (
+        "[AgentRelay 浏览器交互门禁]\n"
+        "这次工具调用会操作浏览器页面或系统指针，当前没有一次性授权。\n"
+        f"用户原话：{_clip_card_text(prompt, 500)}\n"
+        f"待授权操作：{pending.get('description') or '浏览器交互'}\n"
+        f"交互数量：{int(pending.get('interaction_count', 0) or 0)}\n"
+        f"请求指纹：{request_id}\n"
+        f"本消息选择：{selected_text}\n"
+        "后台表示无窗口、无页面弹出、不占用系统鼠标；前台才允许显示窗口。"
+        "直接系统鼠标工具只能在前台运行。\n"
+        + command_text
+        + (
+            "用户明确拒绝时，运行：\n"
+            f"{cancel_command}\n"
+        )
+        + "授权只对完全相同的下一次工具调用生效一次；修改命令、选择器或步骤文件后必须重新选择。"
+    )
 
 
 def semantic_approval_notice(session_id, state, prompt):
@@ -3410,6 +3587,15 @@ def semantic_approval_notice(session_id, state, prompt):
         "scope": scope,
         "created_at": iso_now(),
     }
+    pending = pending_browser_interaction(state)
+    if pending is not None:
+        return _browser_interaction_notice(
+            session_id,
+            state,
+            prompt,
+            pending,
+            source_hash,
+        )
     tracker_path = str(Path(__file__).resolve())
     python_path = active_python_command()
     session_value = str(session_id)
@@ -3677,6 +3863,119 @@ def select_task_work_profile(session_id, requested, reason=""):
     }
 
 
+def authorize_browser_interaction(
+    session_id,
+    mode,
+    source_sha256,
+    request_id,
+    reason,
+    *,
+    cancel=False,
+):
+    """Consume the semantic bridge for one exact browser/pointer request."""
+    session_id = normalize_session_id(session_id)
+    mode = normalize_text(mode).lower()
+    source_sha256 = normalize_text(source_sha256).lower()
+    request_id = normalize_text(request_id).lower()
+    reason = normalize_text(reason)
+    if not session_id:
+        raise ValueError("authorize-browser-interaction 需要有效 session_id")
+    if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
+        raise ValueError("source-sha256 格式无效")
+    if not re.fullmatch(r"[0-9a-f]{24}", request_id):
+        raise ValueError("request-id 格式无效")
+    if not cancel and mode not in {"background", "foreground"}:
+        raise ValueError("--mode 必须是 background 或 foreground")
+
+    lock = acquire_lock()
+    try:
+        state = read_state(session_id=session_id)
+        current_hash = prompt_sha256(state.get("last_prompt"))
+        if not state.get("last_prompt") or source_sha256 != current_hash:
+            raise ValueError("source-sha256 与当前最后一条用户消息不一致")
+        candidate = state.get("semantic_approval_candidate")
+        scope = pending_approval_scope(state)
+        if (
+            not isinstance(candidate, dict)
+            or candidate.get("source_sha256") != source_sha256
+            or candidate.get("scope") != scope
+        ):
+            raise ValueError("当前消息没有有效的浏览器交互授权候选")
+        pending = pending_browser_interaction(state)
+        if pending is None or pending.get("request_id") != request_id:
+            raise ValueError("浏览器交互请求已变化，不能使用旧授权")
+        browser = browser_interaction_approval_state(state)
+        if cancel:
+            if not explicit_browser_interaction_rejection(
+                state.get("last_prompt")
+            ):
+                raise ValueError("当前回复不是明确拒绝，不能取消浏览器交互")
+            browser["pending"] = None
+            browser["approved_request_id"] = None
+            browser["approved_mode"] = None
+            browser["approved_source_sha256"] = None
+            browser["approved_at"] = None
+            state.pop("semantic_approval_candidate", None)
+            write_state(state, session_id=session_id)
+            result = {
+                "decision": "reject",
+                "request_id": request_id,
+                "reason": reason[:500],
+                "resolved_at": iso_now(),
+            }
+        else:
+            selected_mode = explicit_browser_interaction_mode(
+                state.get("last_prompt")
+            )
+            if not selected_mode:
+                raise ValueError(
+                    "用户必须明确选择后台无感运行或前台可见运行"
+                )
+            if selected_mode != mode:
+                raise ValueError(
+                    f"用户明确选择的是 {selected_mode}，不能改成 {mode}"
+                )
+            if pending.get("kind") == "direct_pointer" and mode == "background":
+                raise ValueError(
+                    "直接系统鼠标工具只能前台运行；后台请改用无头浏览器"
+                )
+            if (
+                pending.get("kind") != "direct_pointer"
+                and not pending.get("mode")
+            ):
+                raise ValueError(
+                    "当前浏览器请求尚未声明 --interaction-mode；请用户选择后"
+                    "用对应模式重新发起，再为新请求取得一次性授权"
+                )
+            browser["pending"] = None
+            browser["approved_request_id"] = request_id
+            browser["approved_mode"] = mode
+            browser["approved_source_sha256"] = source_sha256
+            browser["approved_at"] = now_ts()
+            state.pop("semantic_approval_candidate", None)
+            write_state(state, session_id=session_id)
+            result = {
+                "decision": "approve",
+                "request_id": request_id,
+                "mode": mode,
+                "reason": reason[:500],
+                "resolved_at": iso_now(),
+            }
+    finally:
+        release_lock(lock)
+
+    log_event(
+        "browser_interaction_authorized",
+        {
+            "session_id": session_id,
+            "request_id": request_id,
+            "mode": mode,
+            "decision": result["decision"],
+        },
+    )
+    return result
+
+
 def resolve_pending_intent(
     session_id, decision, source_sha256, reason, work_profile=None,
     remember_app=False,
@@ -3716,6 +4015,11 @@ def resolve_pending_intent(
         scope = pending_approval_scope(state)
         if not has_pending_approval(scope):
             raise ValueError("当前没有待审批任务、约束或危险命令")
+        if scope.get("browser_interaction_request_id"):
+            raise ValueError(
+                "当前待审批项是浏览器/鼠标交互，请使用 "
+                "authorize-browser-interaction，不能使用 resolve-intent"
+            )
         if candidate.get("scope") != scope:
             raise ValueError("待审批范围已变化，拒绝使用旧快照写回审批")
 
@@ -3975,6 +4279,132 @@ def update_task_gate_for_prompt(state, prompt):
     )
 
 
+def _looks_like_browser_interaction(tool_name, tool_input):
+    """Fail closed when the interaction policy itself cannot be loaded."""
+    text = " ".join((
+        normalize_text(tool_name).lower(),
+        shell_command_text(tool_name, tool_input).lower(),
+    ))
+    return bool(re.search(
+        r"browser|playwright|computer|desktop_control|mouse|pointer|"
+        r"browse\.py|pyautogui|cliclick|xdotool|ydotool",
+        text,
+        re.I,
+    ))
+
+
+def _browser_interaction_gate(state, tool_name, tool_input, session_id):
+    """Require one explicit mode and one exact authorization per operation."""
+    try:
+        request = _shared_script_module(
+            "browser_interaction_policy"
+        ).interaction_request(tool_name, tool_input)
+    except (ImportError, OSError, ValueError, TypeError) as exc:
+        if _looks_like_browser_interaction(tool_name, tool_input):
+            write_state(state, session_id=session_id)
+            return False, (
+                "[AgentRelay 浏览器交互门禁]\n"
+                "浏览器交互策略模块不可用，本次操作已阻断。"
+                f"请重新安装 AgentRelay 后重试：{exc}"
+            )
+        return True, None
+    if request is None:
+        return True, None
+
+    browser = browser_interaction_approval_state(state)
+    request_id = str(request.get("request_id") or "")
+    count = int(request.get("interaction_count", 0) or 0)
+    if count > 1:
+        browser["pending"] = None
+        browser["approved_request_id"] = None
+        browser["approved_mode"] = None
+        browser["approved_source_sha256"] = None
+        browser["approved_at"] = None
+        write_state(state, session_id=session_id)
+        actions = "、".join(
+            f"第 {item.get('step')} 步 {item.get('action')}"
+            for item in request.get("actions") or []
+        )
+        return False, (
+            "[AgentRelay 浏览器交互门禁]\n"
+            f"本次工具调用包含 {count} 个页面交互（{actions}），"
+            "但授权必须逐次执行。请拆成一个工具调用最多一个交互，"
+            "每次执行前重新让用户选择后台或前台。"
+        )
+
+    approved_id = browser.get("approved_request_id")
+    approved_mode = browser.get("approved_mode")
+    approved_source = browser.get("approved_source_sha256")
+    current_source = prompt_sha256(state.get("last_prompt"))
+    approved_at = browser.get("approved_at")
+    approval_fresh = True
+    try:
+        approval_fresh = (
+            approved_at is not None
+            and now_ts() - float(approved_at) <= 600
+        )
+    except (TypeError, ValueError):
+        approval_fresh = False
+    if approved_id:
+        mode_matches = (
+            approved_mode == request.get("mode")
+            or (
+                request.get("kind") == "direct_pointer"
+                and approved_mode == "foreground"
+            )
+        )
+        if (
+            approved_id == request_id
+            and approved_source == current_source
+            and approval_fresh
+            and mode_matches
+        ):
+            browser["approved_request_id"] = None
+            browser["approved_mode"] = None
+            browser["approved_source_sha256"] = None
+            browser["approved_at"] = None
+            browser["pending"] = None
+            write_state(state, session_id=session_id)
+            return True, None
+        browser["approved_request_id"] = None
+        browser["approved_mode"] = None
+        browser["approved_source_sha256"] = None
+        browser["approved_at"] = None
+
+    browser["pending"] = {
+        "request_id": request_id,
+        "kind": request.get("kind"),
+        "mode": request.get("mode"),
+        "background_allowed": bool(request.get("background_allowed")),
+        "interaction_count": count,
+        "actions": list(request.get("actions") or []),
+        "workflow_path": request.get("workflow_path"),
+        "workflow_sha256": request.get("workflow_sha256"),
+        "description": request.get("description"),
+        "created_at": iso_now(),
+    }
+    write_state(state, session_id=session_id)
+    if not request.get("mode"):
+        mode_text = (
+            "这是直接系统鼠标工具，只能选择前台可见运行；后台请改用无头浏览器。"
+            if request.get("kind") == "direct_pointer"
+            else "后台表示无窗口、无页面弹出、不占用系统鼠标；前台才允许显示窗口。"
+        )
+        return False, (
+            "[AgentRelay 浏览器交互门禁]\n"
+            "执行前必须先让用户明确选择“后台无感运行”还是“前台可见运行”。"
+            f"\n{mode_text}\n"
+            "不要沿用上一次选择，也不要自行选择。用户选定后，浏览器命令必须"
+            "带上对应的 --interaction-mode 重新发起，再取得一次性授权。"
+        )
+    return False, (
+        "[AgentRelay 浏览器交互门禁]\n"
+        f"本次操作已声明 {request.get('mode')} 模式，但还没有用户的一次性授权。"
+        "请让用户明确确认后台或前台，并授权当前完全相同的工具调用。"
+        "授权只使用一次；修改命令、选择器、步骤文件或工作流后立即失效。"
+    )
+
+
 def evaluate_pre_tool_gate(tool_name, tool_input, session_id):
     """原子检查危险命令和任务门禁，返回是否放行及拒绝原因。"""
 
@@ -4192,6 +4622,14 @@ def evaluate_pre_tool_gate(tool_name, tool_input, session_id):
                 )
             if auto_selected:
                 write_state(state, session_id=session_id)
+        allowed, interaction_reason = _browser_interaction_gate(
+            state,
+            tool_name,
+            tool_input,
+            session_id,
+        )
+        if not allowed:
+            return False, interaction_reason
     finally:
         release_lock(lock)
 
@@ -7406,6 +7844,63 @@ def cli():
             result = completion_preflight(session_id, message)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0 if result.get("ok") else 1
+
+        if command == "authorize-browser-interaction":
+            values = {}
+            remaining = list(args)
+            cancel = "--cancel" in remaining
+            if cancel:
+                remaining = [item for item in remaining if item != "--cancel"]
+            for option, key in (
+                ("--mode", "mode"),
+                ("--request-id", "request_id"),
+                ("--source-sha256", "source_sha256"),
+                ("--reason", "reason"),
+            ):
+                if option not in remaining:
+                    continue
+                index = remaining.index(option)
+                if index + 1 >= len(remaining):
+                    print(
+                        f"Error: {option} requires a value",
+                        file=sys.stderr,
+                    )
+                    return 1
+                values[key] = remaining[index + 1]
+                remaining = remaining[:index] + remaining[index + 2:]
+            if remaining:
+                print(
+                    "Error: unexpected arguments: " + " ".join(remaining),
+                    file=sys.stderr,
+                )
+                return 1
+            if not values.get("request_id") or not values.get("source_sha256"):
+                print(
+                    "Error: --request-id and --source-sha256 are required",
+                    file=sys.stderr,
+                )
+                return 1
+            if not cancel and not values.get("mode"):
+                print("Error: --mode is required unless --cancel is used", file=sys.stderr)
+                return 1
+            resolved_session = (
+                session_id
+                or normalize_session_id(os.environ.get("CODEX_SESSION_ID"))
+            )
+            try:
+                result = authorize_browser_interaction(
+                    resolved_session,
+                    values.get("mode") or "",
+                    values["source_sha256"],
+                    values["request_id"],
+                    values.get("reason") or "",
+                    cancel=cancel,
+                )
+            except ValueError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 2
+            print(json.dumps({"ok": True, **result}, ensure_ascii=False))
+            return 0
 
         if command == "status":
             session_id = (

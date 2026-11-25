@@ -1193,8 +1193,8 @@ class SiteAdapter:
     mode_keywords = {}
     # 兜底适配器（GenericWebAdapter）置为 True；网站检测时永远最后尝试。
     fallback = False
-    # 有头运行浏览器（反风控更稳、验证弹窗可人工处理）。仅通用兜底置 True；
-    # 可用环境变量 AGENT_RELAY_WEB_HEADFUL=0/1 全局强制。
+    # 适配器默认后台无窗口。显式前台必须来自用户当次选择；
+    # AGENT_RELAY_WEB_HEADFUL 仅作为旧配置兼容入口。
     prefer_headful = False
     # 对话成功后是否把新 Cookie 回写到登录状态文件。
     refresh_state = False
@@ -2926,15 +2926,41 @@ def run_provider(
     binding_scope = ""
     pool_title = ""
 
-    # 通用兜底默认有头（反风控、验证可人工处理）；环境变量可全局强制。
-    headless = not getattr(adapter, "prefer_headful", False)
-    headful_override = os.environ.get(
-        "AGENT_RELAY_WEB_HEADFUL", ""
+    # 默认后台无窗口。显式前台只能来自用户当次选择；旧 HEADFUL 变量
+    # 继续兼容，但不再允许悄悄把自动化切到可见窗口。
+    interaction_mode = os.environ.get(
+        "AGENT_RELAY_WEB_INTERACTION_MODE", ""
     ).strip().lower()
-    if headful_override in {"1", "true", "yes", "on"}:
-        headless = False
-    elif headful_override in {"0", "false", "no", "off"}:
-        headless = True
+    if interaction_mode and interaction_mode not in {
+        "background", "foreground",
+    }:
+        raise RuntimeError(
+            "AGENT_RELAY_WEB_INTERACTION_MODE 必须是 "
+            "background 或 foreground"
+        )
+    if human_input:
+        if interaction_mode == "background":
+            raise RuntimeError(
+                "人工代问必须在前台可见运行，不能使用 background"
+            )
+        interaction_mode = "foreground"
+    if not interaction_mode:
+        headful_override = os.environ.get(
+            "AGENT_RELAY_WEB_HEADFUL", ""
+        ).strip().lower()
+        if headful_override in {"1", "true", "yes", "on"}:
+            interaction_mode = "foreground"
+        elif headful_override in {"0", "false", "no", "off"}:
+            interaction_mode = "background"
+        else:
+            interaction_mode = (
+                "foreground"
+                if getattr(adapter, "prefer_headful", False)
+                else "background"
+            )
+    headless = interaction_mode == "background"
+    if hasattr(adapter, "_headed"):
+        adapter._headed = not headless
 
     with sync_playwright() as p:
 
@@ -3422,8 +3448,25 @@ def main():
             "工具只监听状态并提取回答（适合强风控网站）"
         )
     )
+    parser.add_argument(
+        "--interaction-mode",
+        choices=("background", "foreground"),
+        default=None,
+        help=(
+            "浏览器交互模式；默认 background（无窗口）。"
+            "只有用户明确选择前台时才使用 foreground"
+        ),
+    )
 
     args = parser.parse_args()
+    if args.monitor and args.interaction_mode == "background":
+        parser.error("--monitor requires foreground interaction")
+    if args.interaction_mode:
+        os.environ["AGENT_RELAY_WEB_INTERACTION_MODE"] = args.interaction_mode
+    elif args.monitor:
+        os.environ.setdefault("AGENT_RELAY_WEB_INTERACTION_MODE", "foreground")
+    else:
+        os.environ.setdefault("AGENT_RELAY_WEB_INTERACTION_MODE", "background")
     try:
         # CLI 入口也必须先加载统一 Provider 配置，不能只依赖 run_provider()
         # 内部调用时才会执行的环境映射。
@@ -3552,12 +3595,6 @@ def main():
 
         # 收集命令行 --image 参数
         cli_images = list(args.image) if args.image else []
-
-        if not args.monitor:
-            # 后台自动调用：默认无头运行，不在用户面前弹出浏览器窗口；
-            # 需要人工代问（--monitor）或调试时保持有头，
-            # 也可用 AGENT_RELAY_WEB_HEADFUL=1 强制有头
-            os.environ.setdefault("AGENT_RELAY_WEB_HEADFUL", "0")
 
         result = run_provider(
             question,

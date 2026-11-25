@@ -77,6 +77,36 @@ class HookGateTests(unittest.TestCase):
         self.assertIsNotNone(match, context)
         return match.group(1)
 
+    def browser_authorization_context(self, result):
+        self.assert_hook_ok(result)
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("[AgentRelay 浏览器交互门禁]", context)
+        source = re.search(r"--source-sha256 ([0-9a-f]{64})", context)
+        request = re.search(r"请求指纹：([0-9a-f]{24})", context)
+        self.assertIsNotNone(source, context)
+        self.assertIsNotNone(request, context)
+        return source.group(1), request.group(1), context
+
+    def authorize_browser(self, session_id, source_hash, request_id, mode):
+        return self.run_tracker(
+            "authorize-browser-interaction",
+            "--session", session_id,
+            "--request-id", request_id,
+            "--source-sha256", source_hash,
+            "--mode", mode,
+            "--reason", "测试用户明确选择本次运行模式",
+        )
+
+    def cancel_browser(self, session_id, source_hash, request_id):
+        return self.run_tracker(
+            "authorize-browser-interaction",
+            "--session", session_id,
+            "--request-id", request_id,
+            "--source-sha256", source_hash,
+            "--reason", "用户明确拒绝本次浏览器操作",
+            "--cancel",
+        )
+
     def resolve_intent(self, session_id, source_hash, decision="approve",
                        work_profile=None, remember_app=False):
         if decision == "approve" and work_profile is None:
@@ -534,6 +564,300 @@ class HookGateTests(unittest.TestCase):
         denied = json.loads(patch.stdout)["hookSpecificOutput"]
         self.assertEqual(denied["permissionDecision"], "deny")
         self.assertIn("用户已拒绝当前待确认范围", denied["permissionDecisionReason"])
+
+    def test_browser_interaction_requires_mode_then_one_shot_authorization(self):
+        session = "browser-interaction-one-shot"
+        browser_payload = self.payload(
+            session,
+            "PreToolUse",
+            tool_name="exec_command",
+            tool_input={
+                "cmd": (
+                    "python browse.py --interaction-mode foreground "
+                    "screenshot https://example.com"
+                )
+            },
+            tool_use_id="browser-click-1",
+        )
+        denied = self.run_hook(browser_payload)
+        self.assert_hook_ok(denied)
+        decision = json.loads(denied.stdout)["hookSpecificOutput"]
+        self.assertEqual(decision["permissionDecision"], "deny")
+        self.assertIn("一次性授权", decision["permissionDecisionReason"])
+
+        candidate = self.run_hook(self.payload(
+            session,
+            "UserPromptSubmit",
+            prompt="前台可见运行，授权这次完全相同的浏览器操作",
+        ))
+        source_hash, request_id, context = self.browser_authorization_context(candidate)
+        self.assertIn("前台可见运行", context)
+        approved = self.authorize_browser(
+            session, source_hash, request_id, "foreground",
+        )
+        self.assert_hook_ok(approved)
+        self.assertEqual(json.loads(approved.stdout)["mode"], "foreground")
+
+        allowed = self.run_hook(browser_payload)
+        self.assert_hook_ok(allowed)
+        self.assertEqual(allowed.stdout, "")
+
+        repeated = self.run_hook(browser_payload)
+        self.assert_hook_ok(repeated)
+        repeated_decision = json.loads(repeated.stdout)["hookSpecificOutput"]
+        self.assertEqual(repeated_decision["permissionDecision"], "deny")
+        self.assertIn("一次性授权", repeated_decision["permissionDecisionReason"])
+
+    def test_browser_interaction_without_mode_asks_before_any_default(self):
+        denied = self.run_hook(self.payload(
+            "browser-mode-required",
+            "PreToolUse",
+            tool_name="exec_command",
+            tool_input={"cmd": "python browse.py scrape https://example.com"},
+            tool_use_id="browser-no-mode",
+        ))
+        self.assert_hook_ok(denied)
+        reason = json.loads(denied.stdout)["hookSpecificOutput"][
+            "permissionDecisionReason"
+        ]
+        self.assertIn("明确选择", reason)
+        self.assertIn("后台无感运行", reason)
+        self.assertIn("前台可见运行", reason)
+        candidate = self.run_hook(self.payload(
+            "browser-mode-required",
+            "UserPromptSubmit",
+            prompt="后台无感运行",
+        ))
+        source_hash, request_id, context = self.browser_authorization_context(candidate)
+        self.assertIn("当前请求没有声明运行模式", context)
+        rejected = self.authorize_browser(
+            "browser-mode-required", source_hash, request_id, "background",
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("尚未声明 --interaction-mode", rejected.stderr)
+
+    def test_generic_approval_cannot_invent_a_browser_mode(self):
+        session = "browser-approval-needs-mode"
+        browser_payload = self.payload(
+            session,
+            "PreToolUse",
+            tool_name="browser_click",
+            tool_input={
+                "selector": "#submit",
+                "interaction_mode": "background",
+            },
+            tool_use_id="browser-needs-mode",
+        )
+        self.assert_hook_ok(self.run_hook(browser_payload))
+        candidate = self.run_hook(self.payload(
+            session,
+            "UserPromptSubmit",
+            prompt="好的，可以",
+        ))
+        source_hash, request_id, context = self.browser_authorization_context(candidate)
+        self.assertIn("未明确选择", context)
+        rejected = self.authorize_browser(
+            session, source_hash, request_id, "background",
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("必须明确选择", rejected.stderr)
+
+    def test_browser_interaction_can_be_explicitly_cancelled(self):
+        session = "browser-cancel"
+        browser_payload = self.payload(
+            session,
+            "PreToolUse",
+            tool_name="browser_click",
+            tool_input={"selector": "#delete", "interaction_mode": "foreground"},
+            tool_use_id="browser-cancel-click",
+        )
+        self.assert_hook_ok(self.run_hook(browser_payload))
+        candidate = self.run_hook(self.payload(
+            session,
+            "UserPromptSubmit",
+            prompt="取消这次浏览器操作，不要执行",
+        ))
+        source_hash, request_id, _ = self.browser_authorization_context(candidate)
+        cancelled = self.cancel_browser(session, source_hash, request_id)
+        self.assert_hook_ok(cancelled)
+        self.assertEqual(json.loads(cancelled.stdout)["decision"], "reject")
+        retried = self.run_hook(browser_payload)
+        self.assertEqual(
+            json.loads(retried.stdout)["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+
+    def test_direct_pointer_rejects_background_and_allows_foreground_once(self):
+        session = "direct-pointer-foreground"
+        pointer_payload = self.payload(
+            session,
+            "PreToolUse",
+            tool_name="computer",
+            tool_input={"action": "click", "x": 30, "y": 40},
+            tool_use_id="pointer-click",
+        )
+        first = self.run_hook(pointer_payload)
+        self.assert_hook_ok(first)
+        self.assertIn(
+            "直接系统鼠标工具",
+            json.loads(first.stdout)["hookSpecificOutput"][
+                "permissionDecisionReason"
+            ],
+        )
+
+        candidate = self.run_hook(self.payload(
+            session,
+            "UserPromptSubmit",
+            prompt="后台无感运行，授权这次鼠标点击",
+        ))
+        source_hash, request_id, _ = self.browser_authorization_context(candidate)
+        rejected = self.authorize_browser(
+            session, source_hash, request_id, "background",
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("只能前台运行", rejected.stderr)
+
+        candidate = self.run_hook(self.payload(
+            session,
+            "UserPromptSubmit",
+            prompt="改为前台可见运行，授权这次鼠标点击",
+        ))
+        source_hash, request_id, _ = self.browser_authorization_context(candidate)
+        approved = self.authorize_browser(
+            session, source_hash, request_id, "foreground",
+        )
+        self.assert_hook_ok(approved)
+        allowed = self.run_hook(pointer_payload)
+        self.assert_hook_ok(allowed)
+        self.assertEqual(allowed.stdout, "")
+
+    def test_browser_authorization_invalidates_when_selector_changes(self):
+        session = "browser-selector-drift"
+        first_payload = self.payload(
+            session,
+            "PreToolUse",
+            tool_name="browser_click",
+            tool_input={
+                "selector": "#old",
+                "interaction_mode": "background",
+            },
+            tool_use_id="selector-old",
+        )
+        denied = self.run_hook(first_payload)
+        self.assert_hook_ok(denied)
+        candidate = self.run_hook(self.payload(
+            session,
+            "UserPromptSubmit",
+            prompt="后台无感运行，授权这次点击",
+        ))
+        source_hash, request_id, _ = self.browser_authorization_context(candidate)
+        self.assert_hook_ok(self.authorize_browser(
+            session, source_hash, request_id, "background",
+        ))
+
+        changed = self.payload(
+            session,
+            "PreToolUse",
+            tool_name="browser_click",
+            tool_input={
+                "selector": "#new",
+                "interaction_mode": "background",
+            },
+            tool_use_id="selector-new",
+        )
+        changed_result = self.run_hook(changed)
+        self.assert_hook_ok(changed_result)
+        self.assertEqual(
+            json.loads(changed_result.stdout)["hookSpecificOutput"][
+                "permissionDecision"
+            ],
+            "deny",
+        )
+
+    def test_browser_workflow_file_change_invalidates_authorization(self):
+        session = "browser-workflow-drift"
+        workspace = self.codex_home / "browser-workflow"
+        workspace.mkdir()
+        steps = workspace / "steps.json"
+        steps.write_text(
+            json.dumps([
+                {"action": "goto", "url": "https://example.com"},
+                {"action": "click", "selector": "#old"},
+            ]),
+            encoding="utf-8",
+        )
+        browser_payload = self.payload(
+            session,
+            "PreToolUse",
+            cwd=str(workspace),
+            tool_name="exec_command",
+            tool_input={
+                "cmd": (
+                    "python browse.py --interaction-mode background "
+                    "run steps.json"
+                ),
+                "cwd": str(workspace),
+            },
+            tool_use_id="workflow-click",
+        )
+        denied = self.run_hook(browser_payload)
+        self.assert_hook_ok(denied)
+        candidate = self.run_hook(self.payload(
+            session,
+            "UserPromptSubmit",
+            cwd=str(workspace),
+            prompt="后台无感运行，授权这次工作流点击",
+        ))
+        source_hash, request_id, _ = self.browser_authorization_context(candidate)
+        self.assert_hook_ok(self.authorize_browser(
+            session, source_hash, request_id, "background",
+        ))
+
+        steps.write_text(
+            json.dumps([
+                {"action": "goto", "url": "https://example.com"},
+                {"action": "click", "selector": "#changed"},
+            ]),
+            encoding="utf-8",
+        )
+        changed = self.run_hook(browser_payload)
+        self.assert_hook_ok(changed)
+        self.assertEqual(
+            json.loads(changed.stdout)["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+
+    def test_multi_interaction_workflow_must_be_split(self):
+        workspace = self.codex_home / "browser-multi"
+        workspace.mkdir()
+        steps = workspace / "steps.json"
+        steps.write_text(
+            json.dumps([
+                {"action": "click", "selector": "#one"},
+                {"action": "click", "selector": "#two"},
+            ]),
+            encoding="utf-8",
+        )
+        result = self.run_hook(self.payload(
+            "browser-multi",
+            "PreToolUse",
+            cwd=str(workspace),
+            tool_name="exec_command",
+            tool_input={
+                "cmd": (
+                    "python browse.py --interaction-mode background "
+                    "run steps.json"
+                ),
+                "cwd": str(workspace),
+            },
+            tool_use_id="multi-click",
+        ))
+        self.assert_hook_ok(result)
+        reason = json.loads(result.stdout)["hookSpecificOutput"][
+            "permissionDecisionReason"
+        ]
+        self.assertIn("包含 2 个页面交互", reason)
+        self.assertIn("拆成一个工具调用最多一个交互", reason)
 
     def test_permission_modes_control_cards_without_weakening_danger_gate(self):
         script = PROJECT_ROOT / "scripts" / "approval_policy.py"
