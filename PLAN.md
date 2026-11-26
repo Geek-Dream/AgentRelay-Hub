@@ -7,7 +7,7 @@
 2. [x] 修复重复显示及帮助命令分类；新增用例 `5 passed, 3 subtests passed`，`compileall` 与 `git diff --check` exit 0。
 3. [x] 相关完整测试：`128 passed, 23 subtests passed`，90.25s，exit 0。
 4. [x] 最终全量测试：`812 passed, 3 skipped, 96 subtests passed`，173.86s，exit 0；最终 `compileall` 与 `git diff --check` exit 0。页面由用户自行验收，本轮未启动浏览器。
-5. [x] 三宿主已同步，安装器检查正常，Hook、共享策略及三份 skill 逐字一致；OpenCode 未改。提交推送按既有批准继续。
+5. [x] 三宿主已同步，安装器检查正常，Hook、共享策略及三份 skill 逐字一致；OpenCode 未改。功能提交 `524e382` 已推送 `origin/main`；执行记录补记随后作为独立提交推送。
 
 ---
 
@@ -35,7 +35,7 @@
 - [x] 已读取最终真实 diff，完成主 Agent 对抗性复审；Fusion 无可用 Provider，不能声称获得外部独立复核。
 - [ ] 浏览器内真实选择、保存、busy、回读和逐项截图视觉审查未通过：首次因最终回到总览导致 `#voice` 隐藏而超时；第二次生成截图后因隐藏的 `#commander .head` 目标捕获超时。用户已决定自行验收，不再自动重试。
 - [x] 已同步安装到 Claude、Codex、Pi（含本轮重复申请与 `--help` 修复）；安装器检查正常，Hook、共享策略及三份 skill 逐字一致，命令文件存在，临时配置中的共享 CLI 回读正常。OpenCode 未改。
-- [ ] 当前候选尚未提交、推送 GitHub；去重修复与最终全量测试后按既有批准继续。
+- [x] 功能提交 `524e382 feat: add adaptive voice and deduplicate automation requests` 已推送 GitHub `origin/main`；随后仅补充执行记录，不强推、不覆盖远端。
 
 ---
 
