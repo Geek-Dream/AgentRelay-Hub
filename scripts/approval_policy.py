@@ -265,13 +265,12 @@ def render_notification_menu() -> str:
     current = _notification_enabled()
     lines.extend(card_render.field(
         "当前状态",
-        "开启 · 自动化执行前会先通知你" if current else "关闭 · 自动化执行前不会通知你",
+        "开启 · 额外发送系统桌面提醒" if current else "关闭 · 只在当前对话中申请和审批",
     ))
     lines.extend(card_render.section("这个开关管什么", [
-        ("开启", "启动自动化、控制鼠标、后台启动进程、打开/关闭窗口前，"
-                 "先给你一条系统通知；影响你前台操作的还会停下来等你确认。"),
-        ("关闭", "不再发送系统通知。涉及前台焦点和鼠标控制的操作仍需你确认，"
-                 "这一条不受开关影响。"),
+        ("开启", "在当前对话内申请和审批之外，额外发送系统桌面提醒。"),
+        ("关闭", "不发送系统桌面提醒。对话内申请和审批始终保留：打开网页或程序、"
+                 "关闭程序、控制鼠标键盘等操作仍需你明确批准。"),
     ]))
     return card_render.finish(
         lines, f"输入 /agent-approval notify {'off' if current else 'on'} 切换"
@@ -279,26 +278,28 @@ def render_notification_menu() -> str:
 
 
 def _notification_config_path(codex_home: Path) -> Path:
-    return Path(codex_home) / "agent_relay_tracker" / "notifications.json"
+    import config_manager
+
+    return config_manager.config_path(Path(codex_home))
 
 
 def _notification_enabled(codex_home: Path | None = None) -> bool:
-    """Read the switch from the unified config, defaulting to enabled."""
+    """Read the optional desktop-notification switch, defaulting to disabled."""
     try:
         import config_manager
     except ImportError:
-        return True
+        return False
     home = Path(codex_home) if codex_home else Path(
         os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
     )
     try:
         config = config_manager.load_config(home)
     except (OSError, ValueError, TypeError):
-        return True
+        return False
     section = config.get("notifications")
     if isinstance(section, dict):
-        return bool(section.get("enabled", True))
-    return True
+        return section.get("enabled") is True
+    return section is True
 
 
 def set_notification_enabled(codex_home: Path, enabled: bool) -> dict[str, Any]:
@@ -334,9 +335,9 @@ def command_request(prompt: str, codex_home: Path, menu_pending: bool = False) -
                 return {"action": "invalid", "message": "自动化提醒开关未能写入并回读验证，请重试。"}
             return {"action": "saved", "message": (
                 f"「AgentRelay · 自动化提醒已{'开启' if result['enabled'] else '关闭'}」\n"
-                + ("以后启动自动化、控制鼠标或后台启动进程前，会先给你系统通知。"
+                + ("自动化操作除对话内申请外，还会额外发送系统桌面提醒；每次操作仍需你在对话中批准。"
                    if result["enabled"]
-                   else "不再发送系统通知；影响你前台的操作仍需你确认。")
+                   else "不再发送系统桌面提醒；对话内申请和审批始终保留，不会因此放行自动化操作。")
                 + f"\n配置: {_notification_config_path(codex_home)}"
             )}
         if argument.lower().startswith("forget "):

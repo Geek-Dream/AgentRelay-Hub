@@ -565,6 +565,150 @@ class HookGateTests(unittest.TestCase):
         self.assertEqual(denied["permissionDecision"], "deny")
         self.assertIn("用户已拒绝当前待确认范围", denied["permissionDecisionReason"])
 
+    def test_same_pending_browser_operation_does_not_repeat_its_visible_card(self):
+        session = "browser-pending-card-is-not-repeated"
+        payload = self.payload(
+            session, "PreToolUse", tool_name="Bash",
+            tool_input={
+                "command": (
+                    "python browse.py --interaction-mode foreground "
+                    "screenshot https://example.com"
+                ),
+            },
+            tool_use_id="same-pending-request",
+        )
+        first = self.run_hook(payload)
+        self.assertIn("「自动化申请」", json.loads(first.stdout)["systemMessage"])
+        repeated = self.run_hook(payload)
+        output = json.loads(repeated.stdout)
+        self.assertEqual(
+            output["hookSpecificOutput"]["permissionDecision"], "deny",
+        )
+        self.assertNotIn("systemMessage", output)
+        self.assertIn("申请已显示", output["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertNotIn("申请已显示", repeated.stdout.split("permissionDecisionReason", 1)[0])
+
+        changed = self.payload(
+            session, "PreToolUse", tool_name="Bash",
+            tool_input={
+                "command": (
+                    "python browse.py --interaction-mode foreground "
+                    "screenshot https://example.org"
+                ),
+            },
+            tool_use_id="different-pending-request",
+        )
+        self.assertIn("「自动化申请」", json.loads(self.run_hook(changed).stdout)["systemMessage"])
+
+    def test_mode_retry_keeps_one_visible_card_before_authorization(self):
+        session = "browser-mode-retry-card-is-not-repeated"
+        payload = self.payload(
+            session, "PreToolUse", tool_name="Bash",
+            tool_input={"command": "python browse.py screenshot https://example.com"},
+            tool_use_id="mode-retry-before-authorization",
+        )
+        self.assertIn("「自动化申请」", json.loads(self.run_hook(payload).stdout)["systemMessage"])
+        payload["tool_input"]["command"] = (
+            "python browse.py --interaction-mode foreground "
+            "screenshot https://example.com"
+        )
+        repeated = self.run_hook(payload)
+        output = json.loads(repeated.stdout)
+        self.assertEqual(
+            output["hookSpecificOutput"]["permissionDecision"], "deny",
+        )
+        self.assertNotIn("systemMessage", output)
+        state = json.loads(
+            (self.codex_home / "agent_relay_tracker/sessions" / f"{session}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(state["browser_interaction_approval"]["pending"]["mode"], "")
+
+    def test_browser_help_never_creates_a_pending_interaction(self):
+        result = self.run_hook(self.payload(
+            "browser-help-is-readonly", "PreToolUse", tool_name="Bash",
+            tool_input={"command": "python /opt/browser-automatic/scripts/browse.py --help"},
+            tool_use_id="browser-help",
+        ))
+        self.assert_hook_ok(result)
+        self.assertEqual(result.stdout, "")
+        state = json.loads(
+            (self.codex_home / "agent_relay_tracker/sessions/browser-help-is-readonly.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertIsNone(state["browser_interaction_approval"]["pending"])
+
+    def test_mode_selection_authorizes_same_operation_without_second_approval(self):
+        session = "browser-mode-is-not-a-new-operation"
+        command = (
+            'CODEX_ROOT="${CODEX_HOME:-$HOME/.codex}"; '
+            '"$CODEX_ROOT/agentrelay-env/bin/python" '
+            '"$CODEX_ROOT/skills/browser-automatic/scripts/browse.py" '
+            'goto http://127.0.0.1:9081/'
+        )
+        payload = self.payload(
+            session, "PreToolUse", tool_name="Bash",
+            tool_input={"command": command}, tool_use_id="browser-mode-retry",
+        )
+        denied = self.run_hook(payload)
+        self.assertIn("「自动化申请」", json.loads(denied.stdout)["systemMessage"])
+        self.assertIn("不会发送 macOS、Windows 或 Linux 系统通知", denied.stdout)
+        candidate = self.run_hook(self.payload(
+            session, "UserPromptSubmit",
+            prompt="确认前台可见运行，并授权执行上述命令",
+        ))
+        source_hash, request_id, _ = self.browser_authorization_context(candidate)
+        approved = self.authorize_browser(
+            session, source_hash, request_id, "foreground",
+        )
+        self.assert_hook_ok(approved)
+        command = command.replace(
+            "goto", "--interaction-mode foreground goto",
+        )
+        payload["tool_input"]["command"] = command
+        allowed = self.run_hook(payload)
+        self.assert_hook_ok(allowed)
+        self.assertEqual(allowed.stdout, "")
+        repeated = self.run_hook(payload)
+        self.assertEqual(
+            json.loads(repeated.stdout)["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+        changed_payload = self.payload(
+            session, "PreToolUse", tool_name="Bash",
+            tool_input={
+                "command": command.replace(
+                    "http://127.0.0.1:9081/", "https://example.com/",
+                ),
+            },
+            tool_use_id="browser-mode-changed-url",
+        )
+        changed = self.run_hook(changed_payload)
+        self.assertEqual(
+            json.loads(changed.stdout)["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+        changed_candidate = self.run_hook(self.payload(
+            session, "UserPromptSubmit", prompt="确认前台可见运行，并授权上述新网址",
+        ))
+        changed_source, changed_request, _ = self.browser_authorization_context(
+            changed_candidate,
+        )
+        self.assert_hook_ok(self.authorize_browser(
+            session, changed_source, changed_request, "foreground",
+        ))
+        other_tool = self.payload(
+            session, "PreToolUse", tool_name="exec_command",
+            tool_input={"command": command}, tool_use_id="browser-mode-other-tool",
+        )
+        other_tool_result = self.run_hook(other_tool)
+        self.assertEqual(
+            json.loads(other_tool_result.stdout)["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+
     def test_browser_interaction_requires_mode_then_one_shot_authorization(self):
         session = "browser-interaction-one-shot"
         browser_payload = self.payload(
@@ -608,6 +752,136 @@ class HookGateTests(unittest.TestCase):
         self.assertEqual(repeated_decision["permissionDecision"], "deny")
         self.assertIn("一次性授权", repeated_decision["permissionDecisionReason"])
 
+    def test_opening_a_window_is_not_reused_from_an_earlier_declaration(self):
+        session = "window-launch-requires-a-fresh-request"
+        from scripts import automation_consent
+
+        state_path = (
+            self.codex_home / "agent_relay_tracker" / "sessions" / f"{session}.json"
+        )
+        first = self.run_hook(self.payload(
+            session, "PreToolUse", tool_name="Bash",
+            tool_input={"command": "open -a Slack"},
+            tool_use_id="open-slack-first",
+        ))
+        self.assertEqual(
+            json.loads(first.stdout)["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        automation_consent.record_declaration(
+            state, state.get("agent_id") or "", "foreground_window", "Slack",
+            state["updated_at"], session,
+        )
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        repeated = self.run_hook(self.payload(
+            session, "PreToolUse", tool_name="Bash",
+            tool_input={"command": "open -a Slack"},
+            tool_use_id="open-slack-second",
+        ))
+        self.assertEqual(
+            json.loads(repeated.stdout)["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+        candidate = self.run_hook(self.payload(
+            session, "UserPromptSubmit", prompt="前台可见运行，授权打开 Slack",
+        ))
+        source_hash, request_id, _ = self.browser_authorization_context(candidate)
+        self.assert_hook_ok(self.authorize_browser(
+            session, source_hash, request_id, "foreground",
+        ))
+        allowed = self.run_hook(self.payload(
+            session, "PreToolUse", tool_name="Bash",
+            tool_input={"command": "open -a Slack"},
+            tool_use_id="open-slack-authorized",
+        ))
+        self.assert_hook_ok(allowed)
+        self.assertEqual(allowed.stdout, "")
+        after_use = self.run_hook(self.payload(
+            session, "PreToolUse", tool_name="Bash",
+            tool_input={"command": "open -a Slack"},
+            tool_use_id="open-slack-after-use",
+        ))
+        self.assertEqual(
+            json.loads(after_use.stdout)["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+
+    def test_window_mode_selection_retries_the_original_command(self):
+        session = "window-mode-is-not-a-browser-flag"
+        payload = self.payload(
+            session, "PreToolUse", tool_name="Bash",
+            tool_input={"command": "open -a Slack"},
+            tool_use_id="window-mode-selection",
+        )
+        self.run_hook(payload)
+        candidate = self.run_hook(self.payload(
+            session, "UserPromptSubmit", prompt="确认前台打开 Slack",
+        ))
+        source_hash, request_id, context = self.browser_authorization_context(candidate)
+        self.assertNotIn("--interaction-mode", context)
+        self.assertIn("原样重试原命令", context)
+        selected = self.authorize_browser(
+            session, source_hash, request_id, "foreground",
+        )
+        self.assert_hook_ok(selected)
+        self.assertEqual(json.loads(selected.stdout)["decision"], "mode_selected")
+        allowed = self.run_hook(payload)
+        self.assertEqual(allowed.stdout, "")
+        repeated = self.run_hook(payload)
+        self.assertEqual(
+            json.loads(repeated.stdout)["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+
+    def test_browser_mode_retry_cannot_change_quoted_operation_data(self):
+        session = "browser-mode-retry-preserves-arguments"
+        payload = self.payload(
+            session, "PreToolUse", tool_name="Bash",
+            tool_input={"command": 'browse.py scrape "foo bar"'},
+            tool_use_id="browser-original-argument",
+        )
+        self.run_hook(payload)
+        candidate = self.run_hook(self.payload(
+            session, "UserPromptSubmit", prompt="确认前台执行上述命令",
+        ))
+        source_hash, request_id, _ = self.browser_authorization_context(candidate)
+        self.assert_hook_ok(self.authorize_browser(
+            session, source_hash, request_id, "foreground",
+        ))
+        payload["tool_input"]["command"] = (
+            'browse.py --interaction-mode foreground scrape '
+            '"foo --interaction-mode foreground bar"'
+        )
+        changed = self.run_hook(payload)
+        self.assertEqual(
+            json.loads(changed.stdout)["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+
+    def test_code_approval_is_not_swallowed_by_a_browser_request(self):
+        session = "independent-code-and-browser-approvals"
+        first = self.run_hook(self.payload(
+            session, "UserPromptSubmit",
+            prompt="请修复前端、后端和数据库，并补充部署文档",
+        ))
+        self.assert_hook_ok(first)
+        self.run_hook(self.payload(
+            session, "PreToolUse", tool_name="Bash",
+            tool_input={"command": "python browse.py goto http://127.0.0.1:9081/"},
+            tool_use_id="unrelated-browser-request",
+        ))
+        candidate = self.run_hook(self.payload(
+            session, "UserPromptSubmit", prompt="批准修复代码，不打开浏览器",
+        ))
+        source_hash = self.semantic_source_hash(candidate)
+        resolved = self.resolve_intent(session, source_hash, work_profile="strict")
+        self.assert_hook_ok(resolved)
+        state = json.loads((self.codex_home / "agent_relay_tracker" / "sessions" / f"{session}.json").read_text())
+        self.assertEqual(state["task_gate"]["status"], "approved")
+        self.assertIsNotNone(state["browser_interaction_approval"]["pending"])
+        self.assertIsNone(state["browser_interaction_approval"]["approved_request_id"])
+
     def test_browser_interaction_without_mode_asks_before_any_default(self):
         denied = self.run_hook(self.payload(
             "browser-mode-required",
@@ -629,12 +903,26 @@ class HookGateTests(unittest.TestCase):
             prompt="后台无感运行",
         ))
         source_hash, request_id, context = self.browser_authorization_context(candidate)
-        self.assertIn("当前请求没有声明运行模式", context)
-        rejected = self.authorize_browser(
+        self.assertIn("mode_selected", context)
+        self.assertIn("不得再要求用户确认", context)
+        selected = self.authorize_browser(
             "browser-mode-required", source_hash, request_id, "background",
         )
-        self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn("尚未声明 --interaction-mode", rejected.stderr)
+        self.assert_hook_ok(selected)
+        self.assertEqual(json.loads(selected.stdout)["decision"], "mode_selected")
+        payload = self.payload(
+            "browser-mode-required", "PreToolUse", tool_name="exec_command",
+            tool_input={"cmd": "python browse.py --interaction-mode background scrape https://example.com"},
+            tool_use_id="browser-no-mode",
+        )
+        allowed = self.run_hook(payload)
+        self.assert_hook_ok(allowed)
+        self.assertEqual(allowed.stdout, "")
+        repeated = self.run_hook(payload)
+        self.assertEqual(
+            json.loads(repeated.stdout)["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
 
     def test_generic_approval_cannot_invent_a_browser_mode(self):
         session = "browser-approval-needs-mode"

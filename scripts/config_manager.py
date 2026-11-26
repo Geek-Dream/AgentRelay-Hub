@@ -102,7 +102,10 @@ def default_config() -> dict[str, Any]:
             "enabled": False,
         },
         "notifications": {
-            "enabled": True,
+            "enabled": False,
+        },
+        "voice": {
+            "mode": "normal",
         },
         "web_providers": [],
         "local_providers": [],
@@ -378,6 +381,11 @@ def load_config(home: Path | None = None) -> dict[str, Any]:
         normalized for item in merged.get("web_providers", [])
         if (normalized := _normalize_web_provider(item)) is not None
     ]
+    try:
+        from .voice_mode import normalize_config as normalize_voice_config
+    except ImportError:
+        from voice_mode import normalize_config as normalize_voice_config
+    merged["voice"] = normalize_voice_config(merged.get("voice"))
     merged["local_providers"] = _normalize_provider_list(
         merged.get("local_providers"), "local"
     )
@@ -487,10 +495,15 @@ def save_config(value: Mapping[str, Any], home: Path | None = None) -> Path:
     notifications = normalized.get("notifications")
     normalized["notifications"] = {
         "enabled": bool(
-            notifications.get("enabled", True)
-            if isinstance(notifications, Mapping) else notifications is not False
+            notifications.get("enabled", False)
+            if isinstance(notifications, Mapping) else notifications is True
         ),
     }
+    try:
+        from .voice_mode import normalize_config as normalize_voice_config
+    except ImportError:
+        from voice_mode import normalize_config as normalize_voice_config
+    normalized["voice"] = normalize_voice_config(normalized.get("voice"))
     fusion = normalized.get("fusion")
     if isinstance(fusion, dict):
         normalized["fusion"] = {

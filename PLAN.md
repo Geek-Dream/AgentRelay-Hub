@@ -1,3 +1,113 @@
+# PLAN — 自动化申请去重与帮助命令误判（2026-11-26）
+
+> 用户已批准修复文本申请重复问题。只修改 Hook、浏览器交互策略及对应测试；不启动浏览器，不执行页面操作，不改 OpenCode。
+> 同一待处理申请只显示一次；用户明确选择运行方式后才写回一次性授权。URL、路径、选择器、工具或工作流变化仍是新操作。
+
+1. [x] 回归测试先复现：相同 pending 请求和仅补运行模式的重试重复显示申请卡；`browse.py --help` 被误拦。RED 为 6 个失败/子失败。
+2. [x] 修复重复显示及帮助命令分类；新增用例 `5 passed, 3 subtests passed`，`compileall` 与 `git diff --check` exit 0。
+3. [x] 相关完整测试：`128 passed, 23 subtests passed`，90.25s，exit 0。
+4. [x] 最终全量测试：`812 passed, 3 skipped, 96 subtests passed`，173.86s，exit 0；最终 `compileall` 与 `git diff --check` exit 0。页面由用户自行验收，本轮未启动浏览器。
+5. [x] 三宿主已同步，安装器检查正常，Hook、共享策略及三份 skill 逐字一致；OpenCode 未改。提交推送按既有批准继续。
+
+---
+
+# PLAN — Adaptive Voice 独立 skill 与可选安装（2026-11-26）
+
+> 用户已明确批准实现、测试、提交并推送 GitHub，再安装到 codex / claude / pi；opencode 不动。
+> 独立版可单独下载并通过宿主命令、skill 调用或自然语言使用；AgentRelay 内置版本默认勾选、可取消。
+> install 与 Web 可设置同一共享模式。不自动下载或复制其他本机 skill，不覆盖已填写画像。
+
+1. 仓库内置 Adaptive Voice 公开 skill，独立模式无 AgentRelay 依赖；接入版复用 `voice.mode`。
+2. 目录清单默认勾选，取消则不安装；install 向导与 Web 可设置四种模式。
+3. 验证独立 CLI、真实安装、默认/取消选择、profile 保留和共享模式回读。
+4. 真实 Chromium 验证输出风格选择、保存、busy 与回读，并审查目标截图。
+5. 全量测试、diff 审查后提交并推送；同步 codex / claude / pi，opencode 不动。
+
+## 真实执行记录
+
+- [x] RED：基线提交 `0a735c5` 的 Git tree 不含内置 Adaptive Voice、共享脚本及专项测试；新增回归用例首轮 `6 failed, 2 passed`，分别暴露否定句误切、显式源取消后仍安装、`headless` 模式选择、窗口参数及引号内操作参数指纹问题。
+- [x] 独立版使用 skill 本地 JSON；接入版复用共享加密 `voice.mode`；两份脚本已逐字比较，无差异。
+- [x] 默认勾选、取消不安装、显式源不被内置副本覆盖、`.git` 排除、已有画像保留，均有专项测试。
+- [x] install 向导、真实 Web API、自然语言、命令及真实 Hook 子进程的模式保存与回读测试通过。
+- [x] 修复审查发现的七项问题：引号内命令参数、不可读配置防覆盖、否定句、窗口原命令重试、安装选择守卫、布尔显示选项及真实通知配置路径。
+- [x] 相关套件：`182 passed, 28 subtests passed`，exit 0。
+- [x] 全量：`807 passed, 3 skipped, 93 subtests passed`，exit 0；`compileall` 与 `git diff --check` exit 0。
+- [x] 已读取最终真实 diff，完成主 Agent 对抗性复审；Fusion 无可用 Provider，不能声称获得外部独立复核。
+- [ ] 浏览器内真实选择、保存、busy、回读和逐项截图视觉审查未通过：首次因最终回到总览导致 `#voice` 隐藏而超时；第二次生成截图后因隐藏的 `#commander .head` 目标捕获超时。用户已决定自行验收，不再自动重试。
+- [x] 已同步安装到 Claude、Codex、Pi（含本轮重复申请与 `--help` 修复）；安装器检查正常，Hook、共享策略及三份 skill 逐字一致，命令文件存在，临时配置中的共享 CLI 回读正常。OpenCode 未改。
+- [ ] 当前候选尚未提交、推送 GitHub；去重修复与最终全量测试后按既有批准继续。
+
+---
+
+# PLAN — 自动化申请单、桌面提醒与重复审批修复（2026-11-26）
+
+> 用户已明确批准代码修复。批准不包含任何 DuMate 页面、浏览器、系统鼠标或键盘操作。
+> 不执行用户粘贴的浏览器命令；测试只构造 Hook 输入，使用临时 `CODEX_HOME`。
+> 本轮不提交/推送，不同步 opencode；codex / claude / pi 只在验证后按既有批准同步。
+
+1. 停止 Hook 自动发送系统桌面通知，保留当前对话内申请与审批门禁。
+2. 申请单明确操作内容、前台/后台含义、鼠标键盘限制、一次性授权及拒绝方式。
+3. 原请求缺少运行模式时，用户的选择即本次一次性授权；重试仅补模式不二次审批。
+4. URL、选择器、工具、脚本、工作流及 hash 改变仍重新审批；批准后第二次执行必须拒绝。
+5. 代码审批与浏览器授权分离，浏览器待办不能吞掉代码审批。
+6. 可选系统桌面提醒默认关闭；Web 与 `/agent-approval notify` 明确其不影响审批。
+7. 验证：真实 Hook 子进程、临时配置、完整门禁测试、全量 pytest、Chromium 页面检查及截图审查。
+
+## 真实执行记录
+
+- [x] RED：`test_browser_interaction_requires_mode_then_one_shot_authorization` 第二次执行 stdout 为空，未拒绝。
+- [x] 根因：已带模式批准分支引用未定义的 `mode_matches`，`NameError` 导致 Hook 子进程异常并 fail-open，批准未消费。
+- [x] 修复后聚焦结果：`4 passed, 87 deselected`，exit 0。
+- [x] 完整 Hook/自动化首轮：`90 passed` 后发现直接系统鼠标的旧前台匹配契约回归失败；只为直接指针保留“无模式原请求 + 明确前台”一次匹配。
+- [x] 当前审批/提醒/配置专项：`109 passed, 53 subtests passed`，exit 0（之后新增 URL/工具漂移断言，另跑 `4 passed, 81 deselected`）。
+- [x] 窗口操作 RED：手工预置会话级声明后第二次 `open -a Slack` 仍被放行；已限制复用仅为纯后台进程，窗口仍逐次申请。
+- [x] 窗口前台一次性授权及重复执行拒绝：`3 passed, 75 deselected`，exit 0。
+- [x] 一轮全量 pytest：`795 passed, 3 skipped, 93 subtests passed`，228.74s，exit 0；此后又修改窗口授权，不能代替最终全量。
+- [x] Chromium 基础检查：`status=passed`、无 errors，桌面/移动、双主题与控制台检查通过；这本身不等于视觉审查。
+- [ ] Commander 目标截图：自定义多交互探针被 Hook 拒绝，未生成目标截图，未声称视觉通过；基础截图不含新提醒区块。
+- [x] 最终全量 pytest：`796 passed, 3 skipped, 93 subtests passed`，196.88s，exit 0。
+- [x] 最终 `compileall -q hooks scripts tests` 与 `git diff --check`：exit 0。
+- [ ] 验证后同步 codex / claude / pi；opencode 不动。
+
+---
+
+# PLAN — Adaptive Voice 四入口联动（2026-11-26）
+
+> 用户已批准重写，并明确批准接通 install Web、Hook、自然语言、`/adaptive-voice` 和 skill 调用。
+> 本轮不提交/推送，不同步 opencode；codex / claude / pi 的安装同步在验证后按既有批准范围执行。
+
+1. 共享 `voice.mode` 配置：默认 normal，CLI / Web / Hook 保存后回读。
+   - 验证：临时 `CODEX_HOME` 加密 round-trip、CLI 与真实 Hook 子进程。
+2. 保守解析自然语言：明确切换才修改配置，写作任务和问句不误切。
+   - 验证：正例 + “写一个专业术语解释文档”等负例。
+3. Hook 在普通任务分类前消费切换命令，后续 prompt 注入当前风格；模式不等于任务批准或画像同意。
+   - 验证：真实 Hook 设置并读取 eli5/expert，普通模式不注入额外规则。
+4. install Web 新增“输出风格”，使用现有 `/api/settings`，下拉复用现有组件。
+   - 验证：真实 Chromium 选择、保存、回读、双主题、移动布局、0 console 错误。
+5. 独立 `/Users/wl/开发/agent/adaptive-voice` 重写为四入口使用说明；显式源路径安装，不复制 `.git`，不覆盖已填写画像。
+   - 验证：隔离安装源 + 临时宿主检查 skill、references、命令文件和共享脚本。
+6. 全量 pytest、compileall、diff check；保留真实失败记录，不混用之前提交的证据。
+
+## 当前进度
+
+- [x] 共享模块、配置、Hook、Web 第一轮接线
+- [x] 专项 RED → GREEN：12 项通过（2026-11-26）
+- [x] 独立 skill 重写与安装联动：真实源隔离安装、`.git` 排除、画像保留已验证
+- [x] Chromium 导航、双主题和移动布局检查通过；真实 HTTP `/api/settings` 保存与 `/api/config` 回读通过
+- [x] 已批准宿主同步：codex / claude / pi 安装器检查全部正常；opencode 未改
+- [x] 真实安装版 Hook 使用临时配置切换 expert，并通过安装版 CLI 回读
+- [x] 最终全量 pytest：792 passed，3 skipped，93 subtests passed，178.50s，exit 0
+- [ ] 浏览器内真实选择 eli5、点击保存、busy 状态尚未验证；不能由 HTTP 测试代替
+
+### 本轮收尾修正
+
+- 源码 Hook 优先于旧安装副本；真实运行时 `hooks/` 可找到相邻 `skills/agent-relay/scripts`。
+- Web 与共享 `set_mode()` 对非法模式明确报错，不再静默回退 normal。
+- 非法 `/adaptive-voice unknown` 返回“模式未修改”，不落入普通任务处理。
+- `compileall` 与 `git diff --check` exit 0（最终全量启动前）。
+
+---
+
 # PLAN — 配置页体验修复 + 自动化预告与授权 + 应用开关许可 + 通知开关（2026-11-25）
 
 > 状态：**用户已批准全部范围**（`resolve-intent --decision approve --work-profile strict`，返回

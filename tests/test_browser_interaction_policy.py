@@ -153,6 +153,25 @@ class BrowserInteractionPolicyTests(unittest.TestCase):
             {"url": "https://api.example.com/v1/chat", "method": "POST"},
         ))
 
+    def test_browse_help_does_not_request_browser_interaction(self):
+        for command in (
+            "python /opt/skills/browser-automatic/scripts/browse.py --help",
+            "python /opt/skills/browser-automatic/scripts/browse.py -h",
+            "python /opt/skills/browser-automatic/scripts/browse.py scrape --help",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(self.policy.interaction_request(
+                    "exec_command", {"cmd": command},
+                ))
+
+    def test_browse_help_mentioned_as_data_still_requires_interaction(self):
+        request = self.policy.interaction_request(
+            "exec_command",
+            {"cmd": 'python browse.py scrape "https://example.com/--help"'},
+        )
+        self.assertIsNotNone(request)
+        self.assertEqual(request["kind"], "browser_automation")
+
     def test_browse_runner_rejects_multi_interaction_workflow(self):
         with tempfile.TemporaryDirectory() as temporary:
             steps = Path(temporary) / "steps.json"

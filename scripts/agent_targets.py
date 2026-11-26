@@ -492,10 +492,45 @@ def install_skill_to(
         )
 
 
+def install_adaptive_voice_to(target: dict, source: Path) -> dict[str, int]:
+    """Install only the public skill; never overwrite saved personal profiles."""
+    source = Path(source)
+    destination = Path(target["skill_dir"]).with_name("adaptive-voice")
+    _regular_tree_files(source, "Adaptive Voice 源目录")
+    files = [
+        path for path in source.rglob("*")
+        if path.is_file()
+        and path.relative_to(source).parts[0] not in {"profiles", ".git"}
+    ]
+    with tempfile.TemporaryDirectory(prefix="agentrelay-adaptive-voice-") as directory:
+        staging = Path(directory) / "adaptive-voice"
+        for path in files:
+            target_path = staging / path.relative_to(source)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, target_path)
+        if not (destination / "profiles" / "default.md").is_file():
+            default_profile = staging / "profiles" / "default.md"
+            default_profile.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source / "profiles" / "default.md", default_profile)
+        agents = staging / "profiles" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        example = source / "profiles" / "agents" / "codex.example.md"
+        if example.is_file():
+            shutil.copyfile(example, agents / example.name)
+        (agents / ".gitkeep").touch()
+        result = install_skill_tree_to(staging, destination)
+        command_dir = target.get("command_dir")
+        command_source = destination / "commands" / "adaptive-voice.md"
+        if command_dir and command_source.is_file():
+            install_managed_file(command_source, Path(command_dir) / command_source.name)
+        return result
+
+
 SLASH_COMMANDS = {
     "agent-approval": "打开 AgentRelay 权限设置。输入 /agent-approval 查看；输入 /agent-approval 1、2、3 选择 strict、standard、relaxed。输入 /agent-approval apps 查看已允许关闭的应用，输入 /agent-approval forget <应用名> 撤销。",
     "agent-audit": "只查看当前交付审计状态，不代表审计通过，也不要开始修改。",
     "agent-fusion": "检查 AgentRelay Fusion 状态，按当前任务需要调用 agent-fusion Skill；不可用就本地继续，不要等待。",
+    "adaptive-voice": "管理 Adaptive Voice 输出风格。/adaptive-voice 查看；/adaptive-voice normal|eli5|expert|adaptive 切换；/adaptive-voice clear 恢复正常；/adaptive-voice learn 仅在明确同意后保存个人画像。通过已安装的 adaptive-voice skill 或 agent-relay/scripts/voice_mode.py 操作，不要臆造新的风格配置。",
 }
 
 

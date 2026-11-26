@@ -391,6 +391,30 @@ def _invokes_browse_script(command: str) -> bool:
     return False
 
 
+def _help_only_browse_invocation(command: str) -> bool:
+    """Argparse help exits before Playwright starts; quoted help text is data."""
+    found = False
+    cleaned = _strip_comments(_strip_heredocs(command))
+    for segment in _segments(cleaned):
+        name, argv, _ = _leading_command(segment)
+        if name == "browse.py":
+            arguments = argv
+        elif name == "python":
+            browse_index = next((
+                index for index, token in enumerate(argv)
+                if Path(str(token).strip("\"'")).name == "browse.py"
+            ), None)
+            if browse_index is None:
+                continue
+            arguments = argv[browse_index + 1:]
+        else:
+            continue
+        found = True
+        if not any(token in {"-h", "--help"} for token in arguments):
+            return False
+    return found
+
+
 def _background_process(command: str) -> bool:
     """A detached process that keeps running after the tool call returns."""
     cleaned = _strip_comments(_strip_heredocs(command))
@@ -574,11 +598,66 @@ def _normalized_input(tool_input: Any) -> str:
         return str(tool_input or "")
 
 
+def _mode_only_retry_input(tool_name: Any, tool_input: Any) -> Any:
+    """Remove only display-mode syntax; preserve the operation byte for byte."""
+    normalized_name = _tool_name(tool_name)
+    if any(marker in normalized_name for marker in DIRECT_TOOL_MARKERS):
+        return tool_input
+    if isinstance(tool_input, dict):
+        normalized = dict(tool_input)
+        for key in ("interaction_mode", "execution_mode", "browser_mode", "display_mode"):
+            if _mode_from_value(normalized.get(key)):
+                normalized[key] = ""
+        for key in ("foreground", "headless"):
+            if isinstance(normalized.get(key), bool):
+                normalized.pop(key)
+        for key in (
+            "command", "cmd", "script", "shell_command", "shellCommand",
+        ):
+            value = normalized.get(key)
+            if isinstance(value, str) and value.strip():
+                normalized[key] = _mode_only_retry_command(value)
+        argv = normalized.get("argv")
+        if isinstance(argv, (list, tuple)):
+            normalized["argv"] = [
+                _mode_only_retry_command(str(item)) for item in argv
+            ]
+        return normalized
+    return _mode_only_retry_command(_command_text(tool_input))
+
+
+def _mode_only_retry_command(command: str) -> str:
+    """Strip actual CLI flags, never matching text inside quoted arguments."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return command
+    stripped = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--interaction-mode" and index + 1 < len(tokens):
+            if tokens[index + 1].lower() in MODES:
+                index += 2
+                continue
+        if token.startswith("--interaction-mode="):
+            if token.split("=", 1)[1].lower() in MODES:
+                index += 1
+                continue
+        match = re.fullmatch(
+            r"(AGENT_RELAY_WEB_INTERACTION_MODE\s*=\s*)(foreground|background)",
+            token, flags=re.I,
+        )
+        stripped.append(match.group(1) if match else token)
+        index += 1
+    return " ".join(shlex.quote(token) for token in stripped)
+
+
 def interaction_request(tool_name: Any, tool_input: Any) -> dict[str, Any] | None:
     """Describe one automation operation that needs consent and prior notice."""
     normalized_tool = _tool_name(tool_name)
     command = _command_text(tool_input)
-    if _is_patch_payload(command):
+    if _is_patch_payload(command) or _help_only_browse_invocation(command):
         return None
     action = _action_value(tool_input)
     direct = any(marker in normalized_tool for marker in DIRECT_TOOL_MARKERS)
@@ -628,10 +707,19 @@ def interaction_request(tool_name: Any, tool_input: Any) -> dict[str, Any] | Non
     request_id = hashlib.sha256(
         fingerprint_material.encode("utf-8")
     ).hexdigest()[:24]
+    retry_fingerprint_material = "\0".join((
+        normalized_tool,
+        _normalized_input(_mode_only_retry_input(tool_name, tool_input)),
+        str(workflow.get("workflow_path") or ""),
+        str(workflow.get("workflow_sha256") or ""),
+    ))
     request = {
         "kind": kind,
         "mode": interaction_mode(tool_name, tool_input),
         "request_id": request_id,
+        "retry_request_id": hashlib.sha256(
+            retry_fingerprint_material.encode("utf-8")
+        ).hexdigest()[:24],
         "background_allowed": kind != "direct_pointer",
         "interaction_count": interaction_count,
         "actions": described_actions,

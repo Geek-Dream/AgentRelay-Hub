@@ -52,15 +52,16 @@ class AutomationSwitchTests(unittest.TestCase):
     def test_notification_switch_exists_on_the_web_page(self):
         page = build_config_page(sample_config())
         self.assertIn('id="notifications-enabled"', page)
-        self.assertIn("自动化执行前先通知我", page)
+        self.assertIn("可选的系统桌面提醒", page)
+        self.assertIn("关闭提醒不会关闭审批", page)
         self.assertIn("/agent-approval notify", page)
 
-    def test_switch_defaults_to_enabled_when_unspecified(self):
+    def test_switch_defaults_to_disabled_when_unspecified(self):
         config = sample_config()
         config.pop("notifications")
         page = build_config_page(config)
         self.assertIn('id="notifications-enabled"', page)
-        self.assertIn("const notificationsOn=(state.notifications||{}).enabled!==false;", page)
+        self.assertIn("const notificationsOn=(state.notifications||{}).enabled===true;", page)
 
 
 class BusyStateTests(unittest.TestCase):

@@ -410,6 +410,7 @@ class SkillCatalogTests(unittest.TestCase):
                 "302-frameworks-spring-boot-rest",
                 "303-frameworks-spring-boot-validation",
                 "code-review-excellence",
+                "adaptive-voice",
             ],
         )
         self.assertEqual(merged["installed_count"], 1)
@@ -511,6 +512,7 @@ class SkillCatalogTests(unittest.TestCase):
                 "302-frameworks-spring-boot-rest",
                 "303-frameworks-spring-boot-validation",
                 "312-frameworks-spring-data-jdbc",
+                "adaptive-voice",
                 "browser-automatic",
                 "code-review-excellence",
             ],
@@ -558,6 +560,27 @@ class SkillCatalogTests(unittest.TestCase):
             metadata["sha256"],
             "0f102ba19f13b4deb19f2248a5014952d2af1521129a5a0e4f3d805f74632b75",
         )
+
+    def test_adaptive_voice_is_bundled_default_and_can_be_deselected(self):
+        merged = catalog_module.catalog_with_installed_skills(PROJECT_ROOT, {})
+        self.assertIn("adaptive-voice", merged["defaults"])
+        entry = catalog_module.agentrelay_bundled_skill_entry(
+            PROJECT_ROOT, "adaptive-voice",
+        )
+        source = catalog_module.skill_source_dir(
+            PROJECT_ROOT, {"skills": [entry]}, "adaptive-voice",
+        )
+        self.assertTrue((source / "SKILL.md").is_file())
+        self.assertTrue((source / "scripts" / "voice_mode.py").is_file())
+        selected = catalog_module.selection_from_cli(
+            merged, "adaptive-voice",
+        )
+        self.assertEqual(selected, ["adaptive-voice"])
+        self.assertNotIn(
+            "adaptive-voice",
+            catalog_module.selection_from_cli(merged, "vue-best-practices"),
+        )
+        self.assertEqual(catalog_module.selection_from_cli(merged, no_skills=True), [])
 
     def test_agentrelay_browser_bundle_is_mit_and_self_contained(self):
         entry = catalog_module.agentrelay_bundled_skill_entry(
@@ -1123,10 +1146,12 @@ class InstallerIntegrationTests(unittest.TestCase):
                 "301-frameworks-spring-boot-core",
                 "302-frameworks-spring-boot-rest",
                 "303-frameworks-spring-boot-validation",
+                "adaptive-voice",
                 "browser-automatic",
                 "code-review-excellence",
             ],
         )
+        self.assertIn("默认保留；不需要输出风格切换时可取消", rendered)
 
     def test_apply_agent_targets_records_selected_vue_skill_check(self):
         installer = load_module(

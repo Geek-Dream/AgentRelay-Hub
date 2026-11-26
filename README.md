@@ -51,6 +51,7 @@ AgentRelay 的目标不是把每个小任务都做得很重。简单问答和只
 | `Commander` | 临时项目组，最多启动 5 个隔离子 Agent 分工完成复杂任务 |
 | `消息总线` | 让 Codex、Claude、Pi、OpenCode 等已注册会话直接互发短消息，不共享完整上下文 |
 | `AgentImage` | 当前主模型不能识图时，把图片交给支持视觉的模型描述 |
+| `AdaptiveVoice` | 独立切换正常、大白话、专业和个性化表达，可选接入 AgentRelay 共享设置 |
 | `确认卡` | 真正修改前给用户看的“准备做什么、改哪里、不能碰什么、怎么验收” |
 | `工作档` | Agent 为当前写任务选择的流程深度，从轻量到完整审查 |
 
@@ -80,8 +81,8 @@ Commander 适合跨模块、需要并行分工的任务，不是每个小修改�
 
 ### 内置 Skill
 
-内置包已精简为“核心规则 + 按需参考”，不要求一次加载全部长文。默认提供 Browser、文档处理、
-Vue、Java 面向对象、Java 类型设计、Spring Boot Core/REST/Validation 和通用代码审查；Spring
+内置包已精简为“核心规则 + 按需参考”，不要求一次加载全部长文。默认提供 Browser、Adaptive Voice、
+文档处理、Vue、Java 面向对象、Java 类型设计、Spring Boot Core/REST/Validation 和通用代码审查；Spring
 Data JDBC 也随包提供但默认不勾选，避免把特定持久化技术强加给所有项目。Skill 来自上游固定
 commit 并保留许可证，完整性由安装器校验。
 
@@ -165,7 +166,7 @@ Skill（例如 `mysql`）加入清单。预设默认清单是 `browser-automatic
 `pdf`、`pptx`、`xlsx`、`vue-best-practices`、`web-artifacts-builder`，以及 Java/Spring
 质量技能 `121-java-object-oriented-design`、`122-java-type-design`、
 `301-frameworks-spring-boot-core`、`302-frameworks-spring-boot-rest`、
-`303-frameworks-spring-boot-validation` 和通用 `code-review-excellence`；这些项目
+`303-frameworks-spring-boot-validation`、通用 `code-review-excellence` 和 `adaptive-voice`；这些项目
 默认勾选，用户可以在确认前手动取消。`312-frameworks-spring-data-jdbc` 也随包提供，
 但默认不勾选，避免把特定持久化技术栈强加给所有项目。其他许可证明确且允许复制的
 本机 Skill 会显示，但默认不勾选。AgentRelay 不读取模型的隐式调用记录，也不会统计你的使用行为。
@@ -177,6 +178,12 @@ Skill（例如 `mysql`）加入清单。预设默认清单是 `browser-automatic
 `browser-automatic` 是 AgentRelay 自己维护的 MIT Playwright Skill，不读取、也不复制
 本机已有的同名目录。安装器会从仓库内的可信包为每个选中的 Agent 分别创建独立副本，
 因此 Codex、Claude Code 和 Pi 可以同时安装，彼此不共享文件。
+
+`adaptive-voice` 是 AgentRelay 自己维护的 MIT 输出风格 Skill，默认勾选，可以取消。它自带独立
+`scripts/voice_mode.py` 和 `commands/adaptive-voice.md`，单独下载后也能用 `/adaptive-voice`、
+`@adaptive-voice`、`$adaptive-voice` 或直接告诉 Agent 切换。独立版只使用 skill 本地 JSON；随
+AgentRelay 安装后，install 向导、Web、自然语言和命令共用 `voice.mode`。四种模式为 normal、eli5、
+expert、adaptive；画像仍需单独明确同意，升级不会覆盖已填写画像。
 
 Java/Spring 技能来自 [`jabrena/plinth`](https://github.com/jabrena/plinth)，固定提交
 `ef907871d4bd09825bba56f6585ed227a9179727`，保留 Apache-2.0 许可证；通用代码审查

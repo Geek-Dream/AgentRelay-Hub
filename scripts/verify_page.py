@@ -92,7 +92,7 @@ def _check_page(page, output: Path, target_selector: str = "", expected: dict[st
     is_config = bool(page.locator("#overview.view.active").count())
     if is_config:
         page.wait_for_selector("#overview.view.active")
-        for tab in ("commander", "web", "local", "api", "security", "overview"):
+        for tab in ("commander", "web", "local", "api", "security", "voice", "overview"):
             page.locator(f'[data-tab="{tab}"]').click()
             page.wait_for_selector(f"#{tab}.view.active")
         page.locator('[data-theme-choice="light"]').click()

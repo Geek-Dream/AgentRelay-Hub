@@ -36,6 +36,7 @@ PREFERRED_DEFAULT_SKILL_IDS = (
     "302-frameworks-spring-boot-rest",
     "303-frameworks-spring-boot-validation",
     "code-review-excellence",
+    "adaptive-voice",
 )
 INSTALLED_SOURCE = "installed"
 BUNDLED_SOURCE = "bundled"
@@ -133,6 +134,14 @@ AGENTRELAY_BUNDLED_SKILLS = {
         "files": 3,
         "bytes": 18_436,
         "sha256": "eee092ddff1028133276b38650dab0c1b32be87cebd10aa4b738d372d903d77b",
+    },
+    "adaptive-voice": {
+        "name": "Adaptive Voice",
+        "description": "独立切换正常、大白话、专业和个性化输出；可选接入 AgentRelay 共享设置。",
+        "path": "adaptive-voice",
+        "license": "LICENSE",
+        "license_spdx": "MIT",
+        "source_label": "AgentRelay 内置",
     },
 }
 AGENTRELAY_BUNDLED_SKILL_IDS = frozenset(AGENTRELAY_BUNDLED_SKILLS)

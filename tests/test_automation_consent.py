@@ -8,16 +8,31 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts import automation_consent  # noqa: E402
+from scripts import config_manager  # noqa: E402
 
 
 class AutomationConsentTests(unittest.TestCase):
-    def test_notifications_default_to_enabled(self):
-        config = {}
-        self.assertTrue(automation_consent.notifications_enabled(config))
+    def test_system_notifications_are_opt_in_not_the_approval_channel(self):
+        self.assertFalse(automation_consent.notifications_enabled({}))
+        self.assertTrue(automation_consent.notifications_enabled(
+            {"notifications": {"enabled": True}},
+        ))
 
     def test_explicit_disable_is_respected(self):
         config = {"notifications": {"enabled": False}}
         self.assertFalse(automation_consent.notifications_enabled(config))
+
+    def test_config_defaults_disable_optional_system_popups(self):
+        config = config_manager.default_config()
+        self.assertFalse(automation_consent.notifications_enabled(config))
+        cipher = mock.Mock()
+        cipher.encrypt.side_effect = lambda payload: payload
+        config.pop("notifications")
+        with mock.patch.object(config_manager, "_fernet", return_value=cipher):
+            with mock.patch.object(config_manager, "_secure_write") as write:
+                config_manager.save_config(config)
+        saved = write.call_args.args[1].decode("utf-8")
+        self.assertIn('"enabled": false', saved)
 
     def test_announcement_always_states_what_will_happen(self):
         request = {
@@ -168,6 +183,50 @@ class AutomationConsentTests(unittest.TestCase):
             state, "codex", "foreground_window", "Slack",
             "2026-11-25T10:00:05", session="session-1",
         ))
+    def test_mode_retry_normalizes_only_browser_display_options(self):
+        from scripts import browser_interaction_policy as policy
+
+        original = {"command": 'browse.py scrape https://example.com'}
+        changed = {
+            "command": 'browse.py --interaction-mode foreground scrape '
+                       '"foo --interaction-mode foreground bar"',
+        }
+        self.assertNotEqual(
+            policy.interaction_request("Bash", original)["retry_request_id"],
+            policy.interaction_request("Bash", changed)["retry_request_id"],
+        )
+        retry = {
+            "command": "browse.py --interaction-mode foreground scrape https://example.com",
+        }
+        self.assertEqual(
+            policy.interaction_request("Bash", original)["retry_request_id"],
+            policy.interaction_request("Bash", retry)["retry_request_id"],
+        )
+
+    def test_mode_retry_supports_headless_tool_options(self):
+        from scripts import browser_interaction_policy as policy
+
+        original = {"action": "navigate", "url": "https://example.com"}
+        retry = {**original, "headless": True}
+        self.assertEqual(
+            policy.interaction_request("playwright_browser", original)["retry_request_id"],
+            policy.interaction_request("playwright_browser", retry)["retry_request_id"],
+        )
+
+    def test_notification_message_names_the_real_encrypted_config(self):
+        import tempfile
+        from scripts import approval_policy
+
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with mock.patch.object(
+                approval_policy, "_notification_enabled", return_value=False,
+            ), mock.patch.dict(sys.modules, {"config_manager": config_manager}):
+                result = approval_policy.command_request(
+                    "/agent-approval notify off", home,
+                )
+            self.assertIn(str(config_manager.config_path(home)), result["message"])
+            self.assertNotIn("notifications.json", result["message"])
 
 
 if __name__ == "__main__":

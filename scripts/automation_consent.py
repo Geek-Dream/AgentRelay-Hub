@@ -30,15 +30,15 @@ ANNOUNCED = "announced"
 
 
 def notifications_enabled(config: Any) -> bool:
-    """桌面通知默认开启；只有显式写 false 才算关闭。"""
+    """Optional system popups are off by default and never replace approval."""
     if not isinstance(config, dict):
-        return True
+        return False
     section = config.get("notifications")
     if isinstance(section, dict):
-        return bool(section.get("enabled", True))
+        return section.get("enabled") is True
     if isinstance(section, bool):
         return section
-    return True
+    return False
 
 
 def announcement(request: Any) -> str:

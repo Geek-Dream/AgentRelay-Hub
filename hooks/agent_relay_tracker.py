@@ -3281,7 +3281,11 @@ def render_tool_gate_card(tool_name, tool_input, reason):
     danger = _tool_gate_is_danger(reason)
     solution_key = build_solution_key(tool_name, tool_input) or tool_name
     targets = _tool_targets(tool_name, tool_input)
-    title = "「危险操作确认」" if danger else "「写入确认」"
+    title = (
+        "「自动化申请」"
+        if "[AgentRelay 浏览器交互门禁]" in reason
+        else "「危险操作确认」" if danger else "「写入确认」"
+    )
 
     lines = _card_frame(title)
     action_fields = [("任务", _tool_card_reason(reason)),
@@ -3289,12 +3293,23 @@ def render_tool_gate_card(tool_name, tool_input, reason):
                      ("工具", normalize_text(tool_name) or "unknown"),
                      ("操作内容", targets or ["未提供具体路径或命令"]),
                      ("当前状态", "已阻断 · 等待批准")]
-    action_fields.extend([
-        ("主要风险", [_tool_card_reason(reason)]),
-        ("批准边界", "仅限完全相同的工具输入执行一次；命令、路径、参数或影响范围变化必须重新确认。"),
-        ("验证", "检查实际 diff 与目标外副作用，再运行相关测试；目标外变化必须报告。"),
-        ("回滚", "修改类操作使用修改前备份或版本控制恢复；删除类操作可能无法恢复。"),
-    ])
+    if "[AgentRelay 浏览器交互门禁]" in reason:
+        action_fields.extend([
+            ("运行方式", "后台：无窗口浏览器、接口或脚本，不抢焦点；前台：可见页面或窗口。"),
+            ("鼠标键盘", "直接系统鼠标/键盘只能前台，执行期间请不要操作鼠标键盘；无头浏览器不占用系统鼠标。"),
+            ("通知方式", "只在当前对话提出申请，不会发送 macOS、Windows 或 Linux 系统通知。"),
+            ("批准边界", "一次选择只授权当前操作执行一次；仅补齐本次选择的运行模式不算新操作，网址、选择器、脚本或工作流变化必须重新审批。"),
+            ("拒绝方式", "回复“取消”或“拒绝”，本次自动化不会执行。"),
+            ("验证", "检查实际结果与目标外影响；未验证的事项必须明确报告。"),
+            ("回滚", "停止本次自动化；已产生的文件、页面或程序变更按实际内容恢复。"),
+        ])
+    else:
+        action_fields.extend([
+            ("主要风险", [_tool_card_reason(reason)]),
+            ("批准边界", "仅限完全相同的工具输入执行一次；命令、路径、参数或影响范围变化必须重新确认。"),
+            ("验证", "检查实际 diff 与目标外副作用，再运行相关测试；目标外变化必须报告。"),
+            ("回滚", "修改类操作使用修改前备份或版本控制恢复；删除类操作可能无法恢复。"),
+        ])
     _render_card_fields(lines, action_fields)
     lines.extend(["│", "│  ◇ 等待确认 · 当前操作已阻断"])
     lines.extend(_hook_card_choices())
@@ -3524,22 +3539,45 @@ def _browser_interaction_notice(
         "--cancel",
     ])
     direct = pending.get("kind") == "direct_pointer"
+    browser_mode_retry = not pending.get("mode") and pending.get("kind") not in {
+        "direct_pointer", "foreground_window", "background_window",
+        "background_process",
+    }
     selected_text = {
         "foreground": "前台可见运行",
         "background": "后台无感运行",
         "": "未明确选择",
     }[selected_mode]
     command_text = ""
-    if not direct and not pending.get("mode"):
-        command_text = (
-            "当前请求没有声明运行模式，不能直接授权。用户选定后，主 Agent 必须"
-            "先用对应的 --interaction-mode <background|foreground> 重新发起完全相同的"
-            "浏览器工作，再为新的请求指纹取得一次性授权。\n"
-        )
+    if browser_mode_retry:
+        if selected_mode == "foreground":
+            command_text = (
+                "用户已明确选择前台，运行：\n"
+                f"{foreground_command}\n"
+                "返回 mode_selected 后，只在原命令中补 --interaction-mode foreground "
+                "并重试同一次操作；不得再要求用户确认。\n"
+            )
+        elif selected_mode == "background":
+            command_text = (
+                "用户已明确选择后台，运行：\n"
+                f"{background_command}\n"
+                "返回 mode_selected 后，只在原命令中补 --interaction-mode background "
+                "并重试同一次操作；不得再要求用户确认。\n"
+            )
+        else:
+            command_text = (
+                "当前请求没有声明运行模式。先询问“后台无感运行”还是"
+                "“前台可见运行”，不得自行选择，也不得运行授权命令。\n"
+            )
     elif selected_mode == "foreground":
         command_text = (
             "用户已明确选择前台，运行：\n"
             f"{foreground_command}\n"
+            + (
+                "返回 mode_selected 后，原样重试原命令；不要添加浏览器参数，"
+                "不得再要求用户确认。\n"
+                if not direct and not pending.get("mode") else ""
+            )
         )
     elif selected_mode == "background" and not direct:
         command_text = (
@@ -3588,7 +3626,11 @@ def semantic_approval_notice(session_id, state, prompt):
         "created_at": iso_now(),
     }
     pending = pending_browser_interaction(state)
-    if pending is not None:
+    if pending is not None and not any((
+        scope.get("task_request_sha256"),
+        scope.get("contract_sha256"),
+        scope.get("tool_keys"),
+    )):
         return _browser_interaction_notice(
             session_id,
             state,
@@ -3900,7 +3942,22 @@ def authorize_browser_interaction(
             or candidate.get("source_sha256") != source_sha256
             or candidate.get("scope") != scope
         ):
-            raise ValueError("当前消息没有有效的浏览器交互授权候选")
+            code_scope = {**scope, "browser_interaction_request_id": None}
+            has_code_approval = any((
+                scope.get("task_request_sha256"),
+                scope.get("contract_sha256"),
+                scope.get("tool_keys"),
+            ))
+            if (
+                scope.get("browser_interaction_request_id")
+                and has_code_approval
+                and isinstance(candidate, dict)
+                and candidate.get("source_sha256") == source_sha256
+                and candidate.get("scope") == code_scope
+            ):
+                candidate = {**candidate, "scope": scope}
+            else:
+                raise ValueError("当前消息没有有效的浏览器交互授权候选")
         pending = pending_browser_interaction(state)
         if pending is None or pending.get("request_id") != request_id:
             raise ValueError("浏览器交互请求已变化，不能使用旧授权")
@@ -3931,6 +3988,15 @@ def authorize_browser_interaction(
                 raise ValueError(
                     "用户必须明确选择后台无感运行或前台可见运行"
                 )
+            request_mode = pending.get("mode")
+            if pending.get("kind") == "foreground_window":
+                request_mode = "foreground"
+            elif pending.get("kind") in {"background_window", "background_process"}:
+                request_mode = "background"
+            if request_mode and request_mode != mode:
+                raise ValueError(
+                    f"本次操作只能按申请单中的 {request_mode} 方式运行，不能改成 {mode}"
+                )
             if selected_mode != mode:
                 raise ValueError(
                     f"用户明确选择的是 {selected_mode}，不能改成 {mode}"
@@ -3943,10 +4009,23 @@ def authorize_browser_interaction(
                 pending.get("kind") != "direct_pointer"
                 and not pending.get("mode")
             ):
-                raise ValueError(
-                    "当前浏览器请求尚未声明 --interaction-mode；请用户选择后"
-                    "用对应模式重新发起，再为新请求取得一次性授权"
-                )
+                # Keep the original mode-less request as the identity being
+                # matched; the selected mode lives in approved_mode. Replacing
+                # pending.mode here would make the retry look like a new request.
+                browser["pending"] = pending
+                browser["approved_request_id"] = request_id
+                browser["approved_mode"] = mode
+                browser["approved_source_sha256"] = source_sha256
+                browser["approved_at"] = now_ts()
+                state.pop("semantic_approval_candidate", None)
+                write_state(state, session_id=session_id)
+                return {
+                    "decision": "mode_selected",
+                    "request_id": request_id,
+                    "mode": mode,
+                    "reason": reason[:500],
+                    "resolved_at": iso_now(),
+                }
             browser["pending"] = None
             browser["approved_request_id"] = request_id
             browser["approved_mode"] = mode
@@ -4013,9 +4092,14 @@ def resolve_pending_intent(
             raise ValueError("当前消息没有有效的语义审批候选")
 
         scope = pending_approval_scope(state)
+        pending_keys = list(scope.get("tool_keys") or [])
+        task_pending = bool(scope.get("task_request_sha256"))
+        contract_pending = bool(scope.get("contract_sha256"))
         if not has_pending_approval(scope):
             raise ValueError("当前没有待审批任务、约束或危险命令")
-        if scope.get("browser_interaction_request_id"):
+        if scope.get("browser_interaction_request_id") and not (
+            task_pending or contract_pending or pending_keys
+        ):
             raise ValueError(
                 "当前待审批项是浏览器/鼠标交互，请使用 "
                 "authorize-browser-interaction，不能使用 resolve-intent"
@@ -4031,9 +4115,6 @@ def resolve_pending_intent(
         if not isinstance(approvals, dict):
             approvals = {}
             state["tool_approval"] = approvals
-        pending_keys = list(scope.get("tool_keys") or [])
-        task_pending = bool(scope.get("task_request_sha256"))
-        contract_pending = bool(scope.get("contract_sha256"))
 
         if decision == "approve":
             approval_snapshot = _shared_script_module("approval_policy").snapshot(CODEX_DIR)
@@ -4179,6 +4260,56 @@ def approval_settings_request(session_id, prompt):
     return read_state(session_id=session_id)
 
 
+def voice_settings_request(state, prompt):
+    """Handle an explicit style switch before general task/question handling.
+
+    A saved mode never approves a task and never constitutes consent to store a
+    personal profile. Normal-mode switches consume their command and return an
+    empty context so no stale instruction remains in the next response.
+    """
+    try:
+        module = _shared_script_module("voice_mode")
+        request = module.parse_command(prompt)
+        if request is None:
+            return None
+        result = module.apply_command(request, home=CODEX_DIR)
+        state["voice"] = {"mode": result["mode"]}
+        write_state(state, session_id=state.get("session_id"))
+        message = result["message"] + "\n已读取回保存值；这不是任务批准，也没有自动保存个人画像。"
+        emit_hook_context(
+            "UserPromptSubmit",
+            "[Adaptive Voice]\n" + message,
+            system_message=result["message"],
+        )
+        return message
+    except (ImportError, OSError, TypeError) as exc:
+        log_event("voice_mode_error", {"error": str(exc)})
+        return None
+    except ValueError as exc:
+        message = f"[Adaptive Voice] 模式未修改：{exc}"
+        emit_hook_context(
+            "UserPromptSubmit", message, system_message=message,
+        )
+        return message
+
+
+def voice_context(state):
+    """Read the persisted mode on each prompt, so Web and slash changes agree."""
+    try:
+        module = _shared_script_module("voice_mode")
+        stored = state.get("voice") if isinstance(state.get("voice"), dict) else {}
+        explicit = str(stored.get("mode") or "")
+        if explicit and explicit == module.current_mode(home=CODEX_DIR):
+            # Avoid a disk read for ordinary turns after the first hook notice.
+            return module.instruction(explicit)
+        mode = module.current_mode(home=CODEX_DIR)
+        state["voice"] = {"mode": mode}
+        return module.instruction(mode)
+    except (ImportError, OSError, ValueError, TypeError) as exc:
+        log_event("voice_context_error", {"error": str(exc)})
+        return ""
+
+
 def update_task_gate_for_prompt(state, prompt):
     """更新任务门禁并返回需要注入给主 Agent 的说明。"""
 
@@ -4294,46 +4425,23 @@ def _looks_like_browser_interaction(tool_name, tool_input):
 
 
 def _automation_notice(request, state, session_id):
-    """Send the heads-up the user asked for, before anything is executed.
-
-    Two separate obligations, kept apart on purpose:
-      * whether the user must be *told* (always, unless they turned notices off);
-      * whether the user must be *asked* (only when nothing recent covers it).
-    """
-    try:
-        consent = _shared_script_module("automation_consent")
-        notifier = _shared_script_module("desktop_notify")
-    except (ImportError, OSError, ValueError, TypeError):
-        return
-    agent = str(state.get("agent_id") or "")
-    kind = str(request.get("kind") or "")
-    target = str(request.get("target") or "")
-    now = iso_now()
-    if not consent.must_announce(state, agent, kind, target, now, session_id):
-        return
-    text = consent.announcement(request)
-    enabled = consent.notifications_enabled(_automation_notification_config())
-    notifier.notify("AgentRelay · 即将执行自动化", text, enabled=enabled)
-    consent.mark_announced(state, agent, kind, target, now, session_id)
-    write_state(state, session_id=session_id)
+    """The in-conversation approval card is the notice; never open a popup."""
+    del request, state, session_id
 
 
 def _automation_notification_config():
-    """Read the one switch from the same encrypted config the web page writes."""
+    """Read the optional system-notification preference without enabling it."""
     try:
         config_manager = _shared_script_module("config_manager")
         return config_manager.load_config(CODEX_DIR)
     except (ImportError, OSError, ValueError, TypeError):
-        return {"notifications": {"enabled": True}}
+        return {"notifications": {"enabled": False}}
 
 
-# Reuse within one session only applies to program-level operations the user
-# named ("启动 xxx 后端", "调试这个程序时可以后台开"). Browser page automation
-# and system-pointer control stay one-shot: a changed selector or workflow
-# must invalidate the previous approval every single time.
+# Only a non-visual background process can reuse a declaration within its
+# session. Opening any window and every browser/pointer operation must present
+# a fresh request instead of silently inheriting an earlier approval.
 REUSABLE_AUTOMATION_KINDS = frozenset({
-    "foreground_window",
-    "background_window",
     "background_process",
 })
 
@@ -4434,18 +4542,48 @@ def _browser_interaction_gate(state, tool_name, tool_input, session_id):
     except (TypeError, ValueError):
         approval_fresh = False
     if approved_id:
-        mode_matches = (
-            approved_mode == request.get("mode")
+        pending = browser.get("pending")
+        mode_only_retry = (
+            isinstance(pending, dict)
+            and request.get("kind") != "direct_pointer"
+            and not pending.get("mode")
+            and approved_mode == request.get("mode")
+            and pending.get("retry_request_id")
+            and pending.get("retry_request_id") == request.get("retry_request_id")
+            and pending.get("workflow_path") == request.get("workflow_path")
+            and pending.get("workflow_sha256") == request.get("workflow_sha256")
+        )
+        request_matches = (
+            (
+                approved_id == request_id
+                and (
+                    approved_mode == request.get("mode")
+                    or (
+                        not request.get("mode")
+                        and approved_mode == "foreground"
+                        and request.get("kind") in {
+                            "direct_pointer", "foreground_window",
+                        }
+                    )
+                    or (
+                        not request.get("mode")
+                        and approved_mode == "background"
+                        and request.get("kind") in {
+                            "background_window", "background_process",
+                        }
+                    )
+                )
+            )
             or (
-                request.get("kind") == "direct_pointer"
-                and approved_mode == "foreground"
+                isinstance(pending, dict)
+                and approved_id == pending.get("request_id")
+                and mode_only_retry
             )
         )
         if (
-            approved_id == request_id
+            request_matches
             and approved_source == current_source
             and approval_fresh
-            and mode_matches
         ):
             browser["approved_request_id"] = None
             browser["approved_mode"] = None
@@ -4467,8 +4605,27 @@ def _browser_interaction_gate(state, tool_name, tool_input, session_id):
         write_state(state, session_id=session_id)
         return True, None
 
+    previous_pending = pending_browser_interaction(state)
+    same_pending = (
+        previous_pending is not None
+        and (
+            previous_pending.get("request_id") == request_id
+            or (
+                request.get("kind") != "direct_pointer"
+                and not previous_pending.get("mode")
+                and bool(request.get("mode"))
+                and previous_pending.get("retry_request_id")
+                == request.get("retry_request_id")
+                and previous_pending.get("workflow_path")
+                == request.get("workflow_path")
+                and previous_pending.get("workflow_sha256")
+                == request.get("workflow_sha256")
+            )
+        )
+    )
     browser["pending"] = {
         "request_id": request_id,
+        "retry_request_id": request.get("retry_request_id"),
         "kind": request.get("kind"),
         "mode": request.get("mode"),
         "background_allowed": bool(request.get("background_allowed")),
@@ -4477,25 +4634,51 @@ def _browser_interaction_gate(state, tool_name, tool_input, session_id):
         "workflow_path": request.get("workflow_path"),
         "workflow_sha256": request.get("workflow_sha256"),
         "description": request.get("description"),
-        "created_at": iso_now(),
+        "created_at": (
+            previous_pending.get("created_at")
+            if same_pending else iso_now()
+        ),
     }
+    if same_pending:
+        # Preserve the original fingerprint/mode as the one operation awaiting
+        # a user decision. A caller adding a mode flag must not replace it.
+        browser["pending"] = previous_pending
     write_state(state, session_id=session_id)
+    if same_pending:
+        request = {**request, "mode": previous_pending.get("mode")}
+    repeated_notice = (
+        "同一操作的文本申请已显示，请等待用户明确同意或拒绝，"
+        "不要重试或重复申请。\n"
+        if same_pending else ""
+    )
     if not request.get("mode"):
         mode_text = (
-            "这是直接系统鼠标工具，只能选择前台可见运行；后台请改用无头浏览器。"
+            "这是程序窗口操作，只能选择前台可见运行；后台请使用明确的 "
+            "--background 或 -g 参数重新发起。"
+            if request.get("kind") == "foreground_window"
+            else "这是直接系统鼠标工具，只能选择前台可见运行；后台请改用无头浏览器。"
             if request.get("kind") == "direct_pointer"
             else "后台表示无窗口、无页面弹出、不占用系统鼠标；前台才允许显示窗口。"
         )
         return False, (
             "[AgentRelay 浏览器交互门禁]\n"
-            "执行前必须先让用户明确选择“后台无感运行”还是“前台可见运行”。"
+            + repeated_notice
+            + "执行前必须先让用户明确选择“后台无感运行”还是“前台可见运行”。"
             f"\n{mode_text}\n"
-            "不要沿用上一次选择，也不要自行选择。用户选定后，浏览器命令必须"
-            "带上对应的 --interaction-mode 重新发起，再取得一次性授权。"
+            + (
+                "这是程序窗口操作：前台选择后直接原样重试原命令；"
+                "后台请使用明确的 --background 或 -g 参数，不要添加浏览器参数。"
+                if request.get("kind") == "foreground_window"
+                else "这是后台窗口操作，用户选定后原样重试原命令，不添加浏览器参数。"
+                if request.get("kind") == "background_window"
+                else "不要沿用上一次选择，也不要自行选择。用户选定后，只给原命令补上对应的 "
+                     "--interaction-mode 并重试；这次选择同时作为本次操作的一次性授权，不再二次询问。"
+            )
         )
     return False, (
         "[AgentRelay 浏览器交互门禁]\n"
-        f"本次操作已声明 {request.get('mode')} 模式，但还没有用户的一次性授权。"
+        + repeated_notice
+        + f"本次操作已声明 {request.get('mode')} 模式，但还没有用户的一次性授权。"
         "请让用户明确确认后台或前台，并授权当前完全相同的工具调用。"
         "授权只使用一次；修改命令、选择器、步骤文件或工作流后立即失效。"
     )
@@ -8530,7 +8713,11 @@ def _shared_script_module(name: str):
             return importlib.import_module(f"scripts.{name}")
     except ImportError:
         pass
-    for base in (CODEX_DIR / "skills" / "agent-relay", Path(__file__).resolve().parent.parent):
+    for base in (
+        Path(__file__).resolve().parent.parent,
+        Path(__file__).resolve().parent.parent / "skills" / "agent-relay",
+        CODEX_DIR / "skills" / "agent-relay",
+    ):
         if (base / "scripts" / f"{name}.py").is_file():
             sys.path.insert(0, str(base / "scripts"))
             return importlib.import_module(name)
@@ -9137,6 +9324,10 @@ def handle_hook_event(
 
     if event_name == "UserPromptSubmit":
         prompt = extract_prompt(data)
+        voice_state = voice_settings_request(read_state(session_id=session_id), prompt)
+        if voice_state is not None:
+            return read_state(session_id=session_id)
+        voice_notice = voice_context(read_state(session_id=session_id))
         if str(prompt or "").lstrip().startswith("<task-notification>"):
             return read_state(session_id=session_id)
         if is_informational_prompt(prompt) and not approval_controls_snapshot(
@@ -9149,6 +9340,7 @@ def handle_hook_event(
                 # Questions and status notifications are not a license to resume work.
                 emit_hook_context(
                     "UserPromptSubmit",
+                    voice_notice + ("\n" if voice_notice else "") +
                     "[AgentRelay 问答模式]\n当前只是询问或系统通知，不继承旧审计，不自动修改、测试、调用 Fusion 或开始新审计。",
                 )
                 return state
@@ -9178,6 +9370,7 @@ def handle_hook_event(
             notice = semantic_approval_notice(session_id, state, prompt)
             if pending_page_notice:
                 notice = pending_page_notice + "\n" + notice
+            notice = voice_notice + ("\n" + notice if notice else "")
             write_state(state, session_id=session_id)
             emit_hook_context("UserPromptSubmit", notice)
             return state
@@ -9198,6 +9391,7 @@ def handle_hook_event(
                 notice = delivery_notice
         if pending_page_notice:
             notice = pending_page_notice + ("\n" + notice if notice else "")
+        notice = voice_notice + ("\n" + notice if notice else "")
         write_state(state, session_id=session_id)
         emit_hook_context(
             "UserPromptSubmit",
@@ -9228,7 +9422,9 @@ def handle_hook_event(
             )
             emit_pre_tool_deny(
                 deny_reason,
-                system_message=None if quiet_gate else render_tool_gate_card(
+                system_message=None if (
+                    quiet_gate or "同一操作的文本申请已显示" in deny_reason
+                ) else render_tool_gate_card(
                     tool_name,
                     tool_input,
                     deny_reason,

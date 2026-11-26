@@ -108,6 +108,7 @@ SCRIPT_FILES = (
     "config_manager.py",
     "config_web.py",
     "config_web_components.py",
+    "voice_mode.py",
     "approval_policy.py",
     "automation_consent.py",
     "desktop_notify.py",
@@ -611,11 +612,18 @@ def check_base_environment() -> None:
         print(f"[{'正常' if detected else '提示'}] {meta['label']}：{mark}")
 
 
+def adaptive_voice_source() -> Path | None:
+    """Only use an explicitly supplied source; never guess a local checkout."""
+    value = str(os.environ.get("ADAPTIVE_VOICE_SOURCE") or "").strip()
+    return Path(value).expanduser() if value else None
+
+
 def _apply_agent_targets_loop(
     target_ids: list[str],
     skill_ids: list[str],
     catalog: dict,
     archive_source: Path | None = None,
+    voice_source: Path | None = None,
 ) -> tuple[dict, dict]:
     from scripts import agent_targets as at
     from scripts import skill_catalog
@@ -652,6 +660,8 @@ def _apply_agent_targets_loop(
                 (), (),
                 skill_name="agent-fusion",
             )
+            if voice_source is not None and "adaptive-voice" in skill_ids:
+                at.install_adaptive_voice_to(meta, voice_source)
             at.install_slash_commands(meta, Path(meta["skill_dir"]))
             shim_path = Path(meta["skill_dir"]) / "scripts" / "agentrelay_hook_shim.py"
             if target_id == "codex":
@@ -687,6 +697,8 @@ def _apply_agent_targets_loop(
                 PROJECT_ROOT,
             )
             for skill_id in skill_ids:
+                if skill_id == "adaptive-voice" and voice_source is not None:
+                    continue
                 destination = at.install_catalog_skill_to(
                     meta,
                     PROJECT_ROOT,
@@ -749,6 +761,7 @@ def _apply_agent_targets_loop(
 def apply_agent_targets(
     target_ids: list[str],
     selected_skills: list[str] | None = None,
+    voice_source: Path | None = None,
 ) -> tuple[dict, dict]:
     """按用户选择的目标安装 Skill、注册 Hook 并逐项验证。"""
     from scripts import skill_catalog
@@ -768,7 +781,9 @@ def apply_agent_targets(
         == skill_catalog.OFFICIAL_DOWNLOAD_METHOD
     ]
     if not official_skill_ids:
-        return _apply_agent_targets_loop(target_ids, skill_ids, catalog)
+        return _apply_agent_targets_loop(
+            target_ids, skill_ids, catalog, voice_source=voice_source,
+        )
 
     with tempfile.TemporaryDirectory(
         prefix="agentrelay-official-skills-"
@@ -794,6 +809,7 @@ def apply_agent_targets(
             skill_ids,
             catalog,
             archive_source=archive_source,
+            voice_source=voice_source,
         )
 
 
@@ -1370,6 +1386,26 @@ def configure_commander(config: dict) -> None:
                                  "manual_disabled": not enabled, "max_agents": max_agents})
 
 
+def configure_voice(config: dict) -> None:
+    """Set the shared voice mode during installation, using the same Web contract."""
+    from scripts import voice_mode
+
+    print("\nAdaptive Voice 输出风格")
+    print("1. normal：正常  2. eli5：大白话  3. expert：专业  4. adaptive：个性化")
+    current = voice_mode.normalize_mode((config.get("voice") or {}).get("mode"))
+    default = voice_mode.MODES.index(current) + 1
+    choice = _ask("请选择", str(default))
+    try:
+        index = int(choice) - 1
+        if not 0 <= index < len(voice_mode.MODES):
+            raise ValueError(choice)
+        mode = voice_mode.MODES[index]
+    except ValueError as exc:
+        raise InstallError("输出风格必须选择 1、2、3 或 4") from exc
+    config["voice"] = {"mode": mode}
+    print(f"输出风格：{mode}（{voice_mode.LABELS[mode]}）；Web 和会话命令也可修改。")
+
+
 def _display_width(text: str) -> int:
     """Approximate the terminal cell width for Chinese and plain ASCII text."""
     width = 0
@@ -1516,6 +1552,11 @@ def choose_install_targets() -> tuple[list[str], str]:
 
 
 SKILL_PLAIN_HELP = {
+    "adaptive-voice": (
+        "Adaptive Voice 输出风格",
+        "独立切换正常、大白话、专业和个性化回答；也可由 install 和 Web 统一设置",
+        "默认保留；不需要输出风格切换时可取消",
+    ),
     "browser-automatic": (
         "浏览器自动化",
         "打开真实网页、截图、提取内容、点击按钮和填写表单",
@@ -1746,7 +1787,11 @@ def choose_install_skills(
             notice = " · ".join(errors)
 
 
-def apply_target_selection(target_ids: list[str], skill_ids: list[str]) -> tuple[dict, dict]:
+def apply_target_selection(
+    target_ids: list[str],
+    skill_ids: list[str],
+    voice_source: Path | None = None,
+) -> tuple[dict, dict]:
     """Apply selected targets and remove only previously installed deselections."""
     from scripts import agent_targets as at
     registry = at.agent_targets()
@@ -1759,7 +1804,10 @@ def apply_target_selection(target_ids: list[str], skill_ids: list[str]) -> tuple
         if meta is not None and at.relay_installed(target_id, meta):
             removed[target_id] = at.unregister_agent_relay(target_id, meta)
             print(f"[卸载] {meta['label']}：仅移除 AgentRelay 接入")
-    results, errors = apply_agent_targets(target_ids, skill_ids) if target_ids else ({}, {})
+    target_options = {"voice_source": voice_source} if voice_source is not None else {}
+    results, errors = apply_agent_targets(
+        target_ids, skill_ids, **target_options,
+    ) if target_ids else ({}, {})
     if removed:
         results["已卸载"] = [{"name": target, "ok": True, "detail": "已备份并移除", "reason": "用户取消勾选"} for target in removed]
     return results, errors
@@ -1822,11 +1870,16 @@ def initialize_configuration(
     if skip_install:
         print("已跳过安装（你选择了只打开网页配置）。")
     else:
-        results, errors = apply_target_selection(selected_targets, selected_skills)
+        results, errors = apply_target_selection(
+            selected_targets, selected_skills,
+            **({"voice_source": adaptive_voice_source()} if adaptive_voice_source() else {}),
+        )
         print_verify_results(results, errors)
     config["install_targets"] = selected_targets
     if not skip_install:
         config["install_skills"] = selected_skills
+    if not skip_install and "adaptive-voice" in selected_skills:
+        configure_voice(config)
     if _yes_no("现在配置默认 DeepSeek 网页模型", True):
         _configure_web(config)
     else:
@@ -1905,6 +1958,7 @@ def run_chinese_menu(
         print("3. 配置模型（线上 / 本地 / API）")
         print("4. 查看当前配置状态")
         print("5. 打开本地网页配置")
+        print("6. 设置 Adaptive Voice 输出风格")
         print("0. 退出")
         choice = input("请选择：").strip()
         if choice == "0":
@@ -1933,6 +1987,11 @@ def run_chinese_menu(
             }, ensure_ascii=False, indent=2))
         elif choice == "5":
             run_web_configurator()
+        elif choice == "6":
+            config, save_config = _load_local_config()
+            configure_voice(config)
+            save_config(config, CODEX_HOME)
+            print("输出风格已加密保存，Web 和会话命令读取同一份配置。")
         else:
             print("选项无效，请输入菜单中的数字。")
 
@@ -2088,6 +2147,8 @@ def run_web_configurator() -> None:
         except (OSError, ValueError, TypeError):
             result["executables"] = []
         result["notifications"] = dict(config.get("notifications") or {"enabled": True})
+        from scripts import voice_mode
+        result["voice"] = voice_mode.normalize_config(config.get("voice"))
         result["install_targets"] = config.get("install_targets") if config.get("install_targets") is not None else []
         try:
             from scripts import agent_message_probe
@@ -2316,7 +2377,10 @@ def run_web_configurator() -> None:
                         if not isinstance(raw_skills,list):
                             raise ValueError("skills 必须是 Skill ID 数组")
                         skill_ids=skill_catalog.normalize_skill_ids(catalog,raw_skills)
-                    results,errors=apply_target_selection(ids,skill_ids)
+                    results,errors=apply_target_selection(
+                        ids,skill_ids,
+                        **({"voice_source":adaptive_voice_source()} if adaptive_voice_source() else {}),
+                    )
                     config["install_targets"]=ids
                     config["install_skills"]=skill_ids
                     save_config(config,CODEX_HOME)
@@ -2379,6 +2443,10 @@ def run_web_configurator() -> None:
                         sent.append({"to":address,"message_id":message["message_id"]})
                     self._send({"sent":sent,"failed":failed});return
                 if self.path == "/api/settings":
+                    voice_incoming=data.get("voice",{})
+                    if isinstance(voice_incoming,dict) and "mode" in voice_incoming:
+                        from scripts import voice_mode
+                        config["voice"]={"mode":voice_mode.normalize_mode(voice_incoming.get("mode"),strict=True)}
                     notifications_incoming=data.get("notifications",{})
                     if isinstance(notifications_incoming,dict) and "enabled" in notifications_incoming:
                         config["notifications"]={"enabled":bool(notifications_incoming.get("enabled"))}
@@ -2553,9 +2621,19 @@ def main(argv=None) -> int:
         action="store_true",
         help="不安装额外开发 Skill",
     )
+    parser.add_argument(
+        "--adaptive-voice-source",
+        type=Path,
+        default=None,
+        help="可选：Adaptive Voice skill 的显式本地源目录；Web 安装使用 ADAPTIVE_VOICE_SOURCE",
+    )
     parser.add_argument("--install-daemon", action="store_true", help="生成后台服务配置")
     parser.add_argument("--register-daemon", action="store_true", help="注册已生成的后台服务")
     args = parser.parse_args(argv)
+    if args.adaptive_voice_source is not None:
+        os.environ["ADAPTIVE_VOICE_SOURCE"] = str(
+            args.adaptive_voice_source.expanduser().resolve()
+        )
     print(f"AgentRelay 安装程序：{PROJECT_ROOT}")
     print(f"Codex 目录：{CODEX_HOME}")
     if sys.version_info < (3, 10):
@@ -2607,7 +2685,13 @@ def main(argv=None) -> int:
                 raise InstallError(f"未知目标 Agent：{', '.join(unknown)}")
             if "codex" not in target_ids:
                 print("[提示] 仅安装命令行明确列出的目标；共享 Codex 运行时保留，不补装 Codex 接入。")
-            results, errors = apply_agent_targets(target_ids, cli_skills)
+            voice_options = (
+                {"voice_source": adaptive_voice_source()}
+                if adaptive_voice_source() else {}
+            )
+            results, errors = apply_agent_targets(
+                target_ids, cli_skills, **voice_options,
+            )
             config, save_config = _load_local_config()
             config["install_targets"] = target_ids
             config["install_skills"] = cli_skills
@@ -2616,7 +2700,10 @@ def main(argv=None) -> int:
             if errors:
                 return 1
         elif interactive_config and target_action == "install":
-            results, errors = apply_target_selection(selected_targets, selected_skills)
+            results, errors = apply_target_selection(
+                selected_targets, selected_skills,
+                **({"voice_source": adaptive_voice_source()} if adaptive_voice_source() else {}),
+            )
             print_verify_results(results, errors)
             config, save_config = _load_local_config()
             config["install_targets"] = selected_targets
