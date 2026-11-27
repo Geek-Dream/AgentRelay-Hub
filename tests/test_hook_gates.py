@@ -187,7 +187,7 @@ class HookGateTests(unittest.TestCase):
         self.assertIn("│     - 目标外边界：", card)
         self.assertIn("│  ┄ 主要风险 ▼", card)
         self.assertIn("│  ┄ 验证与回滚 ▼", card)
-        self.assertTrue(card.startswith("╭─ ◎  「需求确认」"))
+        self.assertTrue(card.startswith("\n╭─ ◎  「需求确认」"))
         self.assertIn("│  ◇ 等待确认 · 尚未修改文件", card)
         self.assertTrue(card.endswith("╰" + "─" * 87 + " §"))
         self.assertNotIn("\x1b[", card)
@@ -207,7 +207,7 @@ class HookGateTests(unittest.TestCase):
         )
         card = tracker.render_task_gate_card(prompt, {})
         lines = card.splitlines()
-        self.assertTrue(all(line.startswith("│") for line in lines[1:-1]))
+        self.assertTrue(all(line.startswith("│") for line in lines[2:-1]))
         self.assertTrue(all(
             tracker._card_label_width(line) <= tracker._CARD_LINE_WIDTH
             for line in lines
@@ -225,7 +225,7 @@ class HookGateTests(unittest.TestCase):
             card = tracker.render_tool_gate_card(
                 "exec_command", {"cmd": "example"}, reason,
             )
-            self.assertTrue(card.startswith(f"╭─ ◎  {title}"))
+            self.assertTrue(card.startswith(f"\n╭─ ◎  {title}"))
             self.assertIn("│  -| 操作内容：", card)
             self.assertIn("│  ┄ 批准边界 ▼", card)
             self.assertIn("│  ┄ 验证与回滚 ▼", card)
@@ -579,6 +579,10 @@ class HookGateTests(unittest.TestCase):
         )
         first = self.run_hook(payload)
         self.assertIn("「自动化申请」", json.loads(first.stdout)["systemMessage"])
+        self.assertTrue(
+            json.loads(first.stdout)["systemMessage"].startswith("\n╭─ ◎  「自动化申请」"),
+            "卡片标题必须另起一行，不能紧接宿主 says: 前缀",
+        )
         repeated = self.run_hook(payload)
         output = json.loads(repeated.stdout)
         self.assertEqual(
@@ -932,7 +936,6 @@ class HookGateTests(unittest.TestCase):
             tool_name="browser_click",
             tool_input={
                 "selector": "#submit",
-                "interaction_mode": "background",
             },
             tool_use_id="browser-needs-mode",
         )
@@ -949,6 +952,130 @@ class HookGateTests(unittest.TestCase):
         )
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn("必须明确选择", rejected.stderr)
+
+    def test_mixed_code_and_browser_pending_approval_provides_browser_command(self):
+        """用户回复"授权"时，混合代码+浏览器待办必须同时给出浏览器授权写回命令。"""
+        session = "mixed-code-browser-authorize"
+        # 1. 创建 strict 代码任务
+        first = self.run_hook(self.payload(
+            session, "UserPromptSubmit",
+            prompt="请修复前端、后端和数据库，并补充部署文档",
+        ))
+        self.assert_hook_ok(first)
+        # 2. 创建 background 模式的浏览器请求
+        browser_payload = self.payload(
+            session, "PreToolUse", tool_name="Bash",
+            tool_input={
+                "command": (
+                    '"python" "browse.py" '
+                    '--interaction-mode background '
+                    'scrape http://localhost:5181/test/ --selector body'
+                ),
+            },
+            tool_use_id="mixed-browser-request",
+        )
+        denied = self.run_hook(browser_payload)
+        self.assert_hook_ok(denied)
+        decision = json.loads(denied.stdout)["hookSpecificOutput"]
+        self.assertEqual(decision["permissionDecision"], "deny")
+
+        # 3. 用户只回复"授权"
+        candidate = self.run_hook(self.payload(
+            session, "UserPromptSubmit", prompt="授权",
+        ))
+        self.assert_hook_ok(candidate)
+        context = json.loads(candidate.stdout)["hookSpecificOutput"]["additionalContext"]
+        # 关键断言：混合待办时，提示中必须包含浏览器授权写回命令
+        self.assertIn("authorize-browser-interaction", context)
+        self.assertIn("--mode background", context)
+
+    def test_mixed_pending_authorize_browser_with_inherited_mode(self):
+        """已声明 background 的 pending，用户回复"授权"后可继承该模式完成授权。"""
+        session = "mixed-inherit-browser-mode"
+        # 1. 创建 strict 代码任务
+        first = self.run_hook(self.payload(
+            session, "UserPromptSubmit",
+            prompt="请修复前端、后端和数据库，并补充部署文档",
+        ))
+        self.assert_hook_ok(first)
+        # 2. 创建已声明 background 的浏览器请求
+        browser_payload = self.payload(
+            session, "PreToolUse", tool_name="Bash",
+            tool_input={
+                "command": (
+                    '"python" "browse.py" '
+                    '--interaction-mode background '
+                    'scrape http://localhost:5181/test/ --selector body'
+                ),
+            },
+            tool_use_id="mixed-browser-inherit",
+        )
+        denied = self.run_hook(browser_payload)
+        self.assert_hook_ok(denied)
+        self.assertEqual(
+            json.loads(denied.stdout)["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+
+        # 3. 用户只回复"授权"
+        candidate = self.run_hook(self.payload(
+            session, "UserPromptSubmit", prompt="授权",
+        ))
+        source_hash, request_id, context = self.browser_authorization_context(candidate)
+        # 4. 主 Agent 执行授权写回 —— 应成功（pending 已声明 background）
+        approved = self.authorize_browser(
+            session, source_hash, request_id, "background",
+        )
+        self.assert_hook_ok(approved)
+
+        # 5. 原样重试完全相同的 browser payload 应放行
+        allowed = self.run_hook(browser_payload)
+        self.assert_hook_ok(allowed)
+        self.assertEqual(allowed.stdout, "")
+
+        # 6. 第二次相同调用必须重新拒绝（一次性）
+        repeated = self.run_hook(browser_payload)
+        self.assertEqual(
+            json.loads(repeated.stdout)["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+
+        # 7. 代码审批仍未被连带批准
+        state = json.loads(
+            (self.codex_home / "agent_relay_tracker" / "sessions" / f"{session}.json").read_text()
+        )
+        self.assertNotEqual(state["task_gate"]["status"], "approved")
+
+    def test_mixed_pending_generic_approval_cannot_invent_mode(self):
+        """无模式 pending 回复"好的，可以"仍必须拒绝，不能默认后台。"""
+        session = "mixed-no-mode-reject"
+        # 1. 创建 strict 代码任务
+        first = self.run_hook(self.payload(
+            session, "UserPromptSubmit",
+            prompt="请修复前端、后端和数据库，并补充部署文档",
+        ))
+        self.assert_hook_ok(first)
+        # 2. 创建无模式的浏览器请求
+        browser_payload = self.payload(
+            session, "PreToolUse", tool_name="Bash",
+            tool_input={"command": "python browse.py scrape https://example.com"},
+            tool_use_id="mixed-no-mode-browser",
+        )
+        denied = self.run_hook(browser_payload)
+        self.assert_hook_ok(denied)
+
+        # 3. 用户回复"好的，可以"（无模式信息）
+        candidate = self.run_hook(self.payload(
+            session, "UserPromptSubmit", prompt="好的，可以",
+        ))
+        source_hash, request_id, context = self.browser_authorization_context(candidate)
+        # 4. 尝试用 background 授权应失败
+        rejected = self.authorize_browser(
+            session, source_hash, request_id, "background",
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("必须明确选择", rejected.stderr)
+
 
     def test_browser_interaction_can_be_explicitly_cancelled(self):
         session = "browser-cancel"
@@ -1826,6 +1953,44 @@ class HookGateTests(unittest.TestCase):
         ))
         self.assert_hook_ok(action)
         self.assertIn("页面验证门禁", action.stdout)
+
+    def test_informational_stop_does_not_inherit_old_page_failure(self):
+        session = "informational-stop-old-page"
+        state_path = (
+            self.codex_home / "agent_relay_tracker" / "page-verification"
+            / f"{session}.json"
+        )
+        state_path.parent.mkdir(parents=True)
+        stale_state = {
+            "files": {"index.html": {"sha256": "old-page-version"}},
+            "verification": {
+                "status": "failed",
+                "errors": ["TimeoutError: old browser check"],
+            },
+        }
+        state_path.write_text(json.dumps(stale_state), encoding="utf-8")
+        explanation = self.run_hook(self.payload(
+            session, "UserPromptSubmit", prompt="我本地除了 opencode 都安装了？",
+        ))
+        self.assert_hook_ok(explanation)
+
+        result = self.run_hook(self.payload(
+            session, "Stop", last_assistant_message=(
+                "如果你指本次要求安装的 Claude、Codex、Pi：是的，都已安装？"
+                "这只是说明安装状态，未做页面视觉验收？"
+                "页面视觉验收仍未通过，不能视为已完成。"
+            ),
+        ))
+        self.assert_hook_ok(result)
+        self.assertNotEqual(json.loads(result.stdout or "{}").get("decision"), "block")
+        self.assertNotIn("old browser check", result.stdout)
+        self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), stale_state)
+
+        real_page_claim = self.run_hook(self.payload(
+            session, "Stop", last_assistant_message="页面已修改，浏览器检查通过。",
+        ))
+        self.assert_hook_ok(real_page_claim)
+        self.assertIn("页面验证门禁", real_page_claim.stdout)
 
     def test_pending_page_gate_does_not_suppress_complex_task_card(self):
         session = "pending-page-complex-task"

@@ -1,6 +1,6 @@
 ---
 name: agent-fusion
-description: "Delegate bulky or isolated execution work to AgentRelay Fusion's persistent sidekick, including test suites, wide searches, batch reading, mechanical scans, independent reproduction, and well-scoped implementation. Use it before doing qualifying work locally when the local status returns delegable=true; queue only within the configured timeout, expose a busy timeout instead of silently switching to web, and skip when Fusion is disabled, has no configured Provider, or Commander is active. Default readonly; coding requires an explicit switch."
+description: "让助手分担耗时的调查、批量阅读、测试和独立实现。能委派给本地助手时先检查状态；忙时明确提示，不要悄悄改用网页模型。没有可用模型、功能关闭或主任务已接管时就跳过。默认只读，修改代码必须明确开启。"
 ---
 
 # AgentFusion

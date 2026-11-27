@@ -184,6 +184,21 @@ def backup_file(path: Path, tag: str) -> Path | None:
     return backup
 
 
+def is_agent_relay_hook(hook) -> bool:
+    return isinstance(hook, dict) and (
+        "agent_relay_hook" in str(hook.get("command", ""))
+        or "agentrelay_hook_shim" in str(hook.get("command", ""))
+    )
+
+
+def agent_relay_hooks(entries: list) -> list[dict]:
+    return [
+        hook for entry in entries if isinstance(entry, dict)
+        for hook in entry.get("hooks", []) if isinstance(entry.get("hooks"), list)
+        and is_agent_relay_hook(hook)
+    ]
+
+
 def find_agent_relay_hook(entries: list):
     for entry in entries:
         if not isinstance(entry, dict):
@@ -192,10 +207,7 @@ def find_agent_relay_hook(entries: list):
         if not isinstance(nested, list):
             continue
         for hook in nested:
-            if isinstance(hook, dict) and (
-                "agent_relay_hook" in str(hook.get("command", ""))
-                or "agentrelay_hook_shim" in str(hook.get("command", ""))
-            ):
+            if is_agent_relay_hook(hook):
                 return hook
     return None
 
@@ -526,6 +538,13 @@ def install_adaptive_voice_to(target: dict, source: Path) -> dict[str, int]:
         return result
 
 
+SLASH_COMMAND_DESCRIPTIONS = {
+    "agent-approval": "设置哪些操作需要你先确认",
+    "agent-audit": "查看当前任务还缺哪些验收",
+    "agent-fusion": "让助手分担耗时调查、批量阅读或独立实现",
+    "adaptive-voice": "切换 Agent 的说话风格",
+}
+
 SLASH_COMMANDS = {
     "agent-approval": "打开 AgentRelay 权限设置。输入 /agent-approval 查看；输入 /agent-approval 1、2、3 选择 strict、standard、relaxed。输入 /agent-approval apps 查看已允许关闭的应用，输入 /agent-approval forget <应用名> 撤销。",
     "agent-audit": "只查看当前交付审计状态，不代表审计通过，也不要开始修改。",
@@ -540,7 +559,7 @@ def install_slash_commands(target: dict, skill_dir: Path) -> list[Path]:
         return []
     installed = []
     for name, body in SLASH_COMMANDS.items():
-        text = f"---\ndescription: AgentRelay {name}\n---\n\n{body}\n"
+        text = f"---\ndescription: {SLASH_COMMAND_DESCRIPTIONS[name]}\n---\n\n{body}\n"
         source = skill_dir / "commands" / f"{name}.md"
         source.parent.mkdir(parents=True, exist_ok=True)
         source.write_text(text, encoding="utf-8")
@@ -663,18 +682,37 @@ def register_claude(settings_path: Path, command: str) -> bool:
         entries = hooks.setdefault(event, [])
         if not isinstance(entries, list):
             raise TargetError(f"{settings_path} 中的 hooks.{event} 必须是 JSON 数组")
-        existing = find_agent_relay_hook(entries)
-        if existing is not None:
-            if existing.get("command") != command:
-                existing.update(
-                    {"type": "command", "command": command, "timeout": HOOK_TIMEOUT}
-                )
+        merged_entries = []
+        seen_owned = False
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
+                merged_entries.append(entry)
+                continue
+            kept_hooks = []
+            for hook in entry["hooks"]:
+                if not is_agent_relay_hook(hook):
+                    kept_hooks.append(hook)
+                    continue
+                if seen_owned:
+                    changed = True
+                    continue
+                seen_owned = True
+                desired = {**hook, "type": "command", "command": command, "timeout": HOOK_TIMEOUT}
+                if desired != hook:
+                    changed = True
+                kept_hooks.append(desired)
+            if kept_hooks:
+                merged_entries.append({**entry, "hooks": kept_hooks})
+            elif entry["hooks"]:
                 changed = True
-            continue
-        entries.append(
-            {"hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT}]}
-        )
-        changed = True
+            else:
+                merged_entries.append(entry)
+        if not seen_owned:
+            merged_entries.append(
+                {"hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT}]}
+            )
+            changed = True
+        hooks[event] = merged_entries
 
     if not changed:
         return False
@@ -1814,6 +1852,12 @@ def registered_in_config(target_id: str, meta: dict, venv_python: Path, shim_pat
         if missing:
             return False, f"hooks 缺少事件：{', '.join(missing)}"
         if target_id == "claude":
+            duplicated = [
+                event for event in events
+                if len(agent_relay_hooks(hooks[event])) > 1
+            ]
+            if duplicated:
+                return False, f"Claude Hook 重复注册的事件：{', '.join(duplicated)}"
             invalid = []
             for event in events:
                 hook = find_agent_relay_hook(hooks[event])

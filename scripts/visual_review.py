@@ -48,9 +48,15 @@ CONCRETE_OBSERVATION = re.compile(
 ATTESTATION_DETAIL = re.compile(
     r"内容|文本|布局|间距|对齐|空白|留白|溢出|遮挡|裁切|位置|尺寸|颜色|边框"
 )
+VISUAL_SUBJECT = r"(?:截图|图片|页面|界面|UI|象限|表格|弹窗|功能|按钮|布局|样式)"
+VISUAL_ACTION = r"(?:查看|检查|核对|评审|验证|操作)"
+VISUAL_OBJECT_ACTION = re.compile(
+    rf"(?:{VISUAL_SUBJECT}[^\n。！？；;]{{0,50}}{VISUAL_ACTION}|"
+    rf"{VISUAL_ACTION}(?:了|过)?[^\n。！？；;]{{0,40}}{VISUAL_SUBJECT})"
+)
 VISUAL_CLAIM_PATTERNS = (
-    r"(?:我|本人)?(?:亲自|实际)(?:查看|检查|核对|评审)(?:了|过)?"
-    r"[^\n。！？；;]{0,40}(?:截图|图片|页面|界面|UI|象限|表格|弹窗|功能|按钮|布局|样式)?",
+    rf"(?:我|本人)?(?:亲自|实际)(?:查看|检查|核对|评审)(?:了|过)?"
+    rf"[^\n。！？；;]{{0,40}}{VISUAL_SUBJECT}",
     r"(?:我|本人)?(?:已经|已|逐项|逐一)(?:查看|检查|核对|评审)(?:了|过)?"
     r"[^\n。！？；;]{0,40}(?:截图|图片|页面|界面|UI|象限|表格|弹窗|功能|按钮|布局|样式)",
     r"(?:截图|图片|页面|界面|UI|象限|表格|弹窗|功能|按钮|布局|样式)"
@@ -405,6 +411,8 @@ def visual_claim(message: str) -> bool:
                 # A later retraction supersedes an earlier concession, while a
                 # later positive observation supersedes an earlier limitation.
                 asserted = False
+                continue
+            if not VISUAL_OBJECT_ACTION.search(part):
                 continue
             if (
                 FUTURE_VISUAL_CLAIM.search(part)

@@ -2374,7 +2374,8 @@ def _card_section(title):
 
 
 def _card_frame(title):
-    return [f"╭─ ◎  {title}", "│"]
+    # The host prepends its own "PreToolUse ... says:" line.
+    return ["", f"╭─ ◎  {title}", "│"]
 
 
 def _hook_card_choices():
@@ -3505,6 +3506,10 @@ def _browser_interaction_notice(
 ):
     """Tell the main Agent how to resolve one browser interaction gate."""
     selected_mode = explicit_browser_interaction_mode(prompt)
+    # When the pending request already declared a mode (e.g. the command
+    # included --interaction-mode background), a plain "授权" inherits it.
+    if not selected_mode and pending.get("mode"):
+        selected_mode = pending["mode"]
     tracker_path = str(Path(__file__).resolve())
     python_path = active_python_command()
     session_value = str(session_id)
@@ -3713,6 +3718,12 @@ def semantic_approval_notice(session_id, state, prompt):
         f"{reject_command}\n"
         "问句、犹豫、否定、假设、补充条件或提出新范围时不要写回批准；先询问或更新确认卡。"
         "写回只对上述待审批范围生效，不能扩大到其他文件、命令或任务。"
+        + (
+            "\n\n" + _browser_interaction_notice(
+                session_id, state, prompt, pending, source_hash,
+            )
+            if pending is not None else ""
+        )
     )
 
 
@@ -3984,15 +3995,20 @@ def authorize_browser_interaction(
             selected_mode = explicit_browser_interaction_mode(
                 state.get("last_prompt")
             )
-            if not selected_mode:
-                raise ValueError(
-                    "用户必须明确选择后台无感运行或前台可见运行"
-                )
             request_mode = pending.get("mode")
             if pending.get("kind") == "foreground_window":
                 request_mode = "foreground"
             elif pending.get("kind") in {"background_window", "background_process"}:
                 request_mode = "background"
+            # When the pending request already declared a mode (e.g. the command
+            # included --interaction-mode background), a plain "授权" inherits
+            # that mode — the user already saw it in the approval card.
+            if not selected_mode and request_mode:
+                selected_mode = request_mode
+            if not selected_mode:
+                raise ValueError(
+                    "用户必须明确选择后台无感运行或前台可见运行"
+                )
             if request_mode and request_mode != mode:
                 raise ValueError(
                     f"本次操作只能按申请单中的 {request_mode} 方式运行，不能改成 {mode}"
@@ -9064,6 +9080,28 @@ def record_page_verification_edit(session_id, data, tool_name, tool_input, tool_
         log_event("page_verification_record_error", {"error": str(exc)})
 
 
+def informational_stop_reply(message):
+    """Recognize explanations without treating completion claims as information."""
+    text = normalize_text(message)
+    if not text or text.lstrip().startswith("<task-notification>"):
+        return True
+    try:
+        page = _page_verification_module()
+        visual = _shared_script_module("visual_review")
+        if page.completion_claim(text) or visual.visual_claim(text):
+            return False
+    except (ImportError, OSError, ValueError, TypeError) as exc:
+        log_event("informational_stop_check_error", {"error": str(exc)})
+        return False
+    if re.search(
+        r"只是(?:询问|解释|历史待办)|不是(?:继续执行|用户授权)|无需(?:重复|继续)|不会再次",
+        text,
+    ):
+        return True
+    clauses = [part.strip() for part in re.split(r"[。！？\n]+", text) if part.strip()]
+    return bool(clauses) and all(is_informational_prompt(part) for part in clauses)
+
+
 def page_completion_block_reason(session_id, message):
     try:
         tracker_state = read_state(session_id=session_id)
@@ -9484,6 +9522,11 @@ def handle_hook_event(
 
     if event_name == "Stop":
         message = extract_last_assistant_message(data)
+        if informational_stop_reply(message):
+            return handle_stop(
+                session_id=session_id,
+                last_assistant_message=message,
+            )
         reason = change_contract_completion_block(session_id, message)
         if not reason:
             reason = page_completion_block_reason(session_id, message)

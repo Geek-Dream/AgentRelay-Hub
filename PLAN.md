@@ -1,3 +1,54 @@
+# PLAN — 浏览器自然语言授权衔接修复（2026-11-26）
+
+> 用户截图中的后台、无窗口、只读浏览器申请已回复“授权”，主 Agent 却未写回授权而直接重试，被 Hook 再次拒绝。修复主 Agent 的授权衔接，不让 Hook 根据关键词自动放行，不放宽浏览器门禁；不执行真实浏览器操作、不修改真实故障会话、OpenCode 或 Magpie，不提交或推送。
+
+1. [x] 回归测试先复现混合代码任务与已声明后台模式的浏览器待办：语义审批桥只给 `resolve-intent`，没有浏览器授权命令；普通“授权”继承已展示模式前提示仍写“未明确选择”。
+2. [x] 修复三处：`semantic_approval_notice()` 在混合待办中追加浏览器授权写回；`_browser_interaction_notice()` 和 `authorize_browser_interaction()` 只在 pending 已明确声明模式时允许普通“授权”继承该模式。无模式 pending 仍必须询问后台/前台。
+3. [x] 新增三个回归：混合待办同时提供代码与浏览器写回、后台授权第一次放行而第二次拒绝且不连带批准代码、无模式 pending 不能由普通同意发明模式。旧“不能发明模式”测试夹具移除其预声明的 `interaction_mode`，继续验证原安全规则。
+4. [x] 验证：新增聚焦 `3 passed`；完整 Hook 套件 `87 passed, 20 subtests passed`；全量 `818 passed, 3 skipped`，均 exit 0。最终相关复跑 `136 passed, 24 subtests passed`，exit 0；最终全量复跑 `818 passed, 3 skipped, 100 subtests passed`，183.76s，exit 0；`compileall` 与 `git diff --check` exit 0。
+5. [x] 最小更新 AgentRelay Skill：主 Agent 必须结合上下文分别处理代码与浏览器审批；已声明模式时执行上下文给出的 `authorize-browser-interaction` 后原样重试，不要求用户复制固定长句；未声明模式仍必须询问。Claude、Codex、Pi 三份 Skill 均已备份后同步，并与仓库逐字一致。
+6. [x] 共享 `/Users/wl/.codex/hooks/agent_relay_tracker.py` 已与仓库一致；当前 Claude 与 Pi shim 均进入共享 Codex 主 Hook，未虚建 Pi tracker。Claude 的非当前设置路径旧 tracker 已备份后同步，未删除文件、未新增 Hook 注册。
+7. [x] 最终核验发现真实 Claude settings 在 17:39 又出现 guarded shim、直接 shim、直接主 Hook 三种 AgentRelay 入口。已复用仓库 `register_claude()` 再次去重：五事件各一条 guarded shim，第二次注册 `changed=False` 且字节不变，非 AgentRelay 设置与去重前一致。备份：`/Users/wl/.claude/settings.json.before-agentrelay-install.20261126-174939-813441`。重复入口是外部配置再次写入，尚无证据证明是哪一进程。
+8. [x] 本轮未运行浏览器、未写回真实故障会话批准、未修改 OpenCode 或 Magpie、未提交或推送。仍表现旧行为的 Claude、Codex、Pi 会话需重启后加载新 Skill/Hook；不需要重启整个 ORCA。
+
+---
+
+# PLAN — 中文菜单说明与确认卡卡头换行（2026-11-26）
+
+> 用户要求 AgentRelay 菜单描述改为中文大白话，并让确认卡标题与宿主 `PreToolUse... says:` 行分开。不改 ORCA 自带菜单、Magpie、命令功能或 OpenCode；不运行浏览器，不提交或推送。
+
+1. [x] 已为卡片标题前换行与中文斜杠命令描述补回归测试；旧实现首轮 `6 failed`（含子测试），证明卡头未换行且描述仍为英文模板。
+2. [x] 已将 `agent-fusion` 英文 Skill 简介改为中文；四个斜杠命令安装模板改为中文大白话，保持命令正文和行为不变。卡片前加空行，不改门禁判断。完整相关首轮 `3 failed, 130 passed, 24 subtests passed`，是三个旧断言要求卡头不得有前置换行；已仅更新对应格式断言。
+3. [x] 聚焦 `3 passed, 4 subtests passed`；完整相关复跑 `133 passed, 24 subtests passed`，全量 `815 passed, 3 skipped, 100 subtests passed`，均 exit 0；`compileall`、`git diff --check` exit 0。
+4. [x] 已同步 Claude、Codex、Pi 实际读取的 Fusion Skill 和共享卡片程序；Claude、Codex 的命令模板与已安装命令均改为中文。Pi 不安装斜杠命令目录，没有虚报同步。未改 ORCA 自带菜单、Magpie、其他 Skill 或 OpenCode。
+
+---
+
+# PLAN — Claude 重复 Hook 与旧页面门禁修复（2026-11-26）
+
+> 用户明确要求修复同一视觉验收提示重复三次及旧状态干扰说明性回复。不运行浏览器，不伪造或清空页面失败记录，不改 OpenCode，不提交或推送。
+
+1. [x] 已在临时配置与真实 Hook 子进程中复现：同事件三个 AgentRelay 入口；普通说明性 Stop 被旧 `verification.status=failed` 页面记录拦截。首轮 RED 为 `2 failed`，真正页面完成声明仍被阻断。
+2. [x] 已修复 `register_claude()`，每事件仅保留一个 canonical guarded shim，保留 ORCA、matcher、其他 Hook 和其他设置；自检拒绝重复注册。验证：合并幂等、重复自检失败、ORCA 原样保留。
+3. [x] 仅对非页面完成声明的信息性 Stop 回复跳过页面/视觉门禁，不清除页面状态；真实页面完成声明继续验收。验证：聚焦 `71 passed`；完整相关套件 `261 passed, 20 subtests passed`；全量 `814 passed, 3 skipped, 96 subtests passed`，均 exit 0；最终 `compileall`、`git diff --check` exit 0。
+4. [x] 已按用户单独批准精准修改真实 `/Users/wl/.claude/settings.json`；五个事件各删除两个重复 AgentRelay 入口，仅保留 guarded shim。备份：`/Users/wl/.claude/settings.before-agentrelay-dedup-20261126-153548.json`。三个安装文件与仓库逐字一致，无需覆盖；ORCA、模型路由、环境变量和其他事件保持不变。真实 shim 合成验证：说明性 Stop 放行，页面完成声明仍阻断；原真实页面失败记录字节不变。回滚：恢复时间戳备份。未运行浏览器，未改 OpenCode，未提交或推送。
+5. [x] 用户后续明确要求补齐 Claude、Pi。已将各自 `page_verification.py`、`visual_review.py` 补齐到仓库版本，旧文件备份后缀 `.before-agentrelay-sync-20261126-154610`。Codex、Claude、Pi 三份辅助脚本均逐字一致；共享 tracker 一致；说明性文本不误判视觉声明，真实截图检查声明仍识别；只读完成预检 `ok=true`。未改 Magpie、`/agent-image` 或 OpenCode。
+
+拟执行命令：测试写入使用项目 `Edit`（写文件）；`python -m pytest ...`、`python -m compileall ...`、`git diff --check` 为项目验证，不修改系统；真实设置合并与安装同步仅在第 4 步获得明确批准后执行。
+
+---
+
+# PLAN — Adaptive Voice 独立仓库发布（2026-11-26）
+
+> 用户明确要求推送发布 Adaptive Voice。目标仅为现有 `Geek-Dream/adaptive-voice` 独立仓库；不操作浏览器，不改 OpenCode。
+
+1. [x] 已核对本地未提交草稿、远端 SSH 权限及完整内置版本；旧草稿备份至 `/tmp/adaptive-voice-draft.hU6Mey`，保留 `.git` 与 `.gitignore`。
+2. [x] 已同步已验证的公开 Skill、独立脚本、命令、空画像模板和 MIT 许可证。
+3. [x] 隔离 CLI 设置并回读 `eli5`，仅生成独立 JSON，未生成 AgentRelay 配置；两份完整版本 `diff -ru` 无差异，`git diff --check` exit 0，未发现本机私有路径或凭据格式。缓存文件未纳入发布。
+4. [x] 已提交 `676fc06 feat: publish standalone adaptive voice skill`，通过 SSH 推送 `origin/main`，返回 `024cf09..676fc06 main -> main`。未创建 Release tag 或 Release 附件。
+
+---
+
 # PLAN — 自动化申请去重与帮助命令误判（2026-11-26）
 
 > 用户已批准修复文本申请重复问题。只修改 Hook、浏览器交互策略及对应测试；不启动浏览器，不执行页面操作，不改 OpenCode。

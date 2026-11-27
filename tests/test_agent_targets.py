@@ -39,6 +39,22 @@ except ImportError:
 
 
 class AgentTargetRegistryTests(unittest.TestCase):
+    def test_slash_command_descriptions_are_plain_chinese(self):
+        descriptions = {
+            "agent-approval": "设置哪些操作需要你先确认",
+            "agent-audit": "查看当前任务还缺哪些验收",
+            "agent-fusion": "让助手分担耗时调查、批量阅读或独立实现",
+            "adaptive-voice": "切换 Agent 的说话风格",
+        }
+        for name, description in descriptions.items():
+            with self.subTest(name=name):
+                self.assertEqual(targets.SLASH_COMMAND_DESCRIPTIONS[name], description)
+        with tempfile.TemporaryDirectory() as directory:
+            target = {"command_dir": str(Path(directory) / "commands")}
+            skill_dir = Path(directory) / "skill"
+            targets.install_slash_commands(target, skill_dir)
+            text = (skill_dir / "commands/agent-fusion.md").read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("---\ndescription: 让助手分担耗时调查、批量阅读或独立实现\n---\n"))
     def test_registry_covers_requested_agents(self):
         registry = targets.agent_targets()
         for expected in ("codex", "claude", "pi", "opencode", "hermes", "kimi"):
@@ -196,6 +212,55 @@ class ClaudeRegistrationTests(unittest.TestCase):
         config = json.loads(self.settings.read_text(encoding="utf-8"))
         hook = targets.find_agent_relay_hook(config["hooks"]["Stop"])
         self.assertEqual(hook["command"], "new-command agent_relay_hook.py")
+
+    def test_merge_removes_duplicate_agent_relay_hooks_and_preserves_others(self):
+        venv = self.tmp / "venv/bin/python"
+        shim = self.tmp / "agentrelay_hook_shim.py"
+        command = targets.shim_command(venv, shim, "claude")
+        unrelated_entry = {
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": "/orca/hook.sh", "timeout": 30}],
+        }
+        self.settings.write_text(json.dumps({
+            "model": "keep-me",
+            "hooks": {
+                event: [
+                    {"hooks": [{"type": "command", "command": command}]},
+                    {"hooks": [{"type": "command", "command": "python /codex/hooks/agent_relay_hook.py"}]},
+                    {"hooks": [
+                        {"type": "command", "command": f"python {shim} --target claude"},
+                        {"type": "command", "command": "/orca/sibling.sh"},
+                    ]},
+                    unrelated_entry,
+                ]
+                for event in targets.CLAUDE_EVENTS
+            },
+        }), encoding="utf-8")
+
+        meta = {"config_path": self.settings, "level": "full"}
+        ok, detail = targets.registered_in_config("claude", meta, venv, shim)
+        self.assertFalse(ok)
+        self.assertIn("重复", detail)
+        self.assertTrue(targets.register_claude(self.settings, command))
+        config = json.loads(self.settings.read_text(encoding="utf-8"))
+        self.assertEqual(config["model"], "keep-me")
+        for event in targets.CLAUDE_EVENTS:
+            entries = config["hooks"][event]
+            owned = [
+                hook for entry in entries for hook in entry["hooks"]
+                if "agent_relay_hook" in hook["command"]
+                or "agentrelay_hook_shim" in hook["command"]
+            ]
+            self.assertEqual(len(owned), 1, event)
+            self.assertEqual(owned[0]["command"], command)
+            self.assertIn("/orca/sibling.sh", [
+                hook["command"] for entry in entries for hook in entry["hooks"]
+            ])
+            self.assertIn(unrelated_entry, entries)
+            self.assertEqual(entries[-1], unrelated_entry)
+        self.assertFalse(targets.register_claude(self.settings, command))
+        ok, detail = targets.registered_in_config("claude", meta, venv, shim)
+        self.assertTrue(ok, detail)
 
     def test_merge_rejects_invalid_json(self):
         self.settings.write_text("{not json", encoding="utf-8")
